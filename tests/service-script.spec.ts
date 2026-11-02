@@ -84,6 +84,11 @@ it('takes no `dsh plugin` command of the profile for its service', async () => {
     `${service} node node /opt/my tools/dsh --profile superagent --no-open`)
   expect(await status('superagent')).toMatchObject({ pids: [service] })
 })
+it('recognizes the desktop application as the service process', async () => {
+  const pid = sleeper()
+  processes(`${pid} /Applications/De /Applications/DeepSeek Harness.app/Contents/Resources/app.asar/dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js --profile superagent --no-open`)
+  expect(await status('superagent')).toMatchObject({ pids: [pid] })
+})
 it('records the service PID at start, and still refuses a second instance the scan finds', async () => {
   const url = await answering()
   const pid = sleeper()

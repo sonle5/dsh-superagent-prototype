@@ -130,6 +130,32 @@ Each profile stores logs and control files under `.artifacts/`:
 
 Open the URL printed in the log, then choose **Superagent** in the sidebar.
 
+### Native fleet
+
+The profile that hosts the native Desktop control plane may aggregate other repository-bound deployments. Its `Superagent` panel always includes the embedded deployment and reads additional deployments from `<stateDir>/fleet.json`. Each entry remains one repository, one DSH profile, one state directory and one execution environment:
+
+```json
+{
+  "version": 1,
+  "controlScript": "/absolute/path/to/dsh-superagent/scripts/dsh-superagent",
+  "logDir": "/absolute/path/to/dsh-superagent/.artifacts",
+  "deployments": [
+    {
+      "id": "sglang",
+      "profile": "superagent-sglang",
+      "repository": "onenexus-team/sglang",
+      "url": "http://127.0.0.1:3083",
+      "stateDir": "/Users/me/.dsh/state/superagent-sglang",
+      "workspace": "/Users/me/src/sglang-superagent"
+    }
+  ]
+}
+```
+
+The registry is local machine configuration. The panel does not accept a command, repository URL or executable from the browser: lifecycle actions run only the configured control script with a registered profile and loopback URL. Start and stop remain explicit per deployment, and an intentional stop stays stopped. Create and install each DSH profile with the normal deployment procedure before registering it here; the fleet layer does not clone repositories or copy credentials between profiles.
+
+The card title is the repository's exact `owner/name`; the Desktop origin or DSH profile is shown separately as deployment metadata.
+
 ### Hourly check
 
 Create the hourly check in the DeepSeek Harness profile you normally use, not in `superagent`. It must keep running when the agent service is down. Ask an agent in that profile to create an hourly schedule using this prompt, with the checkout path filled in:

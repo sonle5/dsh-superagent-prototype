@@ -8,7 +8,7 @@ import type { ConfigForm, ConfigFormSnapshot } from '@deepseek-ai/dsh-client-ui-
 import type { Api, ApiResponse, RouteParams } from '../../src/app/api.ts'
 import { SKILL_NAME, SKILL_PREFIX, TEAM_SECTIONS, builtInBase, builtInPart, builtInParts, composePrompt, composeSkill, defaultPrompts,
   environmentSection, policySection, promptParts } from '../../src/app/prompts.ts'
-import type { DroppedReply, HistoryView, Problem, PromptsView, SetupView, SourceStatusRow, SourceView, StateView, ThreadPageView,
+import type { DroppedReply, FleetView, HistoryView, Problem, PromptsView, SetupView, SourceStatusRow, SourceView, StateView, ThreadPageView,
   ThreadRow, TicketPageView,
   TicketRow, TicketStage,
   TriggerRow } from '../../src/client/api.ts'
@@ -108,6 +108,7 @@ export interface PanelServer {
   opened: string[]
   dropped: DroppedReply[]
   failing: Extract<Problem, { kind: 'outgoing' }>['outgoing'][]
+  fleet: FleetView
 }
 export let server: PanelServer
 
@@ -248,6 +249,27 @@ function initial(): PanelServer {
   const defaults = { revision: 0, previousRevision: null, savedAt: '', source: 'defaults' }
   return {
     health: {}, down: false, pending: 0, opened: [], requests: [], misuse: [], queued: new Set(), dropped: [], failing: [],
+    fleet: {
+      configured: true, registryPath: '/srv/dsh-superagent/fleet.json', updatedAt: '2026-11-02T00:00:00Z',
+      deployments: [{
+        id: 'desktop', name: 'acme/widgets', repository: 'acme/widgets', profile: 'desktop',
+        url: 'http://127.0.0.1:3082', stateDir: '/srv/dsh-superagent', workspace: '/srv/dsh-superagent', origin: 'desktop',
+        status: 'ready', detail: 'Ready', health: [{ name: 'runtime', state: 'ready', detail: 'Orchestrator is ready' }],
+        load: { running: 2, queued: 0, maxWorkers: 3 },
+        tickets: { open: 1, pending: 0, working: 1, idle: 0, recent: [{ id: 't1', title: '修复回归', stage: 'working',
+          updatedAt: '2026-09-23T00:00:00Z' }] },
+        triggers: { pending: 0, evaluating: 0, recent: [{ key: 'feishu:oc_1:om_root', title: '这个文案好奇怪', source: 'feishu',
+          lastAt: '2026-09-23T00:00:00Z', pending: 0, evaluating: false }] },
+        canControl: false,
+      }, {
+        id: 'sglang', name: 'onenexus-team/sglang', repository: 'onenexus-team/sglang', profile: 'superagent-sglang',
+        url: 'http://127.0.0.1:3083', stateDir: '/Users/alice/.dsh/state/superagent-sglang',
+        workspace: '/Users/alice/src/sglang-superagent', origin: 'managed', status: 'stopped', detail: 'Stopped intentionally', health: [],
+        load: { running: 0, queued: 0, maxWorkers: 0 },
+        tickets: { open: 0, pending: 0, working: 0, idle: 0, recent: [] },
+        triggers: { pending: 0, evaluating: 0, recent: [] }, canControl: true,
+      }],
+    },
     setup: { machine: MACHINE, problem: null, feishuProblem: null,
       accounts: { repository: 'acme/widgets', agent: 'agent-bot', feishu: { appId: 'cli_bot', brand: 'feishu', botId: 'ou_bot',
         name: 'Widgets Bot' } } },
@@ -291,6 +313,25 @@ const ticketOf = (id: string) =>
 const SourceSave = z.object({ enabled: z.boolean(), config: z.unknown() })
 
 const ROUTES: { [K in keyof Api]: Route<K> } = {
+  'GET fleet': { answer: () => server.fleet },
+  'POST fleet/:id/start': { answer: ({ params }) => {
+    const item = server.fleet.deployments.find(deployment => deployment.id === params.id)
+    if (!item) return refuse(404, `Deployment not found: ${params.id}`)
+    item.status = 'starting'; item.detail = 'Starting'
+    return { id: params.id, action: 'start', code: 0, output: 'Started' }
+  } },
+  'POST fleet/:id/stop': { answer: ({ params }) => {
+    const item = server.fleet.deployments.find(deployment => deployment.id === params.id)
+    if (!item) return refuse(404, `Deployment not found: ${params.id}`)
+    item.status = 'stopped'; item.detail = 'Stopped intentionally'
+    return { id: params.id, action: 'stop', code: 0, output: 'Stopped' }
+  } },
+  'POST fleet/:id/restart': { answer: ({ params }) => {
+    const item = server.fleet.deployments.find(deployment => deployment.id === params.id)
+    if (!item) return refuse(404, `Deployment not found: ${params.id}`)
+    item.status = 'starting'; item.detail = 'Starting'
+    return { id: params.id, action: 'restart', code: 0, output: 'Restarted' }
+  } },
   'GET state': { answer: stateView },
   'GET overview': { answer: overviewView },
   'GET search': { query: ['q'], answer: async ({ query }) => {

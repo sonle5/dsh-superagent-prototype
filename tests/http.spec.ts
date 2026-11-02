@@ -6,6 +6,7 @@ import { SettingsConflict } from '../src/app/settings.ts'
 import type { HttpHost } from '../src/app/http.ts'
 import { SettingsSchema } from '../src/policy.ts'
 import { SetupError } from '../src/setup.ts'
+import { tmpdir } from 'node:os'
 
 type Handler = (req: unknown, res: unknown) => Promise<void>
 type Headers = Record<string, string | undefined>
@@ -13,7 +14,8 @@ type Headers = Record<string, string | undefined>
 function serve(runtime: Partial<Record<keyof HttpHost, unknown>>, host = '127.0.0.1') {
   let handler: Handler = async () => {}
   const ctx = { webServer: { host, port: 3082, register: (route: { handler: Handler }) => { handler = route.handler; return () => {} } } }
-  registerHttp(ctx as never, { ready: Promise.resolve(), ...runtime } as unknown as HttpHost)
+  const machine = runtime.machine as Partial<HttpHost['machine']> | undefined
+  registerHttp(ctx as never, { ready: Promise.resolve(), ...runtime, machine: { stateDir: tmpdir(), ...machine } } as unknown as HttpHost)
   return async (method: string, path: string, body?: unknown, headers: Headers = {}) => {
     let status = 0, text = ''
     const chunks = body === undefined ? [] : [Buffer.from(typeof body === 'string' ? body : JSON.stringify(body))]

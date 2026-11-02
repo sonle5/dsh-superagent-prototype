@@ -27,6 +27,7 @@ import { settingsView } from './views/settings.ts'
 import { sourcesStatus, type SetupState } from './views/sources.ts'
 import { decisionList, search, threadDetail, threadList } from './views/threads.ts'
 import { executorLoad, ticketDetail, ticketList } from './views/tickets.ts'
+import { Fleet, FleetControlError, type FleetAction } from './fleet.ts'
 
 export interface HttpHost {
   readonly store: Store
@@ -55,10 +56,10 @@ export interface HttpHost {
   models(): Promise<ModelCatalog>
 }
 /**
- * Represents a client-facing 400 or 404 error raised during management route parsing or lookup.
+ * Represents a client-facing 400, 404 or 409 error raised during management route parsing, lookup or contention.
  * Route handlers throw it when request bodies are malformed or target records are missing, and registerHttp serializes its status and message in the HTTP response.
  */
-class RouteError extends Error { constructor(readonly status: 400 | 404, message: string) { super(message) } }
+class RouteError extends Error { constructor(readonly status: 400 | 404 | 409, message: string) { super(message) } }
 async function readBody(req: IncomingMessage, maxBytes = 128 * 1024): Promise<unknown> {
   let size = 0; const chunks: Buffer[] = []
   for await (const chunk of req) {
@@ -148,11 +149,22 @@ const SourceBlock = z.templateLiteral(['source:', z.string().regex(/^[a-z][a-z0-
 const SettingsBlockSchema = z.union([z.enum(['policy', 'eval', 'executor']), SourceBlock])
 const SaveRequest = z.object({ value: z.unknown(), revision: z.number().int().nonnegative() })
 
-function routes(runtime: HttpHost): Routes {
+function routes(runtime: HttpHost, fleet: Fleet): Routes {
   const { store } = runtime
   const ticket = (id: string) => { if (!store.tickets.get(id)) throw new RouteError(404, 'Ticket not found'); return id }
   const promptBody = (input: { body: (maxBytes?: number) => Promise<unknown> }) => input.body(4 * runtime.machine.promptMaxChars.get() + 4096)
+  const control = async <A extends FleetAction>(id: string, action: A): Promise<{ id: string; action: A; code: number; output: string }> => {
+    try { return { ...await fleet.control(id, action), action } }
+    catch (error) {
+      if (error instanceof FleetControlError) throw new RouteError(error.status, error.message)
+      throw error
+    }
+  }
   return {
+    'GET fleet': () => fleet.view(),
+    'POST fleet/:id/start': ({ params }) => control(params.id, 'start'),
+    'POST fleet/:id/stop': ({ params }) => control(params.id, 'stop'),
+    'POST fleet/:id/restart': ({ params }) => control(params.id, 'restart'),
     'GET state': () => stateView(runtime),
     'GET overview': () => overview(views(runtime), runtime.health, policyVersion(store.settings()),
       executorLoad(store, runtime.executor.activeCount()), runtime.setupProblem ?? runtime.feishuProblem),
@@ -229,7 +241,8 @@ function match(table: Routes, method: string, segments: string[]) {
 }
 export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
   if (ctx.webServer.host !== '127.0.0.1') throw new Error('Orchestrator management requires a loopback Web server')
-  const table = routes(runtime)
+  const fleet = new Fleet(runtime.machine.stateDir, `http://127.0.0.1:${ctx.webServer.port}`)
+  const table = routes(runtime, fleet)
   const disposers = [
     ctx.webServer.register({ kind: 'prefix', path: '/orchestrator', handler: async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://localhost')
