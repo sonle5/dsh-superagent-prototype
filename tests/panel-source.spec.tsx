@@ -7,6 +7,7 @@ import { usePanel, mount, remount, settle, all, find, tab, click, type, text, fi
 import { server, problemOf, droppedReply } from './fixtures/panel-server.ts'
 
 usePanel()
+const remote = (path: string) => `deployment/inference-support-loop/${path}`
 it('shows each Source\'s state on the Source status and opens its settings from a setup problem', async () => {
   await mount()
   await click(zh['tab.source'])
@@ -44,7 +45,7 @@ it('rereads the chats the bot has joined on request and says which are new, keep
   await click([...feishu().querySelectorAll('button')].find(item => item.textContent === '添加')!)
   server.joining = { oc_new: '新群' }
   await click(button())
-  expect(server.requests.find(request => request.path === 'sources/feishu/labels')).toMatchObject({ method: 'POST' })
+  expect(server.requests.find(request => request.path === remote('sources/feishu/labels'))).toMatchObject({ method: 'POST' })
   expect(document.querySelector('.dt-toast')?.textContent).toBe('列表已更新，新增：新群')
   // The row being added stays, and now offers the new chat.
   const pick = feishu().querySelectorAll('.dt-rows-item')[1]!.querySelector<HTMLSelectElement>('select[aria-label="选择机器人已加入的群"]')!
@@ -78,7 +79,7 @@ it('renders each Source\'s settings from its kind\'s fields and saves one Source
   await type(rows[1]!.querySelector('select[aria-label="接收"]')!, 'all')
   await click('接收私聊')
   await act(async () => { feishu.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })) }); await settle()
-  expect(server.requests.find(request => request.path === 'settings/source:feishu')).toMatchObject({ method: 'PUT', body: { revision: 0,
+  expect(server.requests.find(request => request.path === remote('settings/source:feishu'))).toMatchObject({ method: 'PUT', body: { revision: 0,
     value: { enabled: true, config: { chats: [{ chatId: 'oc_team', listen: 'mentions' }, { chatId: 'oc_other', listen: 'all' }],
       directMessages: false } } } })
   expect(server.settings.sources.feishu!.config).toMatchObject({ directMessages: false })
@@ -142,7 +143,7 @@ it('points a setup problem at the settings that fix it', async () => {
   expect(text()).toContain('部署检查未通过：没有设置智能体的 GitHub CLI。')
   // After a fix outside dsh-superagent, a check runs setup again.
   await click(zh.setupCheck)
-  expect(server.requests.filter(request => request.path === 'setup/check')).toEqual([{ path: 'setup/check', method: 'POST' }])
+  expect(server.requests.filter(request => request.path === remote('setup/check'))).toEqual([{ path: remote('setup/check'), method: 'POST' }])
   expect(text()).toContain(zh.setupChecking)
   server.setup = { ...server.setup, problem: problemOf('gitTooOld') }
   await remount()
@@ -164,9 +165,9 @@ it('shows a failed Feishu bot check as a problem of the Feishu Source only, with
   // dsh-superagent runs meanwhile, so checking again asks first: the restart interrupts running Executor Sessions.
   await click([...feishu.querySelectorAll('button')].find(button => button.textContent === '重新检查')!)
   expect(document.querySelector('[role="dialog"]')?.textContent).toContain('重新检查会重启 dsh-superagent：2 个进行中的派工会中断')
-  expect(server.requests.some(request => request.path === 'setup/check')).toBe(false)
+  expect(server.requests.some(request => request.path === remote('setup/check'))).toBe(false)
   await click(zh.confirm)
-  expect(server.requests.some(request => request.path === 'setup/check')).toBe(true)
+  expect(server.requests.some(request => request.path === remote('setup/check'))).toBe(true)
   await click(tab(zh['tab.source']))
   // The Source's state carries the problem once, not again as its health.
   expect(all('.dt-form > .dt-list > .dt-row')[0]!.textContent?.match(/cli_bot 的机器人身份状态是 missing/g)).toHaveLength(1)
@@ -227,8 +228,8 @@ it('shows a setup problem on its Source card within one read of the settings, wh
   server.setup = { ...server.setup, problem: problemOf('agentCliUnset') }
   // The settings are read every five seconds, as the state is; the Source settings do not read the Source status.
   await act(async () => { await vi.advanceTimersByTimeAsync(5000) }); await settle()
-  expect(server.requests.filter(request => request.path === 'settings')).toHaveLength(2)
-  expect(server.requests.some(request => request.path === 'sources')).toBe(false)
+  expect(server.requests.filter(request => request.path === remote('settings'))).toHaveLength(2)
+  expect(server.requests.some(request => request.path === remote('sources'))).toBe(false)
   expect(card().textContent).toContain(zh['setup.agentCliUnset'])
 })
 
@@ -255,7 +256,7 @@ it('lists the messages a Source did not send in the last day under it, newest fi
   await click(disclosure(document.body))
   // A Feishu Channel names its chat; the link opens the Thread of the message it answers, which the host found.
   await click(find(zh['term.thread'], '.dt-disclosure-body button'))
-  expect(server.requests.some(request => request.path.startsWith('threads/feishu:oc_1:om_root'))).toBe(true)
+  expect(server.requests.some(request => request.path.startsWith(remote('threads/feishu:oc_1:om_root')))).toBe(true)
   expect(text()).not.toContain(zh.threadNotFound)
 })
 
@@ -278,9 +279,9 @@ it('reads the settings again as soon as dsh-superagent answers after a save rest
   server.down = true
   await act(async () => { await vi.advanceTimersByTimeAsync(1000) }); await settle()
   server.down = false
-  const reads = server.requests.filter(request => request.path === 'settings').length
+  const reads = server.requests.filter(request => request.path === remote('settings')).length
   await act(async () => { await vi.advanceTimersByTimeAsync(1000) }); await settle()
-  expect(server.requests.filter(request => request.path === 'settings').length).toBeGreaterThan(reads)
+  expect(server.requests.filter(request => request.path === remote('settings')).length).toBeGreaterThan(reads)
   expect(field('智能体的 GitHub CLI').matches(':disabled')).toBe(false)
   expect(field<HTMLInputElement>('智能体的 GitHub CLI').value).toBe('/opt/bin/gh-agent')
 })

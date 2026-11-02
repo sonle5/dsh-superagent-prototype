@@ -1,0 +1,14 @@
+# Controller profile override ($DSH_HOME/profiles/<controller>/cordis.patch.yml).
+# The controller owns no repository runtime, Source, Session preset or repository state.
+- id: dsh-superagent
+  config:
+    mode: control
+    stateDir: <absolute controller state directory, for example /home/me/.dsh/state/superagent-control>
+- id: dsh-superagent-github
+  disabled: true
+- id: dsh-superagent-feishu
+  disabled: true
+- id: dsh-superagent-worker-preset
+  disabled: true
+- id: dsh-superagent-router-preset
+  disabled: true

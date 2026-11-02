@@ -7,7 +7,7 @@ import { usePanel } from './provider.tsx'
 import { settingsRoute } from './route.ts'
 import { Earlier, ThreadLine, automatedRuns } from './rows.tsx'
 import { actorName, localized, readableMarkers, reasonLabel, valueLabel, when } from './text.ts'
-import { ActionLink, ConfirmButton, ExternalLink, Hint, KeyValues, LabelValue, LoadState, MarkdownLite, PageHead, Section, SessionButton,
+import { ActionLink, ConfirmButton, ExternalLink, Hint, KeyValues, LabelValue, LoadState, MarkdownLite, PageHead, Section,
   StageMark, When } from './widgets.tsx'
 
 type Input = TicketPageView['inputs'][number]
@@ -61,8 +61,6 @@ function Assignments({ ticket }: { ticket: TicketPageView }) {
         {item.endedReason && <span>{reasonLabel(t, item.endedReason)}</span>}
       </div>
     </div>
-    {item.ref && item.ref !== ticket.sessionId && <div className="dt-row-actions"><SessionButton variant="outline"
-      sessionId={item.ref} /></div>}
   </li>)}</ul>
 }
 function MandateDetails({ ticket, actor }: { ticket: TicketPageView; actor: string }) {
@@ -131,7 +129,6 @@ export function TicketPage({ id }: { id: string }) {
       {data.actions.retry && <ConfirmButton variant="outline" icon="refresh" label={t('retry')} title={t('retryTitle')}
         message={t('retryConfirm', { title: data.title })}
         onConfirm={() => after(call('POST tickets/:id/retry', { id }))} />}
-      {data.sessionId && <SessionButton variant="outline" sessionId={data.sessionId} />}
     </PageHead>
     {error && <LoadState error={error} loading={false} />}
     <div className="dt-row-meta dt-status-line">

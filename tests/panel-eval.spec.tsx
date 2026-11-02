@@ -7,21 +7,22 @@ import { usePanel, mount, remount, settle, all, find, tab, click, type, text, fi
 import { server } from './fixtures/panel-server.ts'
 
 usePanel()
+const remote = (path: string) => `deployment/inference-support-loop/${path}`
 it('opens the Decisions under Policy from the flow line with their reasons, Decisions that start work first, filterable by kind',
   async () => {
   await mount()
   await click(all('.dt-stat button')[1]!)
   expect(tab(zh['tab.eval']).getAttribute('aria-selected')).toBe('true')
-  expect(server.requests.some(request => request.path === 'decisions?limit=30&kind=accept,reopen&window=24h')).toBe(true)
+  expect(server.requests.some(request => request.path === remote('decisions?limit=30&kind=accept,reopen&window=24h'))).toBe(true)
   expect(text()).toContain(zh['reason.explicitRouted'])
   await click(zh.stop)
-  expect(server.requests.some(request => request.path === 'decisions?limit=30&kind=stop&window=24h')).toBe(true)
+  expect(server.requests.some(request => request.path === remote('decisions?limit=30&kind=stop&window=24h'))).toBe(true)
   expect(text()).toContain('@bot 修一下')
   await click(zh['decision.ignore'])
-  expect(server.requests.some(request => request.path === 'decisions?limit=30&kind=ignore&window=24h')).toBe(true)
+  expect(server.requests.some(request => request.path === remote('decisions?limit=30&kind=ignore&window=24h'))).toBe(true)
   expect(text()).toContain(zh.none)
   await click(zh.lastDayOnly)
-  expect(server.requests.some(request => request.path === 'decisions?limit=30&kind=ignore')).toBe(true)
+  expect(server.requests.some(request => request.path === remote('decisions?limit=30&kind=ignore'))).toBe(true)
 })
 
 it('keeps a Policy draft across remounts, and merges another save into it sender by sender and rule by rule', async () => {
@@ -84,18 +85,36 @@ it('opens the rule list for an invalid field inside it only', async () => {
   expect(openRows()).toBe(all('.dt-rule').length)
 })
 
+it('shows whether the role model is inherited or overridden, and restores the deployment default', async () => {
+  server.settings = { ...server.settings, eval: { ...server.settings.eval,
+    model: { provider: 'one-nexus', model: 'glm-5.3-sontinh', reasoningEffort: 'max' } } }
+  await mount()
+  await click(tab(zh['tab.settings']))
+  await click(find(zh['term.eval'], '.dt-settings-link'))
+  const model = () => document.querySelector<HTMLElement>('.dt-model')!
+  expect(model().getAttribute('data-state')).toBe('custom')
+  expect(model().textContent).toContain(zh.modelOverride)
+  expect(field<HTMLInputElement>(zh.modelProvider).value).toBe('one-nexus')
+  await click(find(zh.modelUseDefault, 'button'))
+  expect(model().getAttribute('data-state')).toBe('default')
+  expect(model().textContent).toContain(zh.modelInherited)
+  expect(field<HTMLInputElement>(zh.modelProvider).value).toBe('')
+  await click(zh.save)
+  expect(server.requests.find(request => request.path === remote('settings/eval'))?.body).toMatchObject({ value: { model: null } })
+})
+
 it('syncs a Source\'s list from where the Source keeps it, but not while a Policy draft is unsaved', async () => {
   await mount()
   await click(zh['tab.eval'])
   await click(find(zh['tab.settings'], '.dt-status-head button'))
   expect([...all('.dt-part select')[0]!.querySelectorAll('option')].map(option => option.textContent)).toEqual(['不同步', '另一个群', '团队群'])
   await click(find('立即同步', '.dt-part button'))
-  expect(server.requests.some(request => request.path === 'policy-sync/feishu' && request.method === 'POST')).toBe(true)
+  expect(server.requests.some(request => request.path === remote('policy-sync/feishu') && request.method === 'POST')).toBe(true)
   await type(all('.dt-part select')[0] as HTMLSelectElement, 'oc_other')
   const before = server.requests.length
   await click(find('立即同步', '.dt-part button'))
   expect(document.querySelector('.dt-toast')?.textContent).toBe(zh.syncNeedsSave)
-  expect(server.requests.slice(before).some(request => request.path.startsWith('policy-sync'))).toBe(false)
+  expect(server.requests.slice(before).some(request => request.path.startsWith(remote('policy-sync')))).toBe(false)
 })
 
 it('adds, copies, renames, disables and deletes rules in Policy without touching Eval', async () => {
@@ -112,7 +131,7 @@ it('adds, copies, renames, disables and deletes rules in Policy without touching
   await click(removeButtons.at(-1)!)
   await click(zh.save)
   expect(server.settings.policy.rules.map(rule => [rule.name, rule.enabled])).toEqual([['文案修改', false], ['文档', true]])
-  expect(server.requests.filter(request => request.method === 'PUT').map(request => request.path)).toEqual(['settings/policy'])
+  expect(server.requests.filter(request => request.method === 'PUT').map(request => request.path)).toEqual([remote('settings/policy')])
 })
 
 it('shows the current Policy version once, explains what makes it up, and opens a Mandate\'s version in the Policy history', async () => {

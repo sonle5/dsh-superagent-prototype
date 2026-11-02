@@ -2,19 +2,20 @@
 import { expect, it } from 'vitest'
 import { en, zh } from '../src/client/locales.ts'
 import { all, click, field, find, mount, remount, tab, text, type, usePanel } from './fixtures/panel.tsx'
-import { fakeForm, server } from './fixtures/panel-server.ts'
+import { server } from './fixtures/panel-server.ts'
 
 usePanel()
 
-it('shows every deployment in the native fleet page and controls only registered managed profiles', async () => {
+it('shows every peer deployment with equal lifecycle and management controls', async () => {
   await mount()
   await click(tab(zh['tab.fleet']))
   expect(tab(zh['tab.fleet']).getAttribute('aria-selected')).toBe('true')
   expect(all('.dt-fleet-card').map(card => card.getAttribute('data-status'))).toEqual(['ready', 'stopped'])
-  expect(text()).toContain('acme/widgets')
+  expect(text()).toContain('onenexus-team/inference-support-loop')
   expect(text()).toContain('onenexus-team/sglang')
   expect(text()).toContain('/Users/alice/src/sglang-superagent')
-  expect(all('.dt-fleet-card')[0]!.querySelectorAll('button')).toHaveLength(0)
+  expect([...all('.dt-fleet-card')[0]!.querySelectorAll('button')].map(button => button.textContent)).toEqual([zh.fleetStop,
+    zh.fleetRestart, zh.fleetManage])
   expect([...all('.dt-fleet-card')[1]!.querySelectorAll('button')].map(button => button.textContent)).toEqual([zh.fleetStart,
     zh.fleetManage])
 })
@@ -43,7 +44,8 @@ it('expands repository health, work, workspace and log details in place', async 
 it('renders the fleet in English', async () => {
   await mount(en)
   await click(tab(en['tab.fleet']))
-  expect(all('.dt-card-title').map(title => title.textContent)).toEqual(['acme/widgets', 'onenexus-team/sglang'])
+  expect(all('.dt-card-title').map(title => title.textContent)).toEqual(['onenexus-team/inference-support-loop',
+    'onenexus-team/sglang'])
   expect(all('.dt-tag').map(tag => tag.textContent)).toEqual(['Ready', 'Stopped'])
 })
 
@@ -51,7 +53,7 @@ it('switches every management view to the selected deployment and remembers the 
   await mount()
   const selector = field<HTMLSelectElement>(zh.deploymentContext)
   expect([...selector.options].map(option => [option.value, option.textContent])).toEqual([
-    ['desktop', 'acme/widgets'],
+    ['inference-support-loop', 'onenexus-team/inference-support-loop'],
     ['sglang', 'onenexus-team/sglang'],
   ])
 
@@ -66,6 +68,15 @@ it('switches every management view to the selected deployment and remembers the 
   expect(field<HTMLSelectElement>(zh.deploymentContext).value).toBe('sglang')
 })
 
+it('migrates a stale desktop selection to the first registered deployment without privileging a repository', async () => {
+  server.fleet.deployments.reverse()
+  sessionStorage.setItem('dsh-superagent/deployment', 'desktop')
+  await mount()
+  expect(field<HTMLSelectElement>(zh.deploymentContext).value).toBe('sglang')
+  expect(sessionStorage.getItem('dsh-superagent/deployment')).toBe('sglang')
+  expect(server.requests.some(request => request.path === 'deployment/sglang/state')).toBe(true)
+})
+
 it('opens the selected deployment from its Fleet card', async () => {
   await mount()
   await click(tab(zh['tab.fleet']))
@@ -75,8 +86,7 @@ it('opens the selected deployment from its Fleet card', async () => {
   expect(server.requests.some(request => request.path === 'deployment/sglang/state')).toBe(true)
 })
 
-it('keeps host-level machine limits read-only when a managed deployment is selected', async () => {
-  server.form = fakeForm().form
+it('keeps host-level machine limits read-only when a peer deployment is selected', async () => {
   await mount()
   await type(field<HTMLSelectElement>(zh.deploymentContext), 'sglang')
   await click(tab(zh['tab.settings']))

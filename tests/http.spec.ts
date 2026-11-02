@@ -1,6 +1,6 @@
 import { afterEach, expect, it } from 'vitest'
 import { z } from 'zod'
-import { registerHttp } from '../src/app/http.ts'
+import { registerControlHttp, registerHttp } from '../src/app/http.ts'
 import { PromptConflict } from '../src/app/prompts.ts'
 import { SettingsConflict } from '../src/app/settings.ts'
 import type { HttpHost } from '../src/app/http.ts'
@@ -22,6 +22,20 @@ function serve(runtime: Partial<Record<keyof HttpHost, unknown>>, host = '127.0.
   const ctx = { webServer: { host, port: 3082, register: (route: { handler: Handler }) => { handler = route.handler; return () => {} } } }
   const machine = runtime.machine as Partial<HttpHost['machine']> | undefined
   registerHttp(ctx as never, { ready: Promise.resolve(), ...runtime, machine: { stateDir: tmpdir(), ...machine } } as unknown as HttpHost)
+  return async (method: string, path: string, body?: unknown, headers: Headers = {}) => {
+    let status = 0, text = ''
+    const chunks = body === undefined ? [] : [Buffer.from(typeof body === 'string' ? body : JSON.stringify(body))]
+    const sent = Object.fromEntries(Object.entries({ host: '127.0.0.1:3082', 'x-orchestrator-request': '1', ...headers }).filter(([,
+      value]) => value !== undefined))
+    const req = { method, url: `/orchestrator/api/${path}`, headers: sent, async *[Symbol.asyncIterator]() { yield* chunks } }
+    await handler(req, { writeHead: (code: number) => { status = code }, end: (data: string) => { text = data } })
+    return { status, body: JSON.parse(text) as Record<string, unknown> }
+  }
+}
+function serveControl(stateDir: string, host = '127.0.0.1') {
+  let handler: Handler = async () => {}
+  const ctx = { webServer: { host, port: 3082, register: (route: { handler: Handler }) => { handler = route.handler; return () => {} } } }
+  registerControlHttp(ctx as never, stateDir)
   return async (method: string, path: string, body?: unknown, headers: Headers = {}) => {
     let status = 0, text = ''
     const chunks = body === undefined ? [] : [Buffer.from(typeof body === 'string' ? body : JSON.stringify(body))]
@@ -142,7 +156,7 @@ it('forwards management routes only to deployments registered in the local fleet
       workspace: join(state, 'workspace'),
     }],
   }))
-  const call = serve({ machine: { stateDir: state } })
+  const call = serveControl(state)
 
   expect(await call('GET', 'deployment/sglang/state')).toEqual({ status: 400, body: {
     error: 'Request failed with Authorization: Bearer [redacted] and api_key=[redacted]',
@@ -156,11 +170,21 @@ it('forwards management routes only to deployments registered in the local fleet
 
   expect(await call('GET', 'deployment/missing/state')).toEqual({ status: 404,
     body: { error: 'Deployment not found: missing' } })
-  expect(await call('GET', 'deployment/desktop/state')).toEqual({ status: 400,
-    body: { error: 'The embedded deployment is not proxied' } })
+  expect(await call('GET', 'deployment/desktop/state')).toEqual({ status: 404,
+    body: { error: 'Deployment not found: desktop' } })
   expect(await call('GET', 'deployment/sglang/fleet')).toEqual({ status: 404,
     body: { error: 'Unknown operation' } })
   expect(await call('GET', 'deployment/sglang/nothing/here')).toEqual({ status: 404,
     body: { error: 'Unknown operation' } })
   expect(seen).toHaveLength(2)
+})
+
+it('keeps the controller loopback-only and serves its registry without a local runtime', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'dsh-fleet-control-'))
+  cleanup.push(() => { rmSync(state, { recursive: true, force: true }) })
+  writeFileSync(join(state, 'fleet.json'), JSON.stringify({ version: 1, deployments: [] }))
+  const call = serveControl(state)
+  expect(await call('GET', 'fleet')).toMatchObject({ status: 200, body: { deployments: [] } })
+  expect(await call('GET', 'state')).toEqual({ status: 404, body: { error: 'Unknown operation' } })
+  expect(() => serveControl(state, '0.0.0.0')).toThrow('Fleet control requires a loopback Web server')
 })

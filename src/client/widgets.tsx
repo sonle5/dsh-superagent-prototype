@@ -5,7 +5,7 @@ import { Button, Icon, InfoTip, Modal, StateDot, type DotState, type IconName } 
 import { inlines, linkify, markdownBlocks, type Inline } from './markdown.ts'
 import { useAction, usePanel, usePanelData } from './provider.tsx'
 import { settingsRoute, type SettingsGroup } from './route.ts'
-import { errorText, fullTime, readableMarkers, setupText, when } from './text.ts'
+import { fullTime, readableMarkers, setupText, when } from './text.ts'
 
 const external = { target: '_blank', rel: 'noopener noreferrer' } as const
 
@@ -87,12 +87,6 @@ export function ConfirmButton({ label, title, message, onConfirm, variant = 'gho
           onClick={() => { void confirm.run().then(done => { if (done) setOpen(false) }) }}>{t('confirm')}</Button>
       </>} />
   </>
-}
-export function SessionButton({ sessionId, label,
-  variant = 'ghost' }: { sessionId: string; label?: string; variant?: 'ghost' | 'outline' }) {
-  const { t, openSession, notify } = usePanel()
-  return <Button variant={variant} size="sm" icon={<Icon name="session" size={14} />}
-    onClick={() => { openSession(sessionId).catch(error => notify(errorText(error))) }}>{label ?? t('openSession')}</Button>
 }
 export function ExternalLink({ href, children, icon = 'external' }: { href: string; children: ReactNode; icon?: IconName }) {
   return <a className="dt-inline-link dt-icon-link" href={href} {...external}><Icon name={icon} size={13} />{children}</a>

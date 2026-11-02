@@ -3,7 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { z } from 'zod'
-import { THREAD_FILTERS, TICKET_FILTERS, type Api, type ApiResponse, type RouteParams } from './api.ts'
+import { DEPLOYMENT_ROUTES, THREAD_FILTERS, TICKET_FILTERS, matchesRoute, type Api, type ApiResponse, type RouteParams } from './api.ts'
 import { sourceSkills } from './context.ts'
 import type { ModelCatalog } from '@deepseek-ai/dsh-api-session-controller/types'
 import { PromptConflict, SKILL_NAME, SKILL_PREFIX, TEAM_SECTIONS, builtInBase, builtInParts, defaultPrompts, savePrompts, type Prompts }
@@ -28,6 +28,7 @@ import { sourcesStatus, type SetupState } from './views/sources.ts'
 import { decisionList, search, threadDetail, threadList } from './views/threads.ts'
 import { executorLoad, ticketDetail, ticketList } from './views/tickets.ts'
 import { Fleet, FleetControlError, redactSensitive, type FleetAction } from './fleet.ts'
+import { LIMITS } from '../limits.ts'
 
 export interface HttpHost {
   readonly store: Store
@@ -142,6 +143,8 @@ interface Input<K extends keyof Api> {
   params: RouteParams<K>; query: Record<string, string>; body: (maxBytes?: number) => Promise<unknown>
 }
 type Routes = { [K in keyof Api]: (input: Input<K>) => ApiResponse<K> | Promise<ApiResponse<K>> }
+type ControllerRoutes = Pick<Routes, 'GET fleet' | 'POST fleet/:id/start' | 'POST fleet/:id/stop' | 'POST fleet/:id/restart'>
+type RouteTable = Partial<Routes>
 const offset = z.coerce.number().int().nonnegative().catch(0)
 const limit = (fallback: number, max: number) => z.coerce.number().int().positive().catch(fallback).transform(value => Math.min(max, value))
 const TicketsQuery = z.object({ state: z.enum(TICKET_FILTERS).catch('open'), offset, limit: limit(20, 1000) })
@@ -230,10 +233,25 @@ function routes(runtime: HttpHost, fleet: Fleet): Routes {
     'POST prompts/preview': async input => runtime.prompts.preview(await promptBody(input)),
   }
 }
+function controllerRoutes(fleet: Fleet): ControllerRoutes {
+  const control = async <A extends FleetAction>(id: string, action: A): Promise<{ id: string; action: A; code: number; output: string }> => {
+    try { return { ...await fleet.control(id, action), action } }
+    catch (error) {
+      if (error instanceof FleetControlError) throw new RouteError(error.status, error.message)
+      throw error
+    }
+  }
+  return {
+    'GET fleet': () => fleet.view(),
+    'POST fleet/:id/start': ({ params }) => control(params.id, 'start'),
+    'POST fleet/:id/stop': ({ params }) => control(params.id, 'stop'),
+    'POST fleet/:id/restart': ({ params }) => control(params.id, 'restart'),
+  }
+}
 function decoded(segment: string): string {
   try { return decodeURIComponent(segment) } catch { throw new RouteError(400, 'A path segment has a malformed escape') }
 }
-function match(table: Routes, method: string, segments: string[]) {
+function match(table: RouteTable, method: string, segments: string[]) {
   for (const [route, run] of Object.entries(table)) {
     const [verb, path] = route.split(' ') as [string, string]
     const pattern = path.split('/')
@@ -245,16 +263,16 @@ function match(table: Routes, method: string, segments: string[]) {
   }
   return undefined
 }
-export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
-  if (ctx.webServer.host !== '127.0.0.1') throw new Error('Orchestrator management requires a loopback Web server')
-  const fleet = new Fleet(runtime.machine.stateDir, `http://127.0.0.1:${ctx.webServer.port}`)
-  const table = routes(runtime, fleet)
+function registerManagement(ctx: Context, stateDir: string, runtime?: HttpHost): () => void {
+  const requiredHost = runtime ? 'Orchestrator management' : 'Fleet control'
+  if (ctx.webServer.host !== '127.0.0.1') throw new Error(`${requiredHost} requires a loopback Web server`)
+  const fleet = new Fleet(stateDir)
+  const table: RouteTable = runtime ? routes(runtime, fleet) : controllerRoutes(fleet)
   const deploymentPath = /^\/orchestrator\/api\/deployment\/([a-z0-9][a-z0-9-]*)\/(.+)$/
   const forward = async (req: IncomingMessage, url: URL, id: string, suffix: string) => {
     const method = req.method ?? 'GET'
-    const operation = match(table, method, suffix.split('/'))
-    // Fleet lifecycle belongs to the Desktop control plane. A managed deployment exposes only its own management API.
-    if (!operation || suffix === 'fleet' || suffix.startsWith('fleet/')) throw new RouteError(404, 'Unknown operation')
+    // Fleet lifecycle belongs to the control plane. A deployment exposes only its own management API.
+    if (!matchesRoute(DEPLOYMENT_ROUTES, method, suffix.split('/'))) throw new RouteError(404, 'Unknown operation')
     let target: ReturnType<Fleet['managementTarget']>
     try { target = fleet.managementTarget(id) }
     catch (error) {
@@ -262,7 +280,7 @@ export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
       throw error
     }
     const raw = method === 'GET' || method === 'HEAD' ? Buffer.alloc(0)
-      : await readBodyBytes(req, 4 * (runtime.machine.promptMaxChars?.get?.() ?? 100_000) + 4096)
+      : await readBodyBytes(req, 4 * LIMITS.promptMaxChars.max + 4096)
     const payload = raw.toString('utf8')
     const targetUrl = new URL(`/orchestrator/api/${suffix}`, target.url)
     targetUrl.search = url.search
@@ -288,7 +306,7 @@ export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
       if (!url.pathname.startsWith('/orchestrator/api/')) { res.writeHead(404); res.end(); return }
       if (!sameOrigin(req, ctx.webServer.port)) { json(res, 403, { error: 'Same-origin management request required' }); return }
       try {
-        await runtime.ready
+        await runtime?.ready
         const deployment = deploymentPath.exec(url.pathname)
         if (deployment) {
           const result = await forward(req, url, deployment[1]!, deployment[2]!)
@@ -302,4 +320,12 @@ export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
       } catch (error) { json(res, ...failure(error)) }
     } })]
   return () => { for (const dispose of disposers) dispose() }
+}
+/** Register only Fleet lifecycle and the fixed deployment-management proxy. No repository runtime is created. */
+export function registerControlHttp(ctx: Context, stateDir: string): () => void {
+  return registerManagement(ctx, stateDir)
+}
+/** Register the repository management API together with Fleet lifecycle and its fixed deployment-management proxy. */
+export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
+  return registerManagement(ctx, runtime.machine.stateDir, runtime)
 }

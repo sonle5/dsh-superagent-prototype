@@ -1,7 +1,7 @@
 /** Shared panel React contexts, state polling, restart detection, and action runner hook. */
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { caller, usePoll, type ApiMessages, type Call, type FleetView, type SetupView, type StateView } from './api.ts'
+import { caller, usePoll, type ApiMessages, type Call, type SetupView, type StateView } from './api.ts'
 import type { Route } from './route.ts'
 import STYLES from './client.css?raw'
 import { errorText, setupText, valueLabel, type T } from './text.ts'
@@ -9,13 +9,12 @@ import { errorText, setupText, valueLabel, type T } from './text.ts'
 export interface PanelContext {
   t: T
   call: Call
-  deployment: DeploymentChoice
+  deployment: DeploymentChoice | undefined
   deployments: DeploymentChoice[]
   selectDeployment: (id: string) => void
   navigate: (route: Route, replace?: boolean) => void
   back: () => void
   backLabel: string
-  openSession: (sessionId: string) => Promise<void>
   notify: (text: string) => void
   restart: () => void
 }
@@ -23,7 +22,6 @@ export interface DeploymentChoice {
   id: string
   name: string
   repository: string
-  origin: FleetView['deployments'][number]['origin']
 }
 export interface PanelData {
   state: StateView | undefined
@@ -79,14 +77,12 @@ function Toast({ text, onDone, holdMs = 3000 }: { text: string; onDone: () => vo
     document.body)
 }
 const stay = () => {}
-const noSession = async () => {}
 const DEPLOYMENT_KEY = 'dsh-superagent/deployment'
-const DESKTOP: DeploymentChoice = { id: 'desktop', name: 'Desktop', repository: '', origin: 'desktop' }
-function rememberedDeployment(): string {
-  try { return sessionStorage.getItem(DEPLOYMENT_KEY) || DESKTOP.id } catch { return DESKTOP.id }
+function rememberedDeployment(): string | undefined {
+  try { return sessionStorage.getItem(DEPLOYMENT_KEY) || undefined } catch { return undefined }
 }
-export function PanelProvider({ t, interval = 5000, openSession = noSession, navigate = stay, back = stay, backLabel = '', children }: {
-  t: T; interval?: number; openSession?: (sessionId: string) => Promise<void>; navigate?: PanelContext['navigate']; back?: () => void
+export function PanelProvider({ t, interval = 5000, navigate = stay, back = stay, backLabel = '', children }: {
+  t: T; interval?: number; navigate?: PanelContext['navigate']; back?: () => void
   backLabel?: string
   children: ReactNode
 }) {
@@ -96,27 +92,36 @@ export function PanelProvider({ t, interval = 5000, openSession = noSession, nav
   const localCall = useMemo(() => caller(() => messages(copy.current)), [])
   const [deploymentId, setDeploymentId] = useState(rememberedDeployment)
   const call = useMemo(() => caller(() => messages(copy.current), deploymentId), [deploymentId])
-  const { data: fleet } = usePoll(() => localCall('GET fleet'), [localCall], 30_000)
-  const deployments = useMemo(() => fleet?.deployments.map(({ id, name, repository, origin }) => ({
-    id, name, repository, origin,
-  })) ?? [DESKTOP], [fleet])
-  const deployment = deployments.find(item => item.id === deploymentId) ?? DESKTOP
+  const { data: fleet, error: fleetError } = usePoll(() => localCall('GET fleet'), [localCall], 30_000)
+  const deployments = useMemo(() => fleet?.deployments.map(({ id, name, repository }) => ({
+    id, name, repository,
+  })) ?? [], [fleet])
+  const deployment = deployments.find(item => item.id === deploymentId)
   const selectDeployment = useCallback((id: string) => {
     setDeploymentId(id)
     try { sessionStorage.setItem(DEPLOYMENT_KEY, id) } catch (failure) { void failure /* Selection memory is a convenience. */ }
   }, [])
   useEffect(() => {
-    if (fleet && !fleet.deployments.some(item => item.id === deploymentId)) selectDeployment(DESKTOP.id)
-  }, [deploymentId, fleet, selectDeployment])
+    if (!fleet || deployment) return
+    const next = deployments[0]
+    if (next) selectDeployment(next.id)
+    else if (deploymentId !== undefined) {
+      setDeploymentId(undefined)
+      try { sessionStorage.removeItem(DEPLOYMENT_KEY) } catch (failure) { void failure /* Selection memory is a convenience. */ }
+    }
+  }, [deployment, deploymentId, deployments, fleet, selectDeployment])
   const [toast, setToast] = useState<{ text: string; id: number }>()
   const notify = useCallback((text: string) => setToast({ text, id: Date.now() }), [])
   // Poll at 1s during a restart until the server goes down and answers again, or time out after 30s if the restart completed between polls.
   const [restarting, setRestarting] = useState<{ down: boolean }>()
   const [restarts, setRestarts] = useState(0)
   const restart = useCallback(() => setRestarting({ down: false }), [])
-  const { data: stateData, error, reload } = usePoll(async () => ({ deployment: deploymentId, value: await call('GET state') }),
-    [call, deploymentId], restarting ? 1000 : interval)
-  const state = stateData?.deployment === deploymentId ? stateData.value : undefined
+  const { data: stateData, error: stateError, reload } = usePoll(async () => deployment
+    ? { deployment: deployment.id, value: await call('GET state') }
+    : { deployment: undefined, value: undefined },
+  [call, deployment], restarting ? 1000 : interval)
+  const state = deployment && stateData?.deployment === deployment.id ? stateData.value : undefined
+  const error = stateError ?? (!deployment ? fleetError : undefined)
   if (restarting && !!error !== restarting.down) {
     setRestarting(error ? { down: true } : undefined)
     if (!error) setRestarts(restarts + 1)
@@ -126,8 +131,8 @@ export function PanelProvider({ t, interval = 5000, openSession = noSession, nav
     const timer = setTimeout(() => setRestarting(undefined), 30_000)
     return () => clearTimeout(timer)
   }, [restarting])
-  const context = useMemo(() => ({ t, call, deployment, deployments, selectDeployment, navigate, back, backLabel, openSession, notify,
-    restart }), [t, call, deployment, deployments, selectDeployment, navigate, back, backLabel, openSession, notify, restart])
+  const context = useMemo(() => ({ t, call, deployment, deployments, selectDeployment, navigate, back, backLabel, notify, restart }),
+    [t, call, deployment, deployments, selectDeployment, navigate, back, backLabel, notify, restart])
   const data = useMemo(() => ({ state, error, reload, setup: state?.setup, running: state?.load.running ?? 0, restarts }), [state, error,
     reload, restarts])
   return <Panel.Provider value={context}><PanelState.Provider value={data}>

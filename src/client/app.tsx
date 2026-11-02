@@ -2,7 +2,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import type { SearchView } from './api.ts'
 import { Button, Dot, Icon, Input, Modal, SegmentedTabs } from './controls.tsx'
-import type { DeploymentForm } from './deployment.tsx'
 import { EvalStatus } from './eval.tsx'
 import { ExecutionStatus } from './execution.tsx'
 import { FleetPage } from './fleet.tsx'
@@ -21,8 +20,7 @@ import { TriggerStatus } from './trigger.tsx'
 import { When } from './widgets.tsx'
 
 export interface AppProps {
-  t: T; openSession: (sessionId: string) => Promise<void>
-  deploymentForm: DeploymentForm
+  t: T
 }
 
 function Glossary({ open, onClose }: { open: boolean; onClose: () => void }) {
@@ -99,8 +97,8 @@ function SearchResults({ result, query, onClose }: { result: SearchView; query: 
   </div>
 }
 
-function Header({ masterId }: { masterId: string | undefined }) {
-  const { t, call, deployment, deployments, selectDeployment, openSession, notify } = usePanel()
+function Header() {
+  const { t, call, deployment, deployments, selectDeployment, notify } = usePanel()
   const [glossary, setGlossary] = useState(false)
   const [query, setQuery] = useState('')
   const [result, setResult] = useState<{ query: string; value: SearchView }>()
@@ -125,26 +123,25 @@ function Header({ masterId }: { masterId: string | undefined }) {
   return <header className="dt-head">
     <div className="dt-head-title"><h1 className="dt-title">{t('title')}</h1>
       <select className="dt-deployment-context" aria-label={t('deploymentContext')} title={t('activeDeployment')}
-        value={deployment.id} onChange={event => selectDeployment(event.target.value)}>
+        value={deployment?.id ?? ''} disabled={!deployments.length} onChange={event => selectDeployment(event.target.value)}>
+        {!deployment && <option value="">{t('deploymentNone')}</option>}
         {deployments.map(item => <option key={item.id} value={item.id}>{item.repository || item.name}</option>)}
       </select>
     </div>
     <div className="dt-toolbar">
-      <form ref={search} className="dt-search" role="search" onSubmit={submit} onKeyDown={event => { if (event.key === 'Escape') show() }}>
+      {deployment && <form ref={search} className="dt-search" role="search" onSubmit={submit} onKeyDown={event => { if (event.key === 'Escape') show() }}>
         <Input type="search" icon={<Icon name="search" />} value={query} placeholder={t('searchPlaceholder')} aria-label={t('searchLabel')}
           onChange={event => { setQuery(event.target.value); if (!event.target.value) show() }} />
         {result && <SearchResults result={result.value} query={result.query} onClose={() => { show() }} />}
-      </form>
+      </form>}
       <Button variant="ghost" size="sm" icon={<Icon name="question" />} aria-label={t('glossary')} title={t('glossary')} aria-haspopup="dialog"
         onClick={() => setGlossary(true)} />
-      {deployment.origin === 'desktop' && <Button variant="outline" size="sm" icon={<Icon name="session" size={14} />} disabled={!masterId}
-        onClick={() => { if (masterId) openSession(masterId).catch(failure => notify(errorText(failure))) }}>{t('openMaster')}</Button>}
     </div>
     <Glossary open={glossary} onClose={() => setGlossary(false)} />
   </header>
 }
 
-function Pages({ route, openTab, deploymentForm }: { route: Route; openTab: (tab: Tab) => void; deploymentForm: DeploymentForm }) {
+function Pages({ route, openTab }: { route: Route; openTab: (tab: Tab) => void }) {
   const { t, deployment } = usePanel()
   const { state, error, reload } = usePanelData()
   // Keep the active tab scrolled into view on narrow screens when routes change via links.
@@ -161,13 +158,12 @@ function Pages({ route, openTab, deploymentForm }: { route: Route; openTab: (tab
         paused={!!state?.paused} />
       case 'execution': return route.id !== undefined ? <TicketPage key={route.id} id={route.id} />
         : state ? <ExecutionStatus filter={route.query?.filter ?? 'open'} state={state} reload={reload} /> : waiting
-      case 'settings': return state ? <SettingsPage key={state.masterId} group={route.query.group} query={route.query} state={state}
-        deploymentForm={deploymentForm} /> : waiting
+      case 'settings': return state ? <SettingsPage key={state.masterId} group={route.query.group} query={route.query} state={state} /> : waiting
     }
   })()
   return <div className="dt-page">
     <div className="dt-column">
-      <Header key={deployment.id} masterId={state?.masterId} />
+      <Header key={deployment?.id ?? 'none'} />
       {error && state && <p className="dt-error" role="status">{error.message}</p>}
       <SegmentedTabs className="dt-tabs" label={t('pagesLabel')} value={route.page} onChange={openTab}
         items={TABS.map(value => ({ value, label: t(`tab.${value}`), id: `dt-tab-${value}`, panelId: 'dt-page' }))} />
@@ -177,7 +173,7 @@ function Pages({ route, openTab, deploymentForm }: { route: Route; openTab: (tab
 }
 
 /** Root panel component managing route history and shared panel state. */
-export function App({ t, openSession, deploymentForm }: AppProps) {
+export function App({ t }: AppProps) {
   const [location, setLocation] = useState(initialLocation)
   useEffect(() => { remember(location) }, [location])
   // Preserve the last opened settings group across navigation so the Settings tab reopens at it.
@@ -189,7 +185,7 @@ export function App({ t, openSession, deploymentForm }: AppProps) {
   const back = useCallback(() => move(current => ({ route: current.stack.at(-1) ?? HOME, stack: current.stack.slice(0, -1) })), [move])
   const openTab = useCallback((tab: Tab) => move(current => ({ stack: [], route: tab === 'settings'
     ? settingsRoute(lastSettingsGroup(current)) : { page: tab, id: undefined } })), [move])
-  return <PanelProvider t={t} openSession={openSession} navigate={navigate} back={back} backLabel={routeLabel(t, location.stack.at(-1) ?? HOME)}>
-    <Pages route={location.route} openTab={openTab} deploymentForm={deploymentForm} />
+  return <PanelProvider t={t} navigate={navigate} back={back} backLabel={routeLabel(t, location.stack.at(-1) ?? HOME)}>
+    <Pages route={location.route} openTab={openTab} />
   </PanelProvider>
 }

@@ -45,8 +45,9 @@ it('returns to the exact page after a remount of the main panel', async () => {
 
 it('shows domain terms in the interface language only and lists both languages in the (?) glossary', async () => {
   await mount(en)
-  expect(field<HTMLSelectElement>(en.deploymentContext).value).toBe('desktop')
-  expect(field<HTMLSelectElement>(en.deploymentContext).selectedOptions[0]?.textContent).toBe('acme/widgets')
+  expect(field<HTMLSelectElement>(en.deploymentContext).value).toBe('inference-support-loop')
+  expect(field<HTMLSelectElement>(en.deploymentContext).selectedOptions[0]?.textContent)
+    .toBe('onenexus-team/inference-support-loop')
   expect(all('[role="tab"]').map(tab => tab.textContent)).toEqual(['Fleet', 'Overview', 'Source', 'Trigger', 'Eval', 'Execution', 'Settings'])
   await click('Glossary')
   const dialog = document.querySelector('[role="dialog"]')!

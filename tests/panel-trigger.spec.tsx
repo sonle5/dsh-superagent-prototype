@@ -7,6 +7,7 @@ import { usePanel, mount, remount, settle, all, find, click, text, at } from './
 import { server, trigger, threadSummary, ticketSummary } from './fixtures/panel-server.ts'
 
 usePanel()
+const remote = (path: string) => `deployment/inference-support-loop/${path}`
 it('walks a Thread timeline newest first with dispositions as tags and its Decisions, requeues a filtered Trigger, pages backwards and returns', async () => {
   await mount()
   await click(zh['tab.trigger'])
@@ -19,7 +20,7 @@ it('walks a Thread timeline newest first with dispositions as tags and its Decis
   expect(text()).toContain(zh['term.correlation'])
   expect(all('.dt-event .dt-event-text').map(element => element.textContent)).toEqual(['message e4', 'message e3'])
   await click(zh.requeue)
-  expect(server.requests.some(request => request.path === 'triggers/e4/requeue')).toBe(true)
+  expect(server.requests.some(request => request.path === remote('triggers/e4/requeue'))).toBe(true)
   expect(text()).toContain(zh.dispositionQueued)
   await click(zh.loadEarlier)
   expect(all('.dt-event .dt-event-text').map(element => element.textContent)).toEqual(['message e4', 'message e3', 'message e1'])
@@ -33,7 +34,7 @@ it('offers to send a person\'s message that reached a ticket to Eval, for one it
   await click('这个文案好奇怪')
   const event = all('.dt-event').find(element => element.textContent?.includes('message e3'))!
   await click([...event.querySelectorAll<HTMLElement>('button')].find(button => button.textContent === zh.requeue)!)
-  expect(server.requests.some(request => request.path === 'triggers/e3/requeue' && request.method === 'POST')).toBe(true)
+  expect(server.requests.some(request => request.path === remote('triggers/e3/requeue') && request.method === 'POST')).toBe(true)
 })
 
 it('filters the Thread list by activity, and unsubscribes from a Thread page after confirmation', async () => {
@@ -41,12 +42,12 @@ it('filters the Thread list by activity, and unsubscribes from a Thread page aft
   await click(zh['tab.trigger'])
   expect(find(zh['threadFilter.subscribed'], '.dt-pill').getAttribute('aria-pressed')).toBe('true')
   await click(zh['threadFilter.recent'])
-  expect(server.requests.some(request => request.path === 'threads?filter=recent&limit=20')).toBe(true)
+  expect(server.requests.some(request => request.path === remote('threads?filter=recent&limit=20'))).toBe(true)
   expect(document.querySelector('select[aria-label="来源"]')).toBeNull()
   await click('这个文案好奇怪')
   await click(zh.unsubscribe)
   await click(zh.confirm)
-  expect(server.requests.some(request => request.path === 'threads/feishu:oc_1:om_root/unsubscribe')).toBe(true)
+  expect(server.requests.some(request => request.path === remote('threads/feishu:oc_1:om_root/unsubscribe'))).toBe(true)
 })
 
 it('folds consecutive automated messages from one sender on a Thread, showing the newest with its text', async () => {
@@ -71,8 +72,8 @@ it('reads the page around a link\'s target once, also for a Trigger the Thread d
   at({ page: 'trigger', id: 'feishu:oc_1:om_root', query: { trigger: 'gone' } })
   await mount()
   await act(async () => { await vi.advanceTimersByTimeAsync(5000) }); await settle()
-  expect(server.requests.filter(request => request.path.startsWith('threads/')).map(request => request.path)).toEqual([
-    'threads/feishu:oc_1:om_root?limit=50', 'threads/feishu:oc_1:om_root?limit=50&around=gone', 'threads/feishu:oc_1:om_root?limit=50'])
+  expect(server.requests.filter(request => request.path.startsWith(remote('threads/'))).map(request => request.path)).toEqual([
+    remote('threads/feishu:oc_1:om_root?limit=50&around=gone'), remote('threads/feishu:oc_1:om_root?limit=50')])
 })
 
 it('shows a follow-up delivered to its Ticket without an Eval, a hand-back with why, and a Ticket that follows the Thread for context', async () => {

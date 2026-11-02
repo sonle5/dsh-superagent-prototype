@@ -132,7 +132,7 @@ Open the URL printed in the log, then choose **Superagent** in the sidebar.
 
 ### Native fleet
 
-The profile that hosts the native Desktop control plane may aggregate other repository-bound deployments. Its `Superagent` panel always includes the embedded deployment and reads additional deployments from `<stateDir>/fleet.json`. Each entry remains one repository, one DSH profile, one state directory and one execution environment:
+The Desktop profile can be a repository-neutral control plane. Its `dsh-superagent` entry runs in `mode: control`, so it mounts the Fleet controller and keeps the shared Superagent panel without starting the repository Runtime, GitHub or Feishu Source plugins, or the Executor Session presets. The controller reads every deployment from `<control stateDir>/fleet.json`; it does not synthesize an embedded repository deployment:
 
 ```json
 {
@@ -140,6 +140,14 @@ The profile that hosts the native Desktop control plane may aggregate other repo
   "controlScript": "/absolute/path/to/dsh-superagent/scripts/dsh-superagent",
   "logDir": "/absolute/path/to/dsh-superagent/.artifacts",
   "deployments": [
+    {
+      "id": "inference-support-loop",
+      "profile": "superagent-inference-support-loop",
+      "repository": "onenexus-team/inference-support-loop",
+      "url": "http://127.0.0.1:3082",
+      "stateDir": "/Users/me/.dsh/state/superagent",
+      "workspace": "/Users/me/src/inference-support-loop"
+    },
     {
       "id": "sglang",
       "profile": "superagent-sglang",
@@ -152,13 +160,21 @@ The profile that hosts the native Desktop control plane may aggregate other repo
 }
 ```
 
+Use [control.cordis.patch.yml](../examples/control.cordis.patch.yml) as the controller profile override. Each registered repository still uses [profile.cordis.patch.yml](../examples/profile.cordis.patch.yml) and keeps its own port, state directory, credentials, worktree and model configuration. The controller state is separate from all repository state:
+
+```text
+$DSH_HOME/state/superagent-control       controller and fleet registry
+$DSH_HOME/state/superagent               inference-support-loop
+$DSH_HOME/state/superagent-sglang        SGLang
+```
+
 The registry is local machine configuration. The panel does not accept a command, repository URL or executable from the browser: lifecycle actions run only the configured control script with a registered profile and loopback URL. Start and stop remain explicit per deployment, and an intentional stop stays stopped. Create and install each DSH profile with the normal deployment procedure before registering it here; the fleet layer does not clone repositories or copy credentials between profiles.
 
-The card title is the repository's exact `owner/name`; the Desktop origin or DSH profile is shown separately as deployment metadata.
+The card title is the repository's exact `owner/name`. Every card is a peer: each has the same Start, Stop, Restart and Manage behavior, subject only to whether the shared fixed control script is executable.
 
 Use the deployment selector beside the **Superagent** title, or **Manage** on a Fleet card, to make a registered deployment the current management context. The Overview, Source, Trigger, Eval, Execution, Prompts and stage settings then read and save through the same-origin Desktop proxy to that deployment's loopback management API. The proxy accepts only a deployment id from this validated registry and an existing management route; the browser cannot supply a target URL. Fleet lifecycle controls always stay local to the Desktop control plane.
 
-Each profile keeps its own settings, drafts, model catalog and state. Machine limits shown under Deployment settings remain read-only for a managed profile because DSH's configuration form belongs to the current Desktop profile; change those limits in the managed profile's own DSH configuration. Start a stopped deployment from Fleet before opening its management views.
+Each peer's loopback URL is an internal management endpoint behind the Desktop controller, not a second operator interface. Use the Desktop deployment selector and Fleet cards for every peer; Fleet neither opens nor directs the operator to the peer Web UI. Each profile keeps its own settings, drafts, model catalog and state. Machine limits shown under Deployment settings are read-only because they belong to the selected repository profile; change those limits in that profile's DSH configuration. Select a running deployment from Fleet before opening its management views. Restarting or stopping either repository leaves the Desktop controller running.
 
 ### Hourly check
 

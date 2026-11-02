@@ -9,6 +9,7 @@ import { usePanel, mount, remount, settle, all, find, tab, click, type, text, fi
 import { server } from './fixtures/panel-server.ts'
 
 usePanel()
+const remote = (path: string) => `deployment/inference-support-loop/${path}`
 it('keeps a person\'s own value where another save changed the same setting, and says so', async () => {
   await mount()
   await click(zh['tab.execution'])
@@ -56,8 +57,8 @@ it('saves the Eval block on the Policy settings and the Executor with its execut
   expect(server.settings.executor).toEqual({ maxWorkers: 5, directory: '/srv/work',
     prepare: 'git worktree add "$DSH_SUPERAGENT_DIR"', blockedCommands: ['gh-personal', 'gh.other'], model: { provider: 'worker-provider',
       model: 'worker-model', reasoningEffort: 'high' } })
-  expect(server.requests.filter(request => request.method === 'PUT').map(request => request.path)).toEqual(['settings/eval',
-    'settings/executor'])
+  expect(server.requests.filter(request => request.method === 'PUT').map(request => request.path)).toEqual([remote('settings/eval'),
+    remote('settings/executor')])
 })
 
 it('loads configuration history on demand with localized changes, Source field labels and notified Tickets', async () => {
@@ -68,7 +69,7 @@ it('loads configuration history on demand with localized changes, Source field l
   await mount()
   await click(zh['tab.eval'])
   await click(find(zh['tab.settings'], '.dt-status-head button'))
-  expect(server.requests.some(request => request.path === 'policy/history')).toBe(false)
+  expect(server.requests.some(request => request.path === remote('policy/history'))).toBe(false)
   await click(zh.configHistory)
   for (const expected of ['第 3 次保存 · 从群同步', '生成策略版本 abcdef12', '接单模式：关闭 → 仅观察', '飞书 · 能发起工作的飞书用户 新增：Bob', '飞书 · 同步来源群：未设置 → oc_team',
     '因策略变更通知了 1 个进行中的工单：修复回归']) expect(text()).toContain(expected)

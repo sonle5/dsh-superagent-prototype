@@ -40,7 +40,7 @@ function DeploymentCard({ deployment, run, busy }: { deployment: Deployment; run
         <div className="dt-row-title"><span className="dt-card-title">{deployment.name}</span></div>
         <div className="dt-row-meta">
           <span className="dt-mono">{deployment.repository || deployment.stateDir}</span>
-          <span>{deployment.origin === 'desktop' ? t('fleetEmbedded') : `${t('fleetProfile')} ${deployment.profile}`}</span>
+          <span>{t('fleetProfile')} {deployment.profile}</span>
         </div>
       </div>
       <Tag tone={tone(deployment.status)}>{t(`fleetStatus.${deployment.status}`)}</Tag>
@@ -61,8 +61,8 @@ function DeploymentCard({ deployment, run, busy }: { deployment: Deployment; run
     </li>)}</ul>}
     <div className="dt-row-buttons">
       <Controls deployment={deployment} run={run} busy={busy} />
-      {deployment.origin === 'managed' && <Button variant="outline" size="sm" icon={<Icon name="settings" size={14} />}
-        onClick={() => { selectDeployment(deployment.id); navigate({ page: 'overview' }) }}>{t('fleetManage')}</Button>}
+      <Button variant="outline" size="sm" icon={<Icon name="settings" size={14} />}
+        onClick={() => { selectDeployment(deployment.id); navigate({ page: 'overview' }) }}>{t('fleetManage')}</Button>
     </div>
     <details className="dt-fleet-details">
       <summary>{t('fleetDetails')}</summary>

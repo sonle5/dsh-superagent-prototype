@@ -33,10 +33,6 @@ const Registry = z.object({
   if (value.deployments.length && !value.logDir) {
     context.addIssue({ code: 'custom', path: ['logDir'], message: 'Required when deployments are registered' })
   }
-  value.deployments.forEach((deployment, index) => {
-    if (deployment.id === 'desktop') context.addIssue({ code: 'custom', path: ['deployments', index, 'id'],
-      message: 'The id desktop is reserved for the embedded deployment' })
-  })
   for (const field of ['id', 'profile', 'url'] as const) {
     const seen = new Set<string>()
     for (const deployment of value.deployments) {
@@ -94,7 +90,6 @@ export interface FleetDeploymentView {
   url: string
   stateDir: string
   workspace: string
-  origin: 'desktop' | 'managed'
   status: FleetStatus
   detail: string
   health: FleetHealthView[]
@@ -117,15 +112,7 @@ export class FleetControlError extends Error {
   constructor(readonly status: 400 | 404 | 409, message: string) { super(message) }
 }
 
-interface DeploymentConfig {
-  id: string
-  profile: string
-  repository: string
-  url: string
-  stateDir: string
-  workspace: string
-  origin: 'desktop' | 'managed'
-}
+type DeploymentConfig = ManagedConfig
 
 const reason = (error: unknown): string => error instanceof Error ? error.message : String(error)
 const emptyTickets = z.object({ items: z.array(Ticket).default([]) })
@@ -136,8 +123,7 @@ export const redactSensitive = (text: string): string => text
   .replace(/\b(?:sk-[A-Za-z0-9_-]{12,}|onenx_[A-Za-z0-9_-]{12,})\b/g, '[redacted]')
   .replace(/(Authorization:\s*Bearer\s+)\S+/gi, '$1[redacted]')
   .replace(/((?:api[_-]?key|token)\s*[:=]\s*)["']?[^"'\s]+/gi, '$1[redacted]')
-const title = (deployment: DeploymentConfig, repository = deployment.repository): string =>
-  repository || (deployment.origin === 'desktop' ? 'Desktop Superagent' : deployment.repository)
+const title = (deployment: DeploymentConfig, repository = deployment.repository): string => repository || deployment.repository
 
 function loadRegistry(path: string): { value?: RegistryConfig; configured: boolean; error?: string } {
   if (!existsSync(path)) return { configured: false }
@@ -236,7 +222,7 @@ async function snapshot(deployment: DeploymentConfig, logDir: string | undefined
         recent: threads.items.slice(0, 8).map(thread => ({ key: thread.key, title: thread.title, source: thread.source, lastAt: thread.lastAt,
           pending: thread.pending, evaluating: thread.evaluating !== undefined && thread.evaluating !== null })),
       },
-      ...deployment.origin === 'managed' ? { log: logTail(logDir, deployment.profile) } : {},
+      log: logTail(logDir, deployment.profile),
       canControl,
     }
   } catch (error) {
@@ -249,7 +235,7 @@ async function snapshot(deployment: DeploymentConfig, logDir: string | undefined
       load: { running: 0, queued: 0, maxWorkers: 0 },
       tickets: { open: 0, pending: 0, working: 0, idle: 0, recent: [] },
       triggers: { pending: 0, evaluating: 0, recent: [] },
-      ...deployment.origin === 'managed' ? { log: logTail(logDir, deployment.profile) } : {},
+      log: logTail(logDir, deployment.profile),
       canControl,
     }
   }
@@ -261,7 +247,7 @@ export type FleetAction = 'start' | 'stop' | 'restart'
 export class Fleet {
   readonly registryPath: string
   private readonly busy = new Set<string>()
-  constructor(readonly stateDir: string, readonly selfUrl: string) {
+  constructor(readonly stateDir: string) {
     this.registryPath = join(stateDir, 'fleet.json')
   }
 
@@ -269,13 +255,8 @@ export class Fleet {
     const loaded = loadRegistry(this.registryPath)
     const control = loaded.value?.controlScript
     const logDir = loaded.value?.logDir
-    const self: DeploymentConfig = {
-      id: 'desktop', profile: 'desktop', repository: '', url: this.selfUrl, stateDir: this.stateDir,
-      workspace: this.stateDir, origin: 'desktop',
-    }
-    const managed: DeploymentConfig[] = (loaded.value?.deployments ?? []).map(value => ({ ...value, origin: 'managed' as const }))
-    const deployments = await Promise.all([self, ...managed].map(deployment =>
-      snapshot(deployment, logDir, deployment.origin === 'managed' && executable(control))))
+    const deployments = await Promise.all((loaded.value?.deployments ?? []).map(deployment =>
+      snapshot(deployment, logDir, executable(control))))
     return {
       configured: loaded.configured,
       registryPath: this.registryPath,
@@ -303,9 +284,8 @@ export class Fleet {
     } finally { this.busy.delete(id) }
   }
 
-  /** Resolve a managed deployment only from the validated registry; the embedded deployment stays on local routes. */
+  /** Resolve a deployment only from the validated registry. */
   managementTarget(id: string): { url: string; repository: string; profile: string } {
-    if (id === 'desktop') throw new FleetControlError(400, 'The embedded deployment is not proxied')
     const loaded = loadRegistry(this.registryPath)
     if (loaded.error) throw new FleetControlError(400, loaded.error)
     const deployment = loaded.value?.deployments.find(item => item.id === id)

@@ -1,6 +1,6 @@
 /** Settings tab shell routing between stage settings (Sources, Eval, Execution), Prompts, and Deployment. */
 import type { StateView } from './api.ts'
-import { DeploymentPage, type DeploymentForm } from './deployment.tsx'
+import { DeploymentPage } from './deployment.tsx'
 import { EvalSettings } from './eval.tsx'
 import { ExecutionSettings } from './execution.tsx'
 import { PromptsPage } from './prompts.tsx'
@@ -10,18 +10,17 @@ import { SettingsProvider } from './settings-kit.tsx'
 import { SourceSettings } from './source.tsx'
 
 const STAGE_GROUPS: readonly SettingsGroup[] = ['source', 'eval', 'execution']
-export function SettingsPage({ group, query, state, deploymentForm }: {
-  group: SettingsGroup; query: { source?: string; version?: string }; state: StateView; deploymentForm: DeploymentForm
+export function SettingsPage({ group, query, state }: {
+  group: SettingsGroup; query: { source?: string; version?: string }; state: StateView
 }) {
-  const { t, navigate, deployment } = usePanel()
+  const { t, navigate } = usePanel()
   const content = (() => {
     switch (group) {
       case 'source': return <SettingsProvider><SourceSettings {...query.source ? { focus: query.source } : {}} /></SettingsProvider>
       case 'eval': return <SettingsProvider><EvalSettings version={query.version} /></SettingsProvider>
       case 'execution': return <SettingsProvider><ExecutionSettings /></SettingsProvider>
       case 'prompts': return <PromptsPage />
-      case 'deployment': return <DeploymentPage setup={state.setup} form={deployment.origin === 'desktop' ? deploymentForm : undefined}
-        managed={deployment.origin !== 'desktop'} />
+      case 'deployment': return <DeploymentPage setup={state.setup} form={undefined} managed />
     }
   })()
   return <div className="dt-settings">

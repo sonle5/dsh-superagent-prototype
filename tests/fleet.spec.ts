@@ -42,22 +42,27 @@ function workspace(): string {
 
 it('aggregates independent deployments and their Tickets, Triggers, health, workspace and log tail', async () => {
   const state = workspace()
-  const self = await listen('onenexus-team/inference-support-loop')
-  const managed = await listen('onenexus-team/sglang')
+  const inference = await listen('onenexus-team/inference-support-loop')
+  const sglang = await listen('onenexus-team/sglang')
   const logDir = join(state, '.artifacts')
   mkdirSync(logDir)
   writeFileSync(join(logDir, 'dsh-superagent-superagent-sglang-20261102-000000-1.log'),
     'first\nhttp://127.0.0.1:3083/?token=private-token\nAuthorization: Bearer private-bearer\n')
   writeFileSync(join(state, 'fleet.json'), JSON.stringify({
     version: 1, controlScript: '/usr/bin/true', logDir,
-    deployments: [{ id: 'sglang', name: 'SGLang', profile: 'superagent-sglang', repository: 'onenexus-team/sglang', url: managed,
-      stateDir: join(state, 'superagent-sglang'), workspace: '/Users/alice/src/sglang-superagent' }],
+    deployments: [{
+      id: 'inference-support-loop', profile: 'superagent-inference-support-loop', repository: 'onenexus-team/inference-support-loop',
+      url: inference, stateDir: join(state, 'superagent'), workspace: '/Users/alice/src/inference-support-loop',
+    }, {
+      id: 'sglang', profile: 'superagent-sglang', repository: 'onenexus-team/sglang', url: sglang,
+      stateDir: join(state, 'superagent-sglang'), workspace: '/Users/alice/src/sglang-superagent',
+    }],
   }))
 
-  const view = await new Fleet(state, self).view()
+  const view = await new Fleet(state).view()
   expect(view).toMatchObject({ configured: true, deployments: [
-    { id: 'desktop', name: 'onenexus-team/inference-support-loop', repository: 'onenexus-team/inference-support-loop', status: 'ready',
-      canControl: false,
+    { id: 'inference-support-loop', name: 'onenexus-team/inference-support-loop',
+      repository: 'onenexus-team/inference-support-loop', status: 'ready', canControl: true,
       load: { running: 1, queued: 2, maxWorkers: 3 } },
     { id: 'sglang', name: 'onenexus-team/sglang', repository: 'onenexus-team/sglang', status: 'ready', canControl: true,
       tickets: { open: 2, pending: 1, working: 1, idle: 0 },
@@ -71,7 +76,6 @@ it('aggregates independent deployments and their Tickets, Triggers, health, work
 
 it('distinguishes an intentionally stopped deployment from an unreachable one', async () => {
   const state = workspace()
-  const self = await listen('onenexus-team/inference-support-loop')
   const logDir = join(state, '.artifacts')
   mkdirSync(join(logDir, 'control', 'profiles', 'superagent-sglang'), { recursive: true })
   writeFileSync(join(logDir, 'control', 'profiles', 'superagent-sglang', 'manually-stopped'), '2026-11-02T00:00:00Z\n')
@@ -80,27 +84,15 @@ it('distinguishes an intentionally stopped deployment from an unreachable one', 
     deployments: [{ id: 'sglang', name: 'SGLang', profile: 'superagent-sglang', repository: 'onenexus-team/sglang',
       url: 'http://127.0.0.1:9', stateDir: join(state, 'superagent-sglang'), workspace: '/Users/alice/src/sglang-superagent' }],
   }))
-  expect((await new Fleet(state, self).view()).deployments[1]).toMatchObject({ status: 'stopped', detail: 'Stopped intentionally' })
+  expect((await new Fleet(state).view()).deployments[0]).toMatchObject({ status: 'stopped', detail: 'Stopped intentionally' })
 })
 
-it('reports an invalid registry without losing the embedded deployment', async () => {
+it('reports an invalid registry without inventing a deployment', async () => {
   const state = workspace()
-  const self = await listen('onenexus-team/inference-support-loop')
   writeFileSync(join(state, 'fleet.json'), '{"version":1,"deployments":[{"id":"../escape"}]}')
-  const view = await new Fleet(state, self).view()
+  const view = await new Fleet(state).view()
   expect(view).toMatchObject({ configured: true, error: expect.stringContaining('Invalid fleet registry') })
-  expect(view.deployments).toHaveLength(1)
-  expect(view.deployments[0]).toMatchObject({ id: 'desktop', status: 'ready' })
-})
-
-it('reserves the embedded deployment id in the fleet registry', async () => {
-  const state = workspace()
-  writeFileSync(join(state, 'fleet.json'), JSON.stringify({ version: 1, controlScript: '/usr/bin/true', logDir: state,
-    deployments: [{ id: 'desktop', profile: 'other', repository: 'acme/other', url: 'http://127.0.0.1:9',
-      stateDir: join(state, 'other'), workspace: '/Users/alice/src/other' }] }))
-  const view = await new Fleet(state, 'http://127.0.0.1:9').view()
-  expect(view.error).toContain('The id desktop is reserved for the embedded deployment')
-  expect(view.deployments).toHaveLength(1)
+  expect(view.deployments).toEqual([])
 })
 
 it('invokes only the configured fixed script for a registered profile', async () => {
@@ -114,7 +106,7 @@ it('invokes only the configured fixed script for a registered profile', async ()
     deployments: [{ id: 'sglang', name: 'SGLang', profile: 'superagent-sglang', repository: 'onenexus-team/sglang',
       url: 'http://127.0.0.1:3083', stateDir: join(state, 'superagent-sglang'), workspace: '/Users/alice/src/sglang-superagent' }],
   }))
-  const fleet = new Fleet(state, 'http://127.0.0.1:9')
+  const fleet = new Fleet(state)
   expect(await fleet.control('sglang', 'restart')).toMatchObject({ id: 'sglang', action: 'restart', code: 0 })
   expect(readFileSync(argumentsFile, 'utf8'))
     .toBe('restart\n--profile\nsuperagent-sglang\n--url\nhttp://127.0.0.1:3083\n--stop-timeout\n60\n')

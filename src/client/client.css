@@ -103,7 +103,20 @@
 .dt-rule-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--dsw-alias-label-caption); }
 .dt-rule-dot[data-enabled] { background: var(--dsw-alias-brand-primary); }
 .dt-rule-body { display: flex; flex-direction: column; gap: 12px; padding: 8px 0 8px 28px; }
-.dt-model { display: flex; flex-direction: column; gap: 6px; }
+.dt-model { display: flex; flex-direction: column; gap: 16px; padding: 16px; border: 0.5px solid var(--dsw-alias-border-l2); border-radius: 12px; background: color-mix(in srgb, var(--dsw-alias-bg-layer-2) 72%, transparent); box-shadow: var(--dsw-elevation-soft); }
+.dt-model-summary { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px 12px; flex-wrap: wrap; }
+.dt-model-summary-main { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.dt-model-state { display: inline-flex; align-items: center; align-self: flex-start; gap: 7px; font-size: 12px; line-height: 18px; font-weight: 500; color: var(--dsw-alias-label-secondary); }
+.dt-model-state::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--dsw-alias-state-success-primary); box-shadow: 0 0 0 3px color-mix(in srgb, var(--dsw-alias-state-success-primary) 13%, transparent); }
+.dt-model[data-state='custom'] .dt-model-state::before { background: var(--dsw-alias-brand-primary); box-shadow: 0 0 0 3px color-mix(in srgb, var(--dsw-alias-brand-primary) 13%, transparent); }
+.dt-model-default { font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-caption); overflow-wrap: anywhere; }
+.dt-model-fields { grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.35fr) minmax(112px, 0.75fr); gap: 14px; }
+.dt-model-fields .dt-field { gap: 7px; }
+.dt-model-fields .dt-field-head { font-size: 12px; line-height: 18px; font-weight: 500; }
+.dt-model-fields .dt-input { height: 36px; padding: 0 10px; border-color: var(--dsw-alias-border-l3); transition: border-color 120ms ease, box-shadow 120ms ease; }
+.dt-model-fields .dt-input:hover { border-color: var(--dsw-alias-border-l4); }
+.dt-model-fields .dt-input:focus-within { border-color: var(--dsw-alias-brand-primary); box-shadow: 0 0 0 2px color-mix(in srgb, var(--dsw-alias-brand-primary) 14%, transparent); }
+.dt-model-code input { font-family: var(--ds-font-family-code, Menlo, monospace); font-size: 12px; }
 .dt-grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 .dt-changes { display: flex; flex-direction: column; gap: 2px; font-size: 13px; line-height: 20px; }
 .dt-changes li::before { content: '· '; color: var(--dsw-alias-label-caption); }

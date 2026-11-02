@@ -7,6 +7,7 @@ import { usePanel, mount, remount, all, find, tab, click, type, text, field, at 
 import { MEMBER, server, ticketSummary, threadSummary } from './fixtures/panel-server.ts'
 
 usePanel()
+const remote = (path: string) => `deployment/inference-support-loop/${path}`
 it('lists Tickets under Execution by who they wait on, with the Executor state and its pause as an action', async () => {
   server.tickets.open = [ticketSummary(), ticketSummary({ id: 't2', title: '执行中的工单', threads: [{ key: 'github:7',
     source: 'github', title: '#7 x', facts: { number: { value: '#7' }, autoMerge: { label: { zh: '自动合并', en: 'Auto-merge' },
@@ -14,11 +15,11 @@ it('lists Tickets under Execution by who they wait on, with the Executor state a
   await mount()
   await click(zh['tab.execution'])
   expect(document.querySelector('.dt-status-title')?.textContent).toBe(zh.statusTitle)
-  expect(server.requests.some(request => request.path === 'tickets?state=open&limit=20')).toBe(true)
+  expect(server.requests.some(request => request.path === remote('tickets?state=open&limit=20'))).toBe(true)
   expect(text()).toContain(zh.executorRunning)
   expect(all('.dt-chip').map(chip => chip.textContent)).toContain('GitHub#7自动合并已开启')
   await click(zh.idleLabel)
-  expect(server.requests.some(request => request.path === 'tickets?state=idle&limit=20')).toBe(true)
+  expect(server.requests.some(request => request.path === remote('tickets?state=idle&limit=20'))).toBe(true)
   expect(text()).toContain('执行器结束了当前回合')
   await click(zh['ticket.ended'])
   expect(text()).toContain('旧工单')
@@ -32,7 +33,7 @@ it('lists Tickets under Execution by who they wait on, with the Executor state a
   await click(tab(zh['tab.execution']))
   await click(zh.pauseProcessing)
   await click(zh.confirm)
-  expect(server.requests.find(request => request.path === 'executor/pause')).toMatchObject({ method: 'POST', body: { paused: true } })
+  expect(server.requests.find(request => request.path === remote('executor/pause'))).toMatchObject({ method: 'POST', body: { paused: true } })
   expect(text()).toContain(zh.processingPaused)
   expect(find(zh.resumeProcessing).textContent).toBe(zh.resumeProcessing)
   await click(tab(zh['tab.settings']))
@@ -47,7 +48,7 @@ it('stops an open Ticket from its page after confirmation', async () => {
   expect(server.requests.some(request => request.path.endsWith('/stop'))).toBe(false)
   expect(document.querySelector('[role="dialog"]')?.textContent).toContain('停止“修复回归”')
   await click(zh.confirm)
-  expect(server.requests.some(request => request.path === 'tickets/t1/stop' && request.method === 'POST')).toBe(true)
+  expect(server.requests.some(request => request.path === remote('tickets/t1/stop') && request.method === 'POST')).toBe(true)
 })
 
 it('shows a Ticket with its stage, its Mandate details with the Trigger and Decision behind it, its Threads, and the rest behind disclosures', async () => {
@@ -108,7 +109,7 @@ it('links a question to its Channel, folds consecutive automated messages among 
   expect(document.querySelector('[role="tooltip"]')).toBeNull()
 })
 
-it('offers a Ticket awaiting review its review place and Session in the page head', async () => {
+it('offers a Ticket awaiting review its review place in the page head', async () => {
   const t1 = server.ticketDetails.t1!
   server.ticketDetails.t1 = { ...t1, stage: 'person', action: 'review', threads: [threadSummary(),
     { ...threadSummary({ key: 'github:42', source: 'github', title: '#42 Fix login' }), url: 'https://github.com/acme/widgets/pull/42' }] }
@@ -135,7 +136,7 @@ it('keeps what a person types in the Execution settings, converting it once on s
   expect(workers().value).toBe('')
   await type(workers(), '2')
   await click(zh.save)
-  expect(server.requests.find(request => request.path === 'settings/executor')?.body).toMatchObject({ value: { blockedCommands: ['gh-personal', 'gh-other'], directory: '/srv/my work ', maxWorkers: 2 } })
+  expect(server.requests.find(request => request.path === remote('settings/executor'))?.body).toMatchObject({ value: { blockedCommands: ['gh-personal', 'gh-other'], directory: '/srv/my work ', maxWorkers: 2 } })
   expect(server.settings.executor).toMatchObject({ blockedCommands: ['gh-personal', 'gh-other'], directory: '/srv/my work', maxWorkers: 2 })
 })
 
@@ -220,5 +221,5 @@ it('sends one stop for a double click on Confirm', async () => {
   await click(zh.stop)
   const confirm = find(zh.confirm)
   await act(async () => { confirm.click(); confirm.click() })
-  expect(server.requests.filter(request => request.path === 'tickets/t1/stop')).toHaveLength(1)
+  expect(server.requests.filter(request => request.path === remote('tickets/t1/stop'))).toHaveLength(1)
 })

@@ -49,6 +49,53 @@ export interface Api {
   'PUT prompts': { body: { config: PromptConfig; baseRevision: number }; response: { revision: number; context_delivery: Delivery } }
   'POST prompts/preview': { body: PromptConfig; response: ReturnType<Prompts['preview']> }
 }
+export const FLEET_ROUTES = [
+  'GET fleet',
+  'POST fleet/:id/start',
+  'POST fleet/:id/stop',
+  'POST fleet/:id/restart',
+] as const satisfies readonly (keyof Api)[]
+export const DEPLOYMENT_ROUTES = [
+  'GET state',
+  'GET overview',
+  'GET search',
+  'GET sources',
+  'GET settings',
+  'POST sources/:id/labels',
+  'GET threads',
+  'GET threads/:key',
+  'POST threads/:key/unsubscribe',
+  'POST triggers/:id/requeue',
+  'GET decisions',
+  'POST decisions/:id/dismiss',
+  'GET tickets',
+  'GET tickets/:id',
+  'POST tickets/:id/retry',
+  'POST tickets/:id/stop',
+  'POST executor/pause',
+  'PUT settings/:block',
+  'GET policy/history',
+  'POST policy-sync/:id',
+  'POST setup/check',
+  'GET models',
+  'GET prompts',
+  'PUT prompts',
+  'POST prompts/preview',
+] as const satisfies readonly Exclude<keyof Api, typeof FLEET_ROUTES[number]>[]
+
+type Assert<T extends true> = T
+type _AllApiRoutesAreClassified = Assert<Exclude<keyof Api, typeof FLEET_ROUTES[number] | typeof DEPLOYMENT_ROUTES[number]> extends never
+  ? true : false>
+
+/** Match a method and already split path against one of the compiled route declarations. */
+export function matchesRoute<T extends string>(routes: readonly T[], method: string, segments: readonly string[]): boolean {
+  return routes.some(route => {
+    const [verb, path] = route.split(' ') as [string, string]
+    const pattern = path.split('/')
+    return verb === method && pattern.length === segments.length
+      && pattern.every((part, index) => part.startsWith(':') || part === segments[index])
+  })
+}
 type Path<K> = K extends `${string} ${infer P}` ? P : never
 type Params<P> = P extends `${string}:${infer Name}/${infer Rest}` ? Record<Name, string> & Params<Rest>
   : P extends `${string}:${infer Name}` ? Record<Name, string> : unknown

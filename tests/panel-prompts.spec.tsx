@@ -8,6 +8,7 @@ import { usePanel, mount, settle, all, tab, click, type, text, field, at } from 
 import { server, promptVersion } from './fixtures/panel-server.ts'
 
 usePanel()
+const remote = (path: string) => `deployment/inference-support-loop/${path}`
 it('lists the team sections, then the built-in parts, edits and saves them separately from settings, and resets one section', async () => {
   at({ page: 'settings', query: { group: 'prompts' } })
   await mount()
@@ -27,7 +28,7 @@ it('lists the team sections, then the built-in parts, edits and saves them separ
   await type(field<HTMLTextAreaElement>(zh.promptBody), 'Second rule')
   await click(zh.save)
   expect(server.prompts.current.config.communication).toBe('Second rule')
-  expect(server.requests.some(request => request.path.startsWith('settings/'))).toBe(false)
+  expect(server.requests.some(request => request.path.startsWith(remote('settings/')))).toBe(false)
 })
 
 it('keeps a conflicting prompt draft, rebases it onto the newer version and saves on retry', async () => {
@@ -69,7 +70,7 @@ it('loads all defaults into the draft from the history without saving them', asy
   expect(all('.dt-row-title').map(title => title.textContent)).toContain(first)
   await click(zh.promptDefaults)
   expect(text()).toContain(zh.promptDraftFromDefaults)
-  expect(server.requests.some(request => request.path === 'prompts' && request.method === 'PUT')).toBe(false)
+  expect(server.requests.some(request => request.path === remote('prompts') && request.method === 'PUT')).toBe(false)
 })
 
 it('keeps the Prompts save bar hidden while a preview loads for an unchanged draft', async () => {

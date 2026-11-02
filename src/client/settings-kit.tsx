@@ -82,14 +82,21 @@ export function ModelField({ id, value, onChange }: { id: string; value: RoleMod
   const models = catalog?.groups.find(group => group.id === current.provider.trim())?.models ?? []
   const fallback = catalog?.default
   const input = (name: keyof typeof current, label: string, placeholder: string) => <Field label={label}>
-    <Input list={`${id}-${name}s`} spellCheck={false} placeholder={placeholder} value={current[name]}
+    <Input className={name === 'effort' ? undefined : 'dt-model-code'} list={`${id}-${name}s`} spellCheck={false}
+      placeholder={placeholder} value={current[name]}
       onChange={event => set({ [name]: event.target.value })} />
   </Field>
-  return <div className="dt-model">
-    <Hint>{fallback ? t('defaultModel', { model: `${fallback.provider} / ${fallback.model}${fallback.reasoningEffort
-      ? ` · ${fallback.reasoningEffort}` : ''}` }) : t('defaultModelUnavailable')}</Hint>
+  return <div className="dt-model" data-state={value ? 'custom' : 'default'}>
+    <div className="dt-model-summary">
+      <div className="dt-model-summary-main">
+        <span className="dt-model-state">{t(value ? 'modelOverride' : 'modelInherited')}</span>
+        <span className="dt-model-default">{fallback ? t('defaultModel', { model: `${fallback.provider} / ${fallback.model}${fallback.reasoningEffort
+          ? ` · ${fallback.reasoningEffort}` : ''}` }) : t('defaultModelUnavailable')}</span>
+      </div>
+      {value && <Button variant="ghost" size="sm" onClick={() => onChange(null)}>{t('modelUseDefault')}</Button>}
+    </div>
     {error && <p className="dt-error">{t('modelCatalogError', { error })}</p>}
-    <div className="dt-grid3">
+    <div className="dt-grid3 dt-model-fields">
       {input('provider', t('modelProvider'), t('modelInherit'))}{input('model', t('modelName'), t('modelInherit'))}{input('effort',
         t('modelEffort'), t('modelEffortDefault'))}
     </div>

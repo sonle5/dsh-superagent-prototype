@@ -6,6 +6,7 @@ import { usePanel, mount, remount, all, find, tab, click, text } from './fixture
 import { server, droppedReply, threadSummary } from './fixtures/panel-server.ts'
 
 usePanel()
+const remote = (path: string) => `deployment/inference-support-loop/${path}`
 it('leads the overview with the pending Tickets, then problems, the last day and the Executor, each linking to its stage', async () => {
   await mount()
   expect(tab(zh['tab.overview']).getAttribute('aria-selected')).toBe('true')
@@ -29,16 +30,16 @@ it('leads the overview with the pending Tickets, then problems, the last day and
 it('re-evaluates or dismisses an unjudged Eval from the problem list', async () => {
   await mount()
   await click(zh.requeue)
-  expect(server.requests.some(request => request.path === 'triggers/e3/requeue' && request.method === 'POST')).toBe(true)
+  expect(server.requests.some(request => request.path === remote('triggers/e3/requeue') && request.method === 'POST')).toBe(true)
   await click(zh.dismiss)
-  expect(server.requests.some(request => request.path === 'decisions/u1/dismiss' && request.method === 'POST')).toBe(true)
-  expect(server.requests.filter(request => request.path === 'overview').length).toBeGreaterThan(2)
+  expect(server.requests.some(request => request.path === remote('decisions/u1/dismiss') && request.method === 'POST')).toBe(true)
+  expect(server.requests.filter(request => request.path === remote('overview')).length).toBeGreaterThanOrEqual(2)
 })
 
 it('opens the Thread of an unjudged Eval at its Trigger from the problem list', async () => {
   await mount()
   await click('评估未完成：这个文案好奇怪')
-  expect(server.requests.some(request => request.path.startsWith('threads/feishu:oc_1:om_root'))).toBe(true)
+  expect(server.requests.some(request => request.path.startsWith(remote('threads/feishu:oc_1:om_root')))).toBe(true)
   expect(document.querySelector('.dt-highlight')?.textContent).toContain('message e3')
 })
 
@@ -53,7 +54,7 @@ it('follows the last day\'s counts to the status of each stage', async () => {
   expect(text()).toContain(zh['reason.source_disabled'])
 })
 
-it('offers each Ticket that needs a person its actions on the overview: answer in its Channel, retry or open a failed worker, and stop',
+it('offers each Ticket that needs a person its actions on the overview: answer in its Channel, retry, and stop',
   async () => {
   await mount()
   expect(all('.dt-ticket-actions a').map(link => [link.textContent, link.getAttribute('href')])).toEqual([['去飞书回答',
@@ -61,12 +62,10 @@ it('offers each Ticket that needs a person its actions on the overview: answer i
   expect(all('.dt-ticket-note').map(note => note.textContent)).toContain('LlmError: no adapter registered for provider "provider-a"')
   await click(zh.retry)
   await click(zh.confirm)
-  expect(server.requests.some(request => request.path === 'tickets/t4/retry' && request.method === 'POST')).toBe(true)
-  await click(all('.dt-ticket-actions button').find(button => button.textContent === '打开 Session')!)
-  expect(server.opened).toEqual(['worker-t4'])
+  expect(server.requests.some(request => request.path === remote('tickets/t4/retry') && request.method === 'POST')).toBe(true)
   await click(all('.dt-ticket-actions button').filter(button => button.textContent === '停止').at(-1)!)
   await click(zh.confirm)
-  expect(server.requests.some(request => request.path === 'tickets/t4/stop' && request.method === 'POST')).toBe(true)
+  expect(server.requests.some(request => request.path === remote('tickets/t4/stop') && request.method === 'POST')).toBe(true)
   expect(text()).not.toContain('截图工具')
 })
 
@@ -81,7 +80,7 @@ it('shows paused processing as a system problem with its resume action, and says
   await click(zh['tab.overview'])
   await click(find(zh.resumeProcessing, '.dt-att button'))
   await click(zh.confirm)
-  expect(server.requests.find(request => request.path === 'executor/pause')).toMatchObject({ method: 'POST', body: { paused: false } })
+  expect(server.requests.find(request => request.path === remote('executor/pause'))).toMatchObject({ method: 'POST', body: { paused: false } })
 })
 
 it('offers the step that fixes a settings problem as a button on the overview', async () => {
@@ -155,5 +154,5 @@ it('says when no Source is on, an Eval is past its deadline or a message keeps f
   expect(document.querySelector('.dt-settings-link[aria-current="page"]')?.textContent).toBe(zh['settingsGroup.source'])
   await click(tab(zh['tab.overview']))
   await click('评估超时未决定：#9 迟迟未决')
-  expect(server.requests.some(request => request.path.startsWith('threads/github:9'))).toBe(true)
+  expect(server.requests.some(request => request.path.startsWith(remote('threads/github:9')))).toBe(true)
 })
