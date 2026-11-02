@@ -1,6 +1,6 @@
 /** Shared settings context, block draft hook, form controls, Source schema field renderer, and configuration history. */
 import { cloneElement, createContext, useContext, useEffect, useId, useLayoutEffect, useRef, useState, type ReactElement,
-  type ReactNode } from 'react'
+  type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react'
 import type { ApiResponse } from '../app/api.ts'
 import type { FieldSpec, Localized } from '../sources/kind.ts'
 import { usePoll, type HistoryView, type Settings, type SettingsView, type SourceView } from './api.ts'
@@ -69,6 +69,120 @@ function SwitchRow({ label, hint, checked,
   </div>
 }
 type RoleModel = Settings['eval']['model']
+interface ModelChoice { value: string; label: string; detail?: string }
+function ModelCombobox({ id: suppliedId, label, value, choices, placeholder, noSuggestions,
+  onChange }: {
+  id?: string; label: string; value: string; choices: ModelChoice[]; placeholder: string; noSuggestions: string
+  onChange: (next: string) => void
+}) {
+  const { t } = usePanel()
+  const generatedId = useId()
+  const id = suppliedId ?? generatedId
+  const input = useRef<HTMLInputElement>(null)
+  const box = useRef<HTMLDivElement>(null)
+  const suppressFocusOpen = useRef(false)
+  const [open, setOpen] = useState(false)
+  const [showAll, setShowAll] = useState(false)
+  const [active, setActive] = useState<string>()
+  const query = value.trim().toLocaleLowerCase()
+  const choicesKey = choices.map(choice => choice.value).join('\u0000')
+  const options = showAll || !query ? choices : choices.filter(choice => choice.value.toLocaleLowerCase().includes(query)
+    || choice.label.toLocaleLowerCase().includes(query))
+  const empty = query && !showAll && choices.length ? t('modelNoMatchingOptions') : noSuggestions
+  const activeIndex = options.findIndex(option => option.value === active)
+  const listId = `${id}-options`
+  useEffect(() => {
+    if (!open) return
+    const close = (event: globalThis.PointerEvent) => {
+      if (!box.current?.contains(event.target as Node)) setOpen(false)
+    }
+    document.addEventListener('pointerdown', close)
+    return () => document.removeEventListener('pointerdown', close)
+  }, [open])
+  useEffect(() => {
+    if (!open) setActive(undefined)
+    else if (!options.some(option => option.value === active)) setActive(options[0]?.value)
+  }, [active, open, choicesKey, query, showAll])
+  const choose = (option: ModelChoice) => {
+    onChange(option.value)
+    setOpen(false)
+    setShowAll(false)
+    suppressFocusOpen.current = true
+    input.current?.focus()
+    suppressFocusOpen.current = false
+  }
+  const move = (event: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'Escape') {
+      setOpen(false)
+      return
+    }
+    if (event.key === 'Tab') {
+      setOpen(false)
+      return
+    }
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      if (!open) {
+        setOpen(true)
+        setShowAll(false)
+        return
+      }
+      const direction = event.key === 'ArrowDown' ? 1 : -1
+      const next = options[(Math.max(activeIndex, direction > 0 ? -1 : options.length) + direction + options.length) % options.length]
+      if (next) setActive(next.value)
+      return
+    }
+    if (event.key === 'Enter' && open && activeIndex >= 0) {
+      event.preventDefault()
+      choose(options[activeIndex]!)
+    }
+  }
+  const toggle = () => {
+    if (open && showAll) setOpen(false)
+    else {
+      setShowAll(true)
+      setOpen(true)
+      suppressFocusOpen.current = true
+      input.current?.focus()
+      suppressFocusOpen.current = false
+    }
+  }
+  return <div ref={box} className="dt-combobox" data-open={open || undefined}>
+    <div className="dt-input">
+      <input ref={input} id={id} role="combobox" aria-autocomplete="list" aria-expanded={open}
+        aria-controls={open ? listId : undefined} aria-activedescendant={open && activeIndex >= 0 ? `${id}-option-${activeIndex}` : undefined}
+        spellCheck={false} placeholder={placeholder} value={value}
+        onFocus={() => { if (!suppressFocusOpen.current) setOpen(true) }}
+        onChange={event => { setShowAll(false); setOpen(true); onChange(event.target.value) }} onKeyDown={move} />
+      <button type="button" className="dt-combobox-toggle" aria-label={t('modelBrowseOptions', { label })} aria-expanded={open}
+        aria-controls={open ? listId : undefined} onClick={toggle} onMouseDown={event => event.preventDefault()}>
+        <Icon name={open ? 'chevron-up' : 'chevron-down'} size={14} />
+      </button>
+    </div>
+    {open && <div className="dt-combobox-menu">
+      {query && !showAll && <div className="dt-combobox-menu-head">
+        <span>{t('modelFilteredOptions', { count: options.length })}</span>
+        <button type="button" className="dt-textlink" onClick={() => {
+          setShowAll(true)
+          suppressFocusOpen.current = true
+          input.current?.focus()
+          suppressFocusOpen.current = false
+        }}>
+          {t('modelShowAllOptions')}
+        </button>
+      </div>}
+      {options.length ? <div id={listId} role="listbox" aria-label={label} className="dt-combobox-options">
+        {options.map((option, index) => <button key={option.value} id={`${id}-option-${index}`} type="button" role="option"
+          aria-selected={index === activeIndex} className="dt-combobox-option" data-value={option.value}
+          data-current={option.value === value || undefined} onMouseEnter={() => setActive(option.value)}
+          onClick={() => choose(option)}>
+          <span className="dt-combobox-option-label">{option.label}</span>
+          {option.detail && option.detail !== option.label && <span className="dt-combobox-option-detail">{option.detail}</span>}
+        </button>)}
+      </div> : <p className="dt-combobox-empty">{empty}</p>}
+    </div>}
+  </div>
+}
 export function ModelField({ id, value, onChange }: { id: string; value: RoleModel; onChange: (next: RoleModel) => void }) {
   const { t, call } = usePanel()
   const [catalog, setCatalog] = useState<ApiResponse<'GET models'>>()
@@ -79,13 +193,27 @@ export function ModelField({ id, value, onChange }: { id: string; value: RoleMod
     const { provider, model, effort } = { ...current, ...next }
     onChange(provider.trim() || model.trim() || effort.trim() ? { provider, model, ...effort ? { reasoningEffort: effort } : {} } : null)
   }
-  const models = catalog?.groups.find(group => group.id === current.provider.trim())?.models ?? []
+  const group = catalog?.groups.find(item => item.id === current.provider.trim())
+  const models = group?.models ?? []
+  const selectedModel = models.find(model => model.id === current.model.trim())
+  const changeProvider = (provider: string) => {
+    const nextModels = catalog?.groups.find(item => item.id === provider.trim())?.models ?? []
+    const nextModel = nextModels.find(model => model.id === current.model.trim())
+    const nextEffort = nextModel?.reasoning?.efforts.some(effort => effort.id === current.effort)
+      ? current.effort : nextModel?.reasoning?.defaultEffort ?? ''
+    set({ provider, model: nextModel?.id ?? '', effort: nextEffort })
+  }
+  const changeModel = (model: string) => {
+    const nextModel = models.find(item => item.id === model.trim())
+    const nextEffort = nextModel?.reasoning?.efforts.some(effort => effort.id === current.effort)
+      ? current.effort : nextModel?.reasoning?.defaultEffort ?? ''
+    set({ model, effort: nextEffort })
+  }
   const fallback = catalog?.default
-  const input = (name: keyof typeof current, label: string, placeholder: string) => <Field label={label}>
-    <Input className={name === 'effort' ? undefined : 'dt-model-code'} list={`${id}-${name}s`} spellCheck={false}
-      placeholder={placeholder} value={current[name]}
-      onChange={event => set({ [name]: event.target.value })} />
-  </Field>
+  const providers = catalog?.groups.map(item => ({ value: item.id, label: item.name, detail: item.id })) ?? []
+  const modelChoices = models.map(item => ({ value: item.id, label: item.name, detail: item.id }))
+  const efforts = selectedModel?.reasoning?.efforts.map(item => ({ value: item.id, label: item.name, detail: item.description })) ?? []
+  const noSuggestions = current.provider.trim() ? t('modelNoCatalogSuggestions') : t('modelChooseProviderFirst')
   return <div className="dt-model" data-state={value ? 'custom' : 'default'}>
     <div className="dt-model-summary">
       <div className="dt-model-summary-main">
@@ -97,16 +225,18 @@ export function ModelField({ id, value, onChange }: { id: string; value: RoleMod
     </div>
     {error && <p className="dt-error">{t('modelCatalogError', { error })}</p>}
     <div className="dt-grid3 dt-model-fields">
-      {input('provider', t('modelProvider'), t('modelInherit'))}{input('model', t('modelName'), t('modelInherit'))}{input('effort',
-        t('modelEffort'), t('modelEffortDefault'))}
+      <Field label={t('modelProvider')}><ModelCombobox id={`${id}-provider`} label={t('modelProvider')} value={current.provider}
+        choices={providers} placeholder={t('modelInherit')} noSuggestions={t('modelNoProviderSuggestions')}
+        onChange={changeProvider} /></Field>
+      <Field label={t('modelName')}><ModelCombobox id={`${id}-model`} label={t('modelName')} value={current.model}
+        choices={modelChoices} placeholder={t('modelInherit')} noSuggestions={noSuggestions} onChange={changeModel} /></Field>
+      <Field label={t('modelEffort')}><ModelCombobox id={`${id}-effort`} label={t('modelEffort')} value={current.effort}
+        choices={efforts} placeholder={t('modelEffortDefault')} noSuggestions={t('modelNoEffortSuggestions')}
+        onChange={effort => set({ effort })} /></Field>
     </div>
-    <datalist id={`${id}-providers`}>{catalog?.groups.map(group => <option key={group.id}
-      value={group.id}>{group.name}</option>)}</datalist>
-    <datalist id={`${id}-models`}>{models.map(model => <option key={model.id} value={model.id}>{model.name}</option>)}</datalist>
-    <datalist id={`${id}-efforts`}>
-      {(models.find(model => model.id === current.model.trim())?.reasoning?.efforts ?? []).map(effort => <option key={effort.id}
-        value={effort.id}>{effort.name}</option>)}
-    </datalist>
+    {catalog && current.provider.trim() && current.model.trim() && (!group || !selectedModel) && <p className="dt-model-note">
+      {t('modelCustomRoute')}
+    </p>}
   </div>
 }
 

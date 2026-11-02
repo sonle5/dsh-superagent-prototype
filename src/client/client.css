@@ -116,7 +116,23 @@
 .dt-model-fields .dt-input { height: 36px; padding: 0 10px; border-color: var(--dsw-alias-border-l3); transition: border-color 120ms ease, box-shadow 120ms ease; }
 .dt-model-fields .dt-input:hover { border-color: var(--dsw-alias-border-l4); }
 .dt-model-fields .dt-input:focus-within { border-color: var(--dsw-alias-brand-primary); box-shadow: 0 0 0 2px color-mix(in srgb, var(--dsw-alias-brand-primary) 14%, transparent); }
-.dt-model-code input { font-family: var(--ds-font-family-code, Menlo, monospace); font-size: 12px; }
+.dt-combobox { position: relative; min-width: 0; }
+.dt-combobox .dt-input { width: 100%; padding-right: 4px; }
+.dt-combobox input { font-family: var(--ds-font-family-code, Menlo, monospace); font-size: 12px; }
+.dt-combobox-toggle { box-sizing: border-box; display: inline-flex; flex: none; align-items: center; justify-content: center; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--dsw-alias-label-tertiary); cursor: pointer; }
+.dt-combobox-toggle:hover { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-interactive-bg-hover); }
+.dt-combobox-toggle:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: -2px; }
+.dt-combobox-menu { position: absolute; z-index: 20; top: calc(100% + 6px); right: 0; left: 0; overflow: hidden; border: 0.5px solid var(--dsw-alias-border-l3); border-radius: 10px; background: var(--dsw-alias-bg-layer-2); box-shadow: var(--dsw-elevation-prominent); }
+.dt-combobox-menu-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 10px; border-bottom: 0.5px solid var(--dsw-alias-border-l2); color: var(--dsw-alias-label-tertiary); font-size: 11px; line-height: 16px; }
+.dt-combobox-menu-head .dt-textlink { flex: none; font-size: 11px; }
+.dt-combobox-options { max-height: 232px; overflow: auto; padding: 4px; }
+.dt-combobox-option { box-sizing: border-box; display: flex; align-items: center; gap: 8px; width: 100%; min-height: 34px; padding: 6px 8px; border: 0; border-radius: 7px; background: transparent; color: var(--dsw-alias-label-primary); font: inherit; font-size: 12px; line-height: 18px; text-align: left; cursor: pointer; }
+.dt-combobox-option[aria-selected='true'] { background: var(--dsw-alias-interactive-bg-hover); }
+.dt-combobox-option[data-current] { color: var(--dsw-alias-brand-primary); }
+.dt-combobox-option-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dt-combobox-option-detail { min-width: 0; margin-left: auto; overflow: hidden; color: var(--dsw-alias-label-caption); font-family: var(--ds-font-family-code, Menlo, monospace); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.dt-combobox-empty { margin: 0; padding: 12px; color: var(--dsw-alias-label-tertiary); font-size: 12px; line-height: 18px; }
+.dt-model-note { margin: -4px 0 0; color: var(--dsw-alias-label-tertiary); font-size: 12px; line-height: 18px; }
 .dt-grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 .dt-changes { display: flex; flex-direction: column; gap: 2px; font-size: 13px; line-height: 20px; }
 .dt-changes li::before { content: '· '; color: var(--dsw-alias-label-caption); }

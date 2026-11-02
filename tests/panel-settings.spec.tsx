@@ -49,16 +49,68 @@ it('saves the Eval block on the Policy settings and the Executor with its execut
   await click('DSH_SUPERAGENT_DIR')
   expect(field<HTMLTextAreaElement>(zh.prepareCommand).value).toBe('git worktree add "$DSH_SUPERAGENT_DIR"')
   await type(field<HTMLInputElement>(zh.blockedCommands), 'gh-personal  gh.other')
-  const [workerProvider, workerModel, effort] = all('.dt-model input')
+  const [workerProvider, workerModel, effort] = all('.dt-model input') as [HTMLInputElement, HTMLInputElement, HTMLInputElement]
   await type(workerProvider as HTMLInputElement, 'worker-provider'); await type(workerModel as HTMLInputElement,
     'worker-model'); await type(effort as HTMLInputElement, 'high')
-  expect([...document.querySelectorAll('#dt-worker-model-efforts option')].map(option => option.getAttribute('value'))).toEqual(['high'])
+  expect([...effort.closest('.dt-combobox')!.querySelectorAll('[role="option"]')].map(option => option.getAttribute('data-value')))
+    .toEqual(['high'])
   await click(zh.save)
   expect(server.settings.executor).toEqual({ maxWorkers: 5, directory: '/srv/work',
     prepare: 'git worktree add "$DSH_SUPERAGENT_DIR"', blockedCommands: ['gh-personal', 'gh.other'], model: { provider: 'worker-provider',
       model: 'worker-model', reasoningEffort: 'high' } })
   expect(server.requests.filter(request => request.method === 'PUT').map(request => request.path)).toEqual([remote('settings/eval'),
     remote('settings/executor')])
+})
+
+it('keeps the model catalog browsable and clears an incompatible route when the Provider changes', async () => {
+  await mount()
+  await click(zh['tab.execution'])
+  await click(find(zh['tab.settings'], '.dt-status-head button'))
+  const [provider, model, effort] = all('.dt-model input') as [HTMLInputElement, HTMLInputElement, HTMLInputElement]
+  await type(provider as HTMLInputElement, 'worker-provider')
+  await type(model as HTMLInputElement, 'worker-model')
+  await type(effort as HTMLInputElement, 'high')
+
+  const providerBox = provider.closest('.dt-combobox')!
+  await click(providerBox.querySelector<HTMLButtonElement>('.dt-combobox-toggle')!)
+  expect(providerBox.querySelector('[role="listbox"]')).not.toBeNull()
+  expect([...providerBox.querySelectorAll<HTMLElement>('[role="option"]')].map(option => option.dataset.value))
+    .toEqual(['worker-provider', 'claude', 'one-nexus'])
+
+  await click(providerBox.querySelector<HTMLElement>('[role="option"][data-value="claude"]')!)
+  expect(provider).toHaveProperty('value', 'claude')
+  expect(model).toHaveProperty('value', '')
+  expect(effort).toHaveProperty('value', '')
+
+  const modelBox = model.closest('.dt-combobox')!
+  await click(modelBox.querySelector<HTMLButtonElement>('.dt-combobox-toggle')!)
+  expect([...modelBox.querySelectorAll<HTMLElement>('[role="option"]')].map(option => option.dataset.value))
+    .toEqual(['claude-opus-5-5'])
+  await click(modelBox.querySelector<HTMLElement>('[role="option"][data-value="claude-opus-5-5"]')!)
+  expect(model).toHaveProperty('value', 'claude-opus-5-5')
+  expect(effort).toHaveProperty('value', 'max')
+})
+
+it('supports keyboard selection and still saves a free-form model route', async () => {
+  await mount()
+  await click(zh['tab.execution'])
+  await click(find(zh['tab.settings'], '.dt-status-head button'))
+  const [provider, model, effort] = all('.dt-model input') as [HTMLInputElement, HTMLInputElement, HTMLInputElement]
+  await type(provider, 'cla')
+  provider.focus()
+  await act(async () => {
+    provider.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+  })
+  await settle()
+  expect(provider.value).toBe('claude')
+  expect(provider.closest('.dt-combobox')!.querySelector('[role="listbox"]')).toBeNull()
+
+  await type(provider, 'custom-provider')
+  await type(model, 'custom-model')
+  await type(effort, 'custom-effort')
+  expect(text()).toContain(zh.modelCustomRoute)
+  await click(zh.save)
+  expect(server.settings.executor.model).toEqual({ provider: 'custom-provider', model: 'custom-model', reasoningEffort: 'custom-effort' })
 })
 
 it('loads configuration history on demand with localized changes, Source field labels and notified Tickets', async () => {

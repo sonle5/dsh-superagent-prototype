@@ -413,8 +413,16 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
   'POST policy-sync/:id': { answer: ({ params }) => ({ policy: server.settings.policy.sources[params.id] }) },
   'POST setup/check': { answer: () => ({ restarting: true }) },
   'GET models': { answer: () => ({ default: { provider: 'host', model: 'default' }, routableProviders: [], failures: [],
-    groups: [{ id: 'worker-provider', name: 'Worker provider', models: [{ id: 'worker-model', name: 'Worker model',
-      reasoning: { efforts: [{ id: 'high', name: 'High' }] } }] }] }) },
+    groups: [{
+      id: 'worker-provider', name: 'Worker provider', models: [{ id: 'worker-model', name: 'Worker model',
+        reasoning: { efforts: [{ id: 'high', name: 'High' }] } }],
+    }, {
+      id: 'claude', name: 'Claude', models: [{ id: 'claude-opus-5-5', name: 'Opus 5.5',
+        reasoning: { efforts: [{ id: 'high', name: 'High' }, { id: 'max', name: 'Max' }], defaultEffort: 'max' } }],
+    }, {
+      id: 'one-nexus', name: 'One Nexus', models: [{ id: 'glm-5.3-sontinh', name: 'GLM 5.3',
+        reasoning: { efforts: [{ id: 'high', name: 'High' }, { id: 'max', name: 'Max' }], defaultEffort: 'max' } }],
+    }] }) },
   'GET prompts': { query: ['revision', 'offset'], answer: () => server.prompts },
   'PUT prompts': { body: true, answer: ({ body }) => {
     const { revision } = server.prompts
