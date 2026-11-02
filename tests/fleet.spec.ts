@@ -114,3 +114,22 @@ it('invokes only the configured fixed script for a registered profile', async ()
     status: 404, message: 'Deployment not found: missing',
   }))
 })
+
+it('persists one validated deployment for native Session routing', async () => {
+  const state = workspace()
+  writeFileSync(join(state, 'fleet.json'), JSON.stringify({
+    version: 1, controlScript: '/usr/bin/true', logDir: join(state, '.artifacts'),
+    deployments: [{ id: 'inference-support-loop', profile: 'superagent-inference-support-loop',
+      repository: 'onenexus-team/inference-support-loop', url: 'http://127.0.0.1:3082',
+      stateDir: join(state, 'superagent'), workspace: '/Users/alice/src/inference-support-loop' },
+    { id: 'sglang', profile: 'superagent-sglang', repository: 'onenexus-team/sglang', url: 'http://127.0.0.1:3083',
+      stateDir: join(state, 'superagent-sglang'), workspace: '/Users/alice/src/sglang-superagent' }],
+  }))
+
+  const fleet = new Fleet(state)
+  expect(fleet.nativeTarget()).toBeUndefined()
+  expect(fleet.select('sglang')).toEqual({ selected: 'sglang' })
+  expect(fleet.nativeTarget()).toMatchObject({ repository: 'onenexus-team/sglang', profile: 'superagent-sglang' })
+  expect((await fleet.view()).selected).toBe('sglang')
+  expect(() => new Fleet(state).select('missing')).toThrow('Deployment not found: missing')
+})

@@ -290,7 +290,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 
 | Path | Responsibility |
 | --- | --- |
-| `src/index.ts` | The main plugin entry: in `repository` mode, reads the machine settings, starts the Runtime, and gives it the restart that a save of a Source's account uses; in `control` mode, mounts only Fleet lifecycle and the fixed deployment-management proxy |
+| `src/index.ts` | The main plugin entry: in `repository` mode, reads the machine settings, starts the Runtime, and gives it the restart that a save of a Source's account uses; in `control` mode, mounts only Fleet lifecycle, the fixed deployment-management proxy and native Session routing |
 | `src/deployment.ts` | The plugin `Config` and `Machine`; `resolveDeployment` and `resolveFeishuBot` read the repository and the accounts from the Source settings, each CLI run as Executor shells run it; `SETUP_FIELDS` lists the Source fields setup reads. The code names no person, account or organization |
 | `src/setup.ts` | Setup problems: `SetupError`, with a code, the place that fixes it and the English text the log, the main Session and the panel share |
 | `src/policy.ts` | The Policy: the settings schemas by block, the Policy version, the gate and Mandate revalidation |
@@ -344,6 +344,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/tools/executor.ts` | An Executor Session's tools |
 | `src/app/http.ts` | The `/orchestrator/api` routes: the same-origin check, request limits, one status per kind of failure and validated forwarding to registered deployment APIs |
 | `src/app/fleet.ts` | The local fleet registry, aggregate reads from independent loopback deployments, stopped-versus-unreachable status, recent log tails, and lifecycle actions restricted to registered DSH profiles |
+| `src/app/native-auth.ts` | The private per-deployment capability shared by the controller and repository halves of native Session routing |
+| `src/app/native-transport.ts` | The controller and repository halves of deployment-aware native DSH transport: persisted selection, authenticated `/api` forwarding, Remote-stream WebSocket relay, cancellation and operator-peer compatibility; HTTP retains a durable no-interaction peer while every mux minted its own answer peer so closing a stream cannot invalidate API requests |
 | `src/app/api.ts` | `Api`, every route with its parameters, query, body and response, and the filters of the lists; it imports only types, so the panel bundles it |
 | `src/app/views/text.ts` | The two forms of a view's text: `preview`, plain text on one line, and `markdown` without HTML; `plain` and `readable` |
 | `src/app/views/records.ts` | The rows the views share: Triggers, Tickets, Threads, Decisions and Channel links, and `ownersOf`, the owners of follow-ups as one request reads them |
@@ -377,7 +379,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/feishu-image.ts` | Reads a Feishu message's image as an attachment for the assessing Session |
 | `src/client/index.tsx` | The client plugin entry: the sidebar entry, the main panel and the page in DeepSeek Harness's Plugin Manager |
 | `src/client/app.tsx` | The panel: header, search, glossary, tabs and the page of the current route |
-| `src/client/provider.tsx` | What every page reads from its host: copy, deployment context, calls, navigation, notices, the state poll, and `restart`, which reads the state quickly while dsh-superagent restarts |
+| `src/client/provider.tsx` | What every page reads from its host: copy, deployment context, calls, navigation, notices, the state poll, and `restart`, which reads the state quickly while dsh-superagent restarts; deployment changes persist the native selection and reload the Desktop shell |
+| `src/client/native-transport.ts` | Desktop-only replacement of the Gateway Remote WebSocket URL with the controller-owned deployment proxy |
 | `src/client/api.ts` | Calls and polls of the management API, typed by `src/app/api.ts`, and the Decision filters of the Eval status |
 | `src/client/route.ts` | The tabs, the settings groups, the typed routes that `parseRoute` reads, and the route memory with the settings group opened last |
 | `src/client/overview.tsx` | The overview |
@@ -430,6 +433,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/runtime-concurrency.spec.ts` | Work that overlaps: Triggers during a pass, Tickets that change during deliveries and launches |
 | `tests/http.spec.ts` | The same-origin and loopback checks, the status of each kind of failure, the body limit, path parameters, queries and the validated deployment-management proxy |
 | `tests/fleet.spec.ts` | Fleet registry validation, aggregation from independent deployments, stopped-versus-unreachable status, log tails, managed-target lookup and fixed-profile lifecycle invocation |
+| `tests/native-proxy.spec.ts` | End-to-end controller-to-deployment HTTP and WebSocket forwarding, capability and origin rejection, operator-peer authentication, live stream echo and teardown |
+| `tests/native-transport.spec.ts` | Desktop Remote-mux URL routing and constructor restoration |
 | `tests/settings.spec.ts` | Settings saves that race a model or account check, a Policy sync that a save outran, and the refusals of the pause, a sync and a block |
 | `tests/views.spec.ts` | What the management views derive from the Store, such as the Thread a dropped message belongs to |
 | `tests/timeline.spec.ts` | A Thread's pages and a Trigger's neighbours by time and then id, with every received Trigger's time in one form |

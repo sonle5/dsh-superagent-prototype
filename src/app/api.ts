@@ -20,6 +20,7 @@ type Delivery = 'injected' | 'pending'
 
 export interface Api {
   'GET fleet': { response: FleetView }
+  'POST deployments/:id/select': { response: { selected: string } }
   'POST fleet/:id/start': { response: { id: string; action: 'start'; code: number; output: string } }
   'POST fleet/:id/stop': { response: { id: string; action: 'stop'; code: number; output: string } }
   'POST fleet/:id/restart': { response: { id: string; action: 'restart'; code: number; output: string } }
@@ -51,6 +52,7 @@ export interface Api {
 }
 export const FLEET_ROUTES = [
   'GET fleet',
+  'POST deployments/:id/select',
   'POST fleet/:id/start',
   'POST fleet/:id/stop',
   'POST fleet/:id/restart',

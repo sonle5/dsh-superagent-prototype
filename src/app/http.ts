@@ -143,7 +143,8 @@ interface Input<K extends keyof Api> {
   params: RouteParams<K>; query: Record<string, string>; body: (maxBytes?: number) => Promise<unknown>
 }
 type Routes = { [K in keyof Api]: (input: Input<K>) => ApiResponse<K> | Promise<ApiResponse<K>> }
-type ControllerRoutes = Pick<Routes, 'GET fleet' | 'POST fleet/:id/start' | 'POST fleet/:id/stop' | 'POST fleet/:id/restart'>
+type ControllerRoutes = Pick<Routes, 'GET fleet' | 'POST deployments/:id/select' | 'POST fleet/:id/start' | 'POST fleet/:id/stop'
+  | 'POST fleet/:id/restart'>
 type RouteTable = Partial<Routes>
 const offset = z.coerce.number().int().nonnegative().catch(0)
 const limit = (fallback: number, max: number) => z.coerce.number().int().positive().catch(fallback).transform(value => Math.min(max, value))
@@ -169,8 +170,16 @@ function routes(runtime: HttpHost, fleet: Fleet): Routes {
       throw error
     }
   }
+  const select = (id: string): { selected: string } => {
+    try { return fleet.select(id) }
+    catch (error) {
+      if (error instanceof FleetControlError) throw new RouteError(error.status, error.message)
+      throw error
+    }
+  }
   return {
     'GET fleet': () => fleet.view(),
+    'POST deployments/:id/select': ({ params }) => select(params.id),
     'POST fleet/:id/start': ({ params }) => control(params.id, 'start'),
     'POST fleet/:id/stop': ({ params }) => control(params.id, 'stop'),
     'POST fleet/:id/restart': ({ params }) => control(params.id, 'restart'),
@@ -241,8 +250,16 @@ function controllerRoutes(fleet: Fleet): ControllerRoutes {
       throw error
     }
   }
+  const select = (id: string): { selected: string } => {
+    try { return fleet.select(id) }
+    catch (error) {
+      if (error instanceof FleetControlError) throw new RouteError(error.status, error.message)
+      throw error
+    }
+  }
   return {
     'GET fleet': () => fleet.view(),
+    'POST deployments/:id/select': ({ params }) => select(params.id),
     'POST fleet/:id/start': ({ params }) => control(params.id, 'start'),
     'POST fleet/:id/stop': ({ params }) => control(params.id, 'stop'),
     'POST fleet/:id/restart': ({ params }) => control(params.id, 'restart'),

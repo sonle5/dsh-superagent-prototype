@@ -177,6 +177,9 @@ it('forwards management routes only to deployments registered in the local fleet
   expect(await call('GET', 'deployment/sglang/nothing/here')).toEqual({ status: 404,
     body: { error: 'Unknown operation' } })
   expect(seen).toHaveLength(2)
+  expect(await call('POST', 'deployments/sglang/select')).toEqual({ status: 200, body: { selected: 'sglang' } })
+  expect(await call('POST', 'deployments/missing/select')).toEqual({ status: 404,
+    body: { error: 'Deployment not found: missing' } })
 })
 
 it('keeps the controller loopback-only and serves its registry without a local runtime', async () => {

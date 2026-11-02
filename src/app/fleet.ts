@@ -1,8 +1,11 @@
 /** Read-only aggregation and fixed-profile lifecycle control for independent Superagent deployments. */
 import { spawn } from 'node:child_process'
-import { accessSync, closeSync, constants, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs'
+import {
+  accessSync, closeSync, constants, existsSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, writeFileSync,
+} from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import { z } from 'zod'
+import { nativeToken } from './native-auth.ts'
 
 const profile = z.string().regex(/^[A-Za-z0-9_][A-Za-z0-9_.-]*$/, 'DSH profile name')
 const absolute = z.string().refine(isAbsolute, 'Absolute path')
@@ -20,6 +23,10 @@ const Managed = z.object({
   url: loopback,
   stateDir: absolute,
   workspace: absolute,
+})
+const Selection = z.object({
+  version: z.literal(1),
+  deployment: z.string().regex(/^[a-z0-9][a-z0-9-]*$/, 'lowercase deployment id'),
 })
 const Registry = z.object({
   version: z.literal(1),
@@ -101,6 +108,7 @@ export interface FleetDeploymentView {
 }
 export interface FleetView {
   configured: boolean
+  selected?: string
   registryPath: string
   error?: string
   updatedAt: string
@@ -246,9 +254,11 @@ export type FleetAction = 'start' | 'stop' | 'restart'
 /** Aggregate repository-bound deployments and control only profiles present in the local registry. */
 export class Fleet {
   readonly registryPath: string
+  private readonly selectionPath: string
   private readonly busy = new Set<string>()
   constructor(readonly stateDir: string) {
     this.registryPath = join(stateDir, 'fleet.json')
+    this.selectionPath = join(stateDir, 'native-deployment.json')
   }
 
   async view(): Promise<FleetView> {
@@ -257,8 +267,12 @@ export class Fleet {
     const logDir = loaded.value?.logDir
     const deployments = await Promise.all((loaded.value?.deployments ?? []).map(deployment =>
       snapshot(deployment, logDir, executable(control))))
+    const selected = this.selectedId()
     return {
       configured: loaded.configured,
+      ...selected !== undefined && deployments.some(deployment => deployment.id === selected)
+        ? { selected }
+        : {},
       registryPath: this.registryPath,
       ...loaded.error ? { error: loaded.error } : {},
       updatedAt: new Date().toISOString(),
@@ -285,12 +299,38 @@ export class Fleet {
   }
 
   /** Resolve a deployment only from the validated registry. */
-  managementTarget(id: string): { url: string; repository: string; profile: string } {
+  managementTarget(id: string): { url: string; repository: string; profile: string; stateDir: string } {
     const loaded = loadRegistry(this.registryPath)
     if (loaded.error) throw new FleetControlError(400, loaded.error)
     const deployment = loaded.value?.deployments.find(item => item.id === id)
     if (!deployment) throw new FleetControlError(404, `Deployment not found: ${id}`)
-    return { url: deployment.url, repository: deployment.repository, profile: deployment.profile }
+    return { url: deployment.url, repository: deployment.repository, profile: deployment.profile, stateDir: deployment.stateDir }
+  }
+
+  /** Select the deployment whose native DSH state and streams the Desktop controller serves. */
+  select(id: string): { selected: string } {
+    this.managementTarget(id)
+    const temporary = `${this.selectionPath}.${process.pid}.tmp`
+    writeFileSync(temporary, `${JSON.stringify({ version: 1, deployment: id })}\n`, { mode: 0o600 })
+    renameSync(temporary, this.selectionPath)
+    return { selected: id }
+  }
+
+  /** Resolve the selected deployment, or undefined before the first selection. */
+  nativeTarget(): { url: string; repository: string; profile: string; stateDir: string; token: string } | undefined {
+    const id = this.selectedId()
+    if (id === undefined) return undefined
+    const target = this.managementTarget(id)
+    return { ...target, token: nativeToken(target.stateDir)! }
+  }
+
+  private selectedId(): string | undefined {
+    if (!existsSync(this.selectionPath)) return undefined
+    try {
+      return Selection.parse(JSON.parse(readFileSync(this.selectionPath, 'utf8')) as unknown).deployment
+    } catch (error) {
+      throw new FleetControlError(400, `Invalid native deployment selection: ${reason(error)}`)
+    }
   }
 }
 

@@ -5,6 +5,7 @@ import { caller, usePoll, type ApiMessages, type Call, type SetupView, type Stat
 import type { Route } from './route.ts'
 import STYLES from './client.css?raw'
 import { errorText, setupText, valueLabel, type T } from './text.ts'
+import { isDesktopShell } from './native-transport.ts'
 
 export interface PanelContext {
   t: T
@@ -81,6 +82,12 @@ const DEPLOYMENT_KEY = 'dsh-superagent/deployment'
 function rememberedDeployment(): string | undefined {
   try { return sessionStorage.getItem(DEPLOYMENT_KEY) || undefined } catch { return undefined }
 }
+function rememberDeployment(id: string | undefined): void {
+  try {
+    if (id === undefined) sessionStorage.removeItem(DEPLOYMENT_KEY)
+    else sessionStorage.setItem(DEPLOYMENT_KEY, id)
+  } catch (failure) { void failure /* Selection memory is a convenience. */ }
+}
 export function PanelProvider({ t, interval = 5000, navigate = stay, back = stay, backLabel = '', children }: {
   t: T; interval?: number; navigate?: PanelContext['navigate']; back?: () => void
   backLabel?: string
@@ -97,21 +104,44 @@ export function PanelProvider({ t, interval = 5000, navigate = stay, back = stay
     id, name, repository,
   })) ?? [], [fleet])
   const deployment = deployments.find(item => item.id === deploymentId)
-  const selectDeployment = useCallback((id: string) => {
-    setDeploymentId(id)
-    try { sessionStorage.setItem(DEPLOYMENT_KEY, id) } catch (failure) { void failure /* Selection memory is a convenience. */ }
-  }, [])
-  useEffect(() => {
-    if (!fleet || deployment) return
-    const next = deployments[0]
-    if (next) selectDeployment(next.id)
-    else if (deploymentId !== undefined) {
-      setDeploymentId(undefined)
-      try { sessionStorage.removeItem(DEPLOYMENT_KEY) } catch (failure) { void failure /* Selection memory is a convenience. */ }
-    }
-  }, [deployment, deploymentId, deployments, fleet, selectDeployment])
+  const initiallyResolved = useRef(false)
   const [toast, setToast] = useState<{ text: string; id: number }>()
   const notify = useCallback((text: string) => setToast({ text, id: Date.now() }), [])
+  const activateDeployment = useCallback((id: string, persist: boolean) => {
+    const previous = deploymentId
+    setDeploymentId(id)
+    rememberDeployment(id)
+    if (!persist) return
+    void localCall('POST deployments/:id/select', { id }).then(() => {
+      if (isDesktopShell()) globalThis.location.reload()
+    }, failure => {
+      setDeploymentId(previous)
+      rememberDeployment(previous)
+      notify(errorText(failure))
+    })
+  }, [deploymentId, localCall, notify])
+  const selectDeployment = useCallback((id: string) => { activateDeployment(id, true) }, [activateDeployment])
+  useEffect(() => {
+    if (!fleet) return
+    if (initiallyResolved.current) {
+      if (deployment) return
+      const next = deployments.find(item => item.id === fleet.selected) ?? deployments[0]
+      if (next) activateDeployment(next.id, true)
+      return
+    }
+    initiallyResolved.current = true
+    const selected = deployments.find(item => item.id === fleet.selected)
+    if (selected && selected.id !== deploymentId) {
+      activateDeployment(selected.id, false)
+      return
+    }
+    const next = selected ?? deployments[0]
+    if (next) activateDeployment(next.id, selected === undefined)
+    else if (deploymentId !== undefined) {
+      setDeploymentId(undefined)
+      rememberDeployment(undefined)
+    }
+  }, [activateDeployment, deployment, deploymentId, deployments, fleet])
   // Poll at 1s during a restart until the server goes down and answers again, or time out after 30s if the restart completed between polls.
   const [restarting, setRestarting] = useState<{ down: boolean }>()
   const [restarts, setRestarts] = useState(0)

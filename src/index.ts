@@ -4,13 +4,22 @@ import type {} from '@deepseek-ai/dsh-settings'
 import { Runtime } from './app/runtime.ts'
 import { Config, machineOf, type DeploymentConfig } from './deployment.ts'
 import { registerControlHttp } from './app/http.ts'
+import { registerNativeTransport } from './app/native-transport.ts'
 
 export const name = 'dsh-superagent'
-export const inject = ['agents', 'sessionController', 'sessionPersistence', 'workspaceRegistry', 'permissionPresets', 'tools', 'systemPrompt', 'skills', 'webServer', 'llm', 'subprocess']
+export const inject = ['agents', 'sessionController', 'sessionPersistence', 'workspaceRegistry', 'permissionPresets', 'tools', 'systemPrompt', 'skills',
+  'webServer', 'connection', 'llm', 'subprocess']
 export { Config }
 export async function apply(ctx: Context, config: DeploymentConfig): Promise<void> {
   if (config.mode === 'control') {
-    ctx.effect(() => registerControlHttp(ctx, config.stateDir))
+    ctx.effect(() => {
+      const disposeHttp = registerControlHttp(ctx, config.stateDir)
+      const disposeNative = registerNativeTransport(ctx, config.stateDir, 'control')
+      return () => {
+        disposeNative()
+        disposeHttp()
+      }
+    })
     ctx.logger.info('dsh-superagent control ready; the Superagent sidebar opens the repository-neutral fleet')
     return
   }
@@ -24,6 +33,9 @@ export async function apply(ctx: Context, config: DeploymentConfig): Promise<voi
   const restart = (): void => {
     ctx.fiber.restart().then(() => { ctx.get('settings')?.describe() }).catch((error: unknown) => { ctx.logger.error('dsh-superagent restart failed: %s', String(error)) })
   }
+  // Desktop requests settings as soon as the Host reports ready. Keep native routing available while the repository
+  // runtime performs its own longer startup checks.
+  ctx.effect(() => registerNativeTransport(ctx, machine.stateDir, 'repository'))
   const runtime = new Runtime(ctx, machine, restart)
   ctx.effect(() => async () => { await runtime.stop() })
   await runtime.ready

@@ -316,6 +316,13 @@ const SourceSave = z.object({ enabled: z.boolean(), config: z.unknown() })
 
 const ROUTES: { [K in keyof Api]: Route<K> } = {
   'GET fleet': { answer: () => server.fleet },
+  'POST deployments/:id/select': { answer: ({ params }) => {
+    if (!server.fleet.deployments.some(deployment => deployment.id === params.id)) {
+      return refuse(404, `Deployment not found: ${params.id}`)
+    }
+    server.fleet.selected = params.id
+    return { selected: params.id }
+  } },
   'POST fleet/:id/start': { answer: ({ params }) => {
     const item = server.fleet.deployments.find(deployment => deployment.id === params.id)
     if (!item) return refuse(404, `Deployment not found: ${params.id}`)

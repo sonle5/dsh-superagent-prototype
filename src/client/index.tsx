@@ -1,5 +1,6 @@
 /** Browser plugin entry point registering the sidebar icon, main management panel, and Plugin Manager config view. */
 import type { Context } from '@deepseek-ai/cordis'
+import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
 import type { MainPanelId } from '@deepseek-ai/dsh-client-ui-layout/client'
 import type { SidebarPanelIconOwnerProps } from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
@@ -10,6 +11,7 @@ import type { PluginConfigViewProps } from '@deepseek-ai/dsh-client-ui-plugin-ma
 import { App } from './app.tsx'
 import { PluginConfig } from './deployment.tsx'
 import { en, zh } from './locales.ts'
+import { installDesktopNativeTransport, isDesktopShell, reconnectDesktopConnection } from './native-transport.ts'
 import type { T } from './text.ts'
 
 type ClientContext = Context
@@ -25,9 +27,20 @@ function HammerIcon({ size }: SidebarPanelIconOwnerProps) {
 
 function Mounted({ t }: { ctx: ClientContext; t: T }) { return <App t={t} /> }
 
-export const inject = ['slots', 'locale']
+export const inject = ['slots', 'locale', 'connection']
 /** Registers the panel, sidebar icon, and Plugin Manager config view; `configForms` is optional (without it, machine settings are read-only). */
 export function apply(ctx: ClientContext): void {
+  if (isDesktopShell()) {
+    ctx.effect(() => {
+      const restore = installDesktopNativeTransport()
+      const connection = ctx.get('connection') as unknown as ConnectionHandle
+      const reconnect = reconnectDesktopConnection(connection)
+      return () => {
+        reconnect()
+        restore()
+      }
+    }, 'dsh-superagent: native deployment transport')
+  }
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-superagent: dictionaries')
   const t = ctx.locale.bind(NS)
   ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: PANEL_ID, locale: NS, inject: () => ({}) },
