@@ -13,14 +13,15 @@ const STAGE_GROUPS: readonly SettingsGroup[] = ['source', 'eval', 'execution']
 export function SettingsPage({ group, query, state, deploymentForm }: {
   group: SettingsGroup; query: { source?: string; version?: string }; state: StateView; deploymentForm: DeploymentForm
 }) {
-  const { t, navigate } = usePanel()
+  const { t, navigate, deployment } = usePanel()
   const content = (() => {
     switch (group) {
       case 'source': return <SettingsProvider><SourceSettings {...query.source ? { focus: query.source } : {}} /></SettingsProvider>
       case 'eval': return <SettingsProvider><EvalSettings version={query.version} /></SettingsProvider>
       case 'execution': return <SettingsProvider><ExecutionSettings /></SettingsProvider>
       case 'prompts': return <PromptsPage />
-      case 'deployment': return <DeploymentPage setup={state.setup} form={deploymentForm} />
+      case 'deployment': return <DeploymentPage setup={state.setup} form={deployment.origin === 'desktop' ? deploymentForm : undefined}
+        managed={deployment.origin !== 'desktop'} />
     }
   })()
   return <div className="dt-settings">

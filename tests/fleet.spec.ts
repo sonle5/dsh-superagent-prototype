@@ -93,6 +93,16 @@ it('reports an invalid registry without losing the embedded deployment', async (
   expect(view.deployments[0]).toMatchObject({ id: 'desktop', status: 'ready' })
 })
 
+it('reserves the embedded deployment id in the fleet registry', async () => {
+  const state = workspace()
+  writeFileSync(join(state, 'fleet.json'), JSON.stringify({ version: 1, controlScript: '/usr/bin/true', logDir: state,
+    deployments: [{ id: 'desktop', profile: 'other', repository: 'acme/other', url: 'http://127.0.0.1:9',
+      stateDir: join(state, 'other'), workspace: '/Users/alice/src/other' }] }))
+  const view = await new Fleet(state, 'http://127.0.0.1:9').view()
+  expect(view.error).toContain('The id desktop is reserved for the embedded deployment')
+  expect(view.deployments).toHaveLength(1)
+})
+
 it('invokes only the configured fixed script for a registered profile', async () => {
   const state = workspace()
   const argumentsFile = join(state, 'args')

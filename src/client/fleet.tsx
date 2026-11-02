@@ -31,7 +31,7 @@ function Controls({ deployment, run, busy }: { deployment: Deployment; run: (id:
 
 function DeploymentCard({ deployment, run, busy }: { deployment: Deployment; run: (id: string, action: Action) => Promise<unknown>
   busy: boolean }) {
-  const { t } = usePanel()
+  const { t, navigate, selectDeployment } = usePanel()
   const health = deployment.health.filter(item => item.state !== 'ready')
   return <article className="dt-card dt-fleet-card" data-status={deployment.status}>
     <div className="dt-card-head">
@@ -61,6 +61,8 @@ function DeploymentCard({ deployment, run, busy }: { deployment: Deployment; run
     </li>)}</ul>}
     <div className="dt-row-buttons">
       <Controls deployment={deployment} run={run} busy={busy} />
+      {deployment.origin === 'managed' && <Button variant="outline" size="sm" icon={<Icon name="settings" size={14} />}
+        onClick={() => { selectDeployment(deployment.id); navigate({ page: 'overview' }) }}>{t('fleetManage')}</Button>}
     </div>
     <details className="dt-fleet-details">
       <summary>{t('fleetDetails')}</summary>
@@ -77,7 +79,7 @@ function DeploymentCard({ deployment, run, busy }: { deployment: Deployment; run
             <span className="dt-line-text">{thread.title}</span><span className="dt-row-meta">{thread.source} · <When at={thread.lastAt} /></span>
           </li>)}</ul> : <Hint>{t('none')}</Hint>}
         </section>
-        <section>
+        <section className="dt-fleet-workspace">
           <h3>{t('fleetWorkspace')}</h3>
           <dl className="dt-kv">
             <dt>{t('fleetStateDir')}</dt><dd className="dt-mono">{deployment.stateDir}</dd>

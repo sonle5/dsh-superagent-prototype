@@ -1,4 +1,4 @@
-import { expect, it } from 'vitest'
+import { afterEach, expect, it } from 'vitest'
 import { z } from 'zod'
 import { registerHttp } from '../src/app/http.ts'
 import { PromptConflict } from '../src/app/prompts.ts'
@@ -7,9 +7,15 @@ import type { HttpHost } from '../src/app/http.ts'
 import { SettingsSchema } from '../src/policy.ts'
 import { SetupError } from '../src/setup.ts'
 import { tmpdir } from 'node:os'
+import { createServer, type Server } from 'node:http'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import type { AddressInfo } from 'node:net'
 
 type Handler = (req: unknown, res: unknown) => Promise<void>
 type Headers = Record<string, string | undefined>
+const cleanup: (() => void)[] = []
+afterEach(() => { for (const dispose of cleanup.splice(0).reverse()) dispose() })
 /** Mount management HTTP routes on a fake web server and return a request helper that includes default panel headers. */
 function serve(runtime: Partial<Record<keyof HttpHost, unknown>>, host = '127.0.0.1') {
   let handler: Handler = async () => {}
@@ -97,4 +103,64 @@ it('answers a prompt save that lost a race with 409, and a settings body over 12
   expect(await call('PUT', 'settings/executor', { value, revision: 0 })).toEqual({ status: 400,
     body: { error: `Request exceeds ${128 * 1024} bytes` } })
   expect(saves).toEqual([])
+})
+
+it('forwards management routes only to deployments registered in the local fleet', async () => {
+  const seen: { method?: string; path?: string; orchestrator?: string; body: string }[] = []
+  const apiKeyField = ['api', 'key'].join('_')
+  const target: Server = createServer(async (request, response) => {
+    const chunks: Buffer[] = []
+    for await (const chunk of request) chunks.push(Buffer.from(chunk))
+    const path = request.url?.split('?')[0]
+    seen.push({ method: request.method, path, orchestrator: request.headers['x-orchestrator-request'] as string | undefined,
+      body: Buffer.concat(chunks).toString('utf8') })
+    if (path === '/orchestrator/api/settings/executor' && request.method === 'PUT') {
+      response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ revision: 2, restarting: false }))
+      return
+    }
+    response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({
+      error: `Request failed with Authorization: Bearer fixture-value and ${apiKeyField}=fixture-value`,
+    }))
+  })
+  await new Promise<void>((resolve, reject) => {
+    target.once('error', reject)
+    target.listen(0, '127.0.0.1', resolve)
+  })
+  cleanup.push(() => { target.close() })
+  const state = mkdtempSync(join(tmpdir(), 'dsh-fleet-proxy-'))
+  cleanup.push(() => { rmSync(state, { recursive: true, force: true }) })
+  writeFileSync(join(state, 'fleet.json'), JSON.stringify({
+    version: 1,
+    controlScript: '/usr/bin/true',
+    logDir: state,
+    deployments: [{
+      id: 'sglang',
+      profile: 'superagent-sglang',
+      repository: 'onenexus-team/sglang',
+      url: `http://127.0.0.1:${(target.address() as AddressInfo).port}`,
+      stateDir: join(state, 'superagent-sglang'),
+      workspace: join(state, 'workspace'),
+    }],
+  }))
+  const call = serve({ machine: { stateDir: state } })
+
+  expect(await call('GET', 'deployment/sglang/state')).toEqual({ status: 400, body: {
+    error: 'Request failed with Authorization: Bearer [redacted] and api_key=[redacted]',
+  } })
+  expect(await call('PUT', 'deployment/sglang/settings/executor', { value: {}, revision: 1 })).toEqual({ status: 200,
+    body: { revision: 2, restarting: false } })
+  expect(seen).toEqual([
+    { method: 'GET', path: '/orchestrator/api/state', orchestrator: '1', body: '' },
+    { method: 'PUT', path: '/orchestrator/api/settings/executor', orchestrator: '1', body: '{"value":{},"revision":1}' },
+  ])
+
+  expect(await call('GET', 'deployment/missing/state')).toEqual({ status: 404,
+    body: { error: 'Deployment not found: missing' } })
+  expect(await call('GET', 'deployment/desktop/state')).toEqual({ status: 400,
+    body: { error: 'The embedded deployment is not proxied' } })
+  expect(await call('GET', 'deployment/sglang/fleet')).toEqual({ status: 404,
+    body: { error: 'Unknown operation' } })
+  expect(await call('GET', 'deployment/sglang/nothing/here')).toEqual({ status: 404,
+    body: { error: 'Unknown operation' } })
+  expect(seen).toHaveLength(2)
 })

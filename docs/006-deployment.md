@@ -156,6 +156,10 @@ The registry is local machine configuration. The panel does not accept a command
 
 The card title is the repository's exact `owner/name`; the Desktop origin or DSH profile is shown separately as deployment metadata.
 
+Use the deployment selector beside the **Superagent** title, or **Manage** on a Fleet card, to make a registered deployment the current management context. The Overview, Source, Trigger, Eval, Execution, Prompts and stage settings then read and save through the same-origin Desktop proxy to that deployment's loopback management API. The proxy accepts only a deployment id from this validated registry and an existing management route; the browser cannot supply a target URL. Fleet lifecycle controls always stay local to the Desktop control plane.
+
+Each profile keeps its own settings, drafts, model catalog and state. Machine limits shown under Deployment settings remain read-only for a managed profile because DSH's configuration form belongs to the current Desktop profile; change those limits in the managed profile's own DSH configuration. Start a stopped deployment from Fleet before opening its management views.
+
 ### Hourly check
 
 Create the hourly check in the DeepSeek Harness profile you normally use, not in `superagent`. It must keep running when the agent service is down. Ask an agent in that profile to create an hourly schedule using this prompt, with the checkout path filled in:

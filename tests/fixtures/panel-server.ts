@@ -481,7 +481,8 @@ export function usePanelServer(cleanup: () => void) {
       const method = init?.method ?? 'GET'
       const body: unknown = init?.body ? JSON.parse(String(init.body)) : undefined
       server.requests.push({ path: decodeURIComponent(`${path}${address.search}`), method, ...body === undefined ? {} : { body } })
-      const route = match(method, path.split('/'))
+      const routePath = /^deployment\/[a-z0-9][a-z0-9-]*\/(.+)$/.exec(path)?.[1] ?? path
+      const route = match(method, routePath.split('/'))
       if (!route) return new Reply({ error: 'Unknown operation' }, 404)
       const answer = await run(route.key, route.params, address.searchParams, body)
       return answer instanceof Refusal ? new Reply(answer.body, answer.status) : new Reply(answer, 200)

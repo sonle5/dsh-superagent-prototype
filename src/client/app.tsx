@@ -100,7 +100,7 @@ function SearchResults({ result, query, onClose }: { result: SearchView; query: 
 }
 
 function Header({ masterId }: { masterId: string | undefined }) {
-  const { t, call, openSession, notify } = usePanel()
+  const { t, call, deployment, deployments, selectDeployment, openSession, notify } = usePanel()
   const [glossary, setGlossary] = useState(false)
   const [query, setQuery] = useState('')
   const [result, setResult] = useState<{ query: string; value: SearchView }>()
@@ -123,7 +123,12 @@ function Header({ masterId }: { masterId: string | undefined }) {
       failure => { if (request === latest.current) notify(errorText(failure)) })
   }
   return <header className="dt-head">
-    <div className="dt-head-title"><h1 className="dt-title">{t('title')}</h1></div>
+    <div className="dt-head-title"><h1 className="dt-title">{t('title')}</h1>
+      <select className="dt-deployment-context" aria-label={t('deploymentContext')} title={t('activeDeployment')}
+        value={deployment.id} onChange={event => selectDeployment(event.target.value)}>
+        {deployments.map(item => <option key={item.id} value={item.id}>{item.repository || item.name}</option>)}
+      </select>
+    </div>
     <div className="dt-toolbar">
       <form ref={search} className="dt-search" role="search" onSubmit={submit} onKeyDown={event => { if (event.key === 'Escape') show() }}>
         <Input type="search" icon={<Icon name="search" />} value={query} placeholder={t('searchPlaceholder')} aria-label={t('searchLabel')}
@@ -132,15 +137,15 @@ function Header({ masterId }: { masterId: string | undefined }) {
       </form>
       <Button variant="ghost" size="sm" icon={<Icon name="question" />} aria-label={t('glossary')} title={t('glossary')} aria-haspopup="dialog"
         onClick={() => setGlossary(true)} />
-      <Button variant="outline" size="sm" icon={<Icon name="session" size={14} />} disabled={!masterId}
-        onClick={() => { if (masterId) openSession(masterId).catch(failure => notify(errorText(failure))) }}>{t('openMaster')}</Button>
+      {deployment.origin === 'desktop' && <Button variant="outline" size="sm" icon={<Icon name="session" size={14} />} disabled={!masterId}
+        onClick={() => { if (masterId) openSession(masterId).catch(failure => notify(errorText(failure))) }}>{t('openMaster')}</Button>}
     </div>
     <Glossary open={glossary} onClose={() => setGlossary(false)} />
   </header>
 }
 
 function Pages({ route, openTab, deploymentForm }: { route: Route; openTab: (tab: Tab) => void; deploymentForm: DeploymentForm }) {
-  const { t } = usePanel()
+  const { t, deployment } = usePanel()
   const { state, error, reload } = usePanelData()
   // Keep the active tab scrolled into view on narrow screens when routes change via links.
   useEffect(() => { document.getElementById(`dt-tab-${route.page}`)?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' }) }, [route.page])
@@ -162,7 +167,7 @@ function Pages({ route, openTab, deploymentForm }: { route: Route; openTab: (tab
   })()
   return <div className="dt-page">
     <div className="dt-column">
-      <Header masterId={state?.masterId} />
+      <Header key={deployment.id} masterId={state?.masterId} />
       {error && state && <p className="dt-error" role="status">{error.message}</p>}
       <SegmentedTabs className="dt-tabs" label={t('pagesLabel')} value={route.page} onChange={openTab}
         items={TABS.map(value => ({ value, label: t(`tab.${value}`), id: `dt-tab-${value}`, panelId: 'dt-page' }))} />

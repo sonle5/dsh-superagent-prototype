@@ -105,14 +105,16 @@ export const DECISION_KINDS: Readonly<Record<DecisionFilter, string>> = { work: 
 export type Call = <K extends keyof Api>(route: K, ...request: {} extends ApiRequest<K> ? [request?: ApiRequest<K>] : [request: ApiRequest<K>])
   => Promise<ApiResponse<K>>
 /** Build a typed route caller that resolves localized error messages on each request. */
-export function caller(messages: () => ApiMessages): Call {
+export function caller(messages: () => ApiMessages, deployment = 'desktop'): Call {
   return (route, ...[request]) => {
     const [method, pattern] = route.split(' ') as [string, string]
     const values = (request ?? {}) as Record<string, unknown> & { query?: Record<string, unknown>; body?: unknown }
     const path = pattern.replace(/:(\w+)/g, (_match, name: string) => encodeURIComponent(String(values[name])))
     const query = Object.entries(values.query ?? {}).filter(([, value]) => value !== undefined && value !== '')
       .map(([name, value]) => `${name}=${encodeURIComponent(String(value))}`).join('&')
-    return api(messages(), query ? `${path}?${query}` : path, method, values.body)
+    const local = method === 'GET' && path === 'fleet' || method === 'POST' && path.startsWith('fleet/')
+    const target = deployment === 'desktop' || local ? path : `deployment/${encodeURIComponent(deployment)}/${path}`
+    return api(messages(), query ? `${target}?${query}` : target, method, values.body)
   }
 }
 

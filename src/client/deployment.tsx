@@ -30,7 +30,8 @@ export function usePageForm(form: ConfigForm<Record<string, unknown>> | undefine
 }
 
 /** Deployment configuration form; falls back to read-only display when DSH config forms are unavailable or read-only. */
-export function DeploymentPage({ setup, form, accounts: showAccounts }: { setup: SetupView; form: DeploymentForm; accounts?: boolean }) {
+export function DeploymentPage({ setup, form, accounts: showAccounts,
+  managed = false }: { setup: SetupView; form: DeploymentForm; accounts?: boolean; managed?: boolean }) {
   const { t, notify } = usePanel()
   const snapshot = form?.state
   const editable = snapshot?.status === 'ready' && snapshot.writable
@@ -46,7 +47,7 @@ export function DeploymentPage({ setup, form, accounts: showAccounts }: { setup:
     } })
   const accounts = setup.accounts
   // Remote browsers (`memory` mode) are read-only; `unavailable` indicates `dsh-superagent` is still starting.
-  const readOnlyHint = !form ? t('deploymentNoForms') : snapshot?.mode === 'memory' ? t('deploymentReadOnly')
+  const readOnlyHint = managed ? t('deploymentManagedProfile') : !form ? t('deploymentNoForms') : snapshot?.mode === 'memory' ? t('deploymentReadOnly')
     : snapshot?.status === 'loading' ? t('loading') : snapshot?.status === 'unavailable' ? t('deploymentUnavailable')
     : !editable ? t('deploymentReadOnly') : undefined
   const limit = (key: typeof MACHINE_LIMITS[number], label: string) => <Field label={label}>

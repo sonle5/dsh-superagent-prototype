@@ -27,7 +27,7 @@ import { settingsView } from './views/settings.ts'
 import { sourcesStatus, type SetupState } from './views/sources.ts'
 import { decisionList, search, threadDetail, threadList } from './views/threads.ts'
 import { executorLoad, ticketDetail, ticketList } from './views/tickets.ts'
-import { Fleet, FleetControlError, type FleetAction } from './fleet.ts'
+import { Fleet, FleetControlError, redactSensitive, type FleetAction } from './fleet.ts'
 
 export interface HttpHost {
   readonly store: Store
@@ -56,19 +56,25 @@ export interface HttpHost {
   models(): Promise<ModelCatalog>
 }
 /**
- * Represents a client-facing 400, 404 or 409 error raised during management route parsing, lookup or contention.
+ * Represents a client-facing 400, 404, 409 or 502 error raised during management route parsing, lookup, contention or forwarding.
  * Route handlers throw it when request bodies are malformed or target records are missing, and registerHttp serializes its status and message in the HTTP response.
  */
-class RouteError extends Error { constructor(readonly status: 400 | 404 | 409, message: string) { super(message) } }
-async function readBody(req: IncomingMessage, maxBytes = 128 * 1024): Promise<unknown> {
+class RouteError extends Error { constructor(readonly status: 400 | 404 | 409 | 502, message: string) { super(message) } }
+async function readBodyBytes(req: IncomingMessage, maxBytes: number): Promise<Buffer> {
   let size = 0; const chunks: Buffer[] = []
   for await (const chunk of req) {
     const bytes = Buffer.from(chunk); size += bytes.length
     if (size > maxBytes) throw new RouteError(400, `Request exceeds ${maxBytes} bytes`)
     chunks.push(bytes)
   }
-  try { return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown }
-  catch { throw new RouteError(400, 'The request body is not JSON') }
+  return Buffer.concat(chunks)
+}
+async function readBody(req: IncomingMessage, maxBytes = 128 * 1024): Promise<unknown> {
+  try { return JSON.parse((await readBodyBytes(req, maxBytes)).toString('utf8')) as unknown }
+  catch (error) {
+    if (error instanceof RouteError) throw error
+    throw new RouteError(400, 'The request body is not JSON')
+  }
 }
 function json(res: ServerResponse, status: number, value: unknown): void {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }); res.end(JSON.stringify(value))
@@ -243,6 +249,39 @@ export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
   if (ctx.webServer.host !== '127.0.0.1') throw new Error('Orchestrator management requires a loopback Web server')
   const fleet = new Fleet(runtime.machine.stateDir, `http://127.0.0.1:${ctx.webServer.port}`)
   const table = routes(runtime, fleet)
+  const deploymentPath = /^\/orchestrator\/api\/deployment\/([a-z0-9][a-z0-9-]*)\/(.+)$/
+  const forward = async (req: IncomingMessage, url: URL, id: string, suffix: string) => {
+    const method = req.method ?? 'GET'
+    const operation = match(table, method, suffix.split('/'))
+    // Fleet lifecycle belongs to the Desktop control plane. A managed deployment exposes only its own management API.
+    if (!operation || suffix === 'fleet' || suffix.startsWith('fleet/')) throw new RouteError(404, 'Unknown operation')
+    let target: ReturnType<Fleet['managementTarget']>
+    try { target = fleet.managementTarget(id) }
+    catch (error) {
+      if (error instanceof FleetControlError) throw new RouteError(error.status, error.message)
+      throw error
+    }
+    const raw = method === 'GET' || method === 'HEAD' ? Buffer.alloc(0)
+      : await readBodyBytes(req, 4 * (runtime.machine.promptMaxChars?.get?.() ?? 100_000) + 4096)
+    const payload = raw.toString('utf8')
+    const targetUrl = new URL(`/orchestrator/api/${suffix}`, target.url)
+    targetUrl.search = url.search
+    let response: Response
+    try {
+      response = await fetch(targetUrl, {
+        method,
+        headers: { accept: 'application/json', 'x-orchestrator-request': '1', ...payload ? { 'content-type': 'application/json' } : {} },
+        ...payload ? { body: payload } : {},
+        redirect: 'error',
+        signal: AbortSignal.timeout(15_000),
+      })
+    } catch (error) {
+      throw new RouteError(502, redactSensitive(`Deployment unavailable: ${error instanceof Error ? error.message : String(error)}`))
+    }
+    const text = await response.text()
+    try { return { status: response.status, body: JSON.parse(response.ok ? text : redactSensitive(text)) as unknown } }
+    catch { return { status: response.status, body: { error: redactSensitive(text || response.statusText) } } }
+  }
   const disposers = [
     ctx.webServer.register({ kind: 'prefix', path: '/orchestrator', handler: async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://localhost')
@@ -250,6 +289,12 @@ export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
       if (!sameOrigin(req, ctx.webServer.port)) { json(res, 403, { error: 'Same-origin management request required' }); return }
       try {
         await runtime.ready
+        const deployment = deploymentPath.exec(url.pathname)
+        if (deployment) {
+          const result = await forward(req, url, deployment[1]!, deployment[2]!)
+          json(res, result.status, result.body)
+          return
+        }
         const route = match(table, req.method ?? 'GET', url.pathname.slice('/orchestrator/api/'.length).split('/'))
         if (!route) throw new RouteError(404, 'Unknown operation')
         const query = Object.fromEntries(url.searchParams)

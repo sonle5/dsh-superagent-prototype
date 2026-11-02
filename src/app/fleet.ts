@@ -33,6 +33,10 @@ const Registry = z.object({
   if (value.deployments.length && !value.logDir) {
     context.addIssue({ code: 'custom', path: ['logDir'], message: 'Required when deployments are registered' })
   }
+  value.deployments.forEach((deployment, index) => {
+    if (deployment.id === 'desktop') context.addIssue({ code: 'custom', path: ['deployments', index, 'id'],
+      message: 'The id desktop is reserved for the embedded deployment' })
+  })
   for (const field of ['id', 'profile', 'url'] as const) {
     const seen = new Set<string>()
     for (const deployment of value.deployments) {
@@ -126,7 +130,8 @@ interface DeploymentConfig {
 const reason = (error: unknown): string => error instanceof Error ? error.message : String(error)
 const emptyTickets = z.object({ items: z.array(Ticket).default([]) })
 const emptyThreads = z.object({ items: z.array(Thread).default([]) })
-const redact = (text: string): string => text
+/** Remove credentials that a child deployment or log line may echo. */
+export const redactSensitive = (text: string): string => text
   .replace(/([?&](?:token|access_token|api[_-]?key|key)=)[^&\s]+/gi, '$1[redacted]')
   .replace(/\b(?:sk-[A-Za-z0-9_-]{12,}|onenx_[A-Za-z0-9_-]{12,})\b/g, '[redacted]')
   .replace(/(Authorization:\s*Bearer\s+)\S+/gi, '$1[redacted]')
@@ -177,7 +182,7 @@ function logTail(logDir: string | undefined, profile: string): { path: string; t
     try { readSync(descriptor, buffer, 0, length, size - length) } finally { closeSync(descriptor) }
     const lines = buffer.toString('utf8').split('\n')
     if (size > length) lines.shift()
-    return { path, tail: redact(lines.slice(-80).join('\n')) }
+    return { path, tail: redactSensitive(lines.slice(-80).join('\n')) }
   } catch { return undefined }
 }
 
@@ -186,7 +191,7 @@ function statusOf(state: z.infer<typeof State>): { status: FleetStatus; detail: 
     state.setup.problem?.detail,
     state.setup.feishuProblem?.detail,
     ...Object.values(state.health).filter(item => item.state === 'error').map(item => item.detail),
-  ].filter((value): value is string => !!value).map(redact)
+  ].filter((value): value is string => !!value).map(redactSensitive)
   if (state.setup.problem) return { status: 'setup', detail: problems[0] ?? 'Waiting for setup' }
   const runtime = state.health.runtime?.state
   if (runtime === 'error') return { status: 'error', detail: problems[0] ?? 'Runtime is failing' }
@@ -215,7 +220,7 @@ async function snapshot(deployment: DeploymentConfig, logDir: string | undefined
       name: title(deployment, repository),
       repository,
       ...status,
-      health: Object.entries(state.health).map(([name, item]) => ({ name, state: item.state, detail: redact(item.detail) })),
+      health: Object.entries(state.health).map(([name, item]) => ({ name, state: item.state, detail: redactSensitive(item.detail) })),
       load: state.load,
       tickets: {
         open: tickets.items.length,
@@ -239,7 +244,7 @@ async function snapshot(deployment: DeploymentConfig, logDir: string | undefined
       ...deployment,
       name: title(deployment),
       status: stopped(logDir, deployment.profile) ? 'stopped' : 'unreachable',
-      detail: stopped(logDir, deployment.profile) ? 'Stopped intentionally' : redact(reason(error)),
+      detail: stopped(logDir, deployment.profile) ? 'Stopped intentionally' : redactSensitive(reason(error)),
       health: [],
       load: { running: 0, queued: 0, maxWorkers: 0 },
       tickets: { open: 0, pending: 0, working: 0, idle: 0, recent: [] },
@@ -294,8 +299,18 @@ export class Fleet {
       if (action !== 'start') args.push('--stop-timeout', '60')
       const result = await run(script, args)
       if (![0, 2, 3].includes(result.code)) throw new FleetControlError(400, result.output || `${action} failed`)
-      return { id, action, ...result, output: redact(result.output) }
+      return { id, action, ...result, output: redactSensitive(result.output) }
     } finally { this.busy.delete(id) }
+  }
+
+  /** Resolve a managed deployment only from the validated registry; the embedded deployment stays on local routes. */
+  managementTarget(id: string): { url: string; repository: string; profile: string } {
+    if (id === 'desktop') throw new FleetControlError(400, 'The embedded deployment is not proxied')
+    const loaded = loadRegistry(this.registryPath)
+    if (loaded.error) throw new FleetControlError(400, loaded.error)
+    const deployment = loaded.value?.deployments.find(item => item.id === id)
+    if (!deployment) throw new FleetControlError(404, `Deployment not found: ${id}`)
+    return { url: deployment.url, repository: deployment.repository, profile: deployment.profile }
   }
 }
 
