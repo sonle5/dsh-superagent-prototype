@@ -4,7 +4,8 @@ import { UserError } from '../src/core/index.ts'
 import { Commands } from '../src/infra/commands.ts'
 import { Setup } from '../src/app/setup.ts'
 import { SettingsConflict } from '../src/app/settings.ts'
-import { startRuntime, type Host } from './fixtures/host.ts'
+import { workerSessionId } from '../src/executor/dsh.ts'
+import { feishu, startRuntime, type Host } from './fixtures/host.ts'
 
 let h: Host | undefined
 afterEach(async () => { await h?.stop(); h = undefined })
@@ -111,5 +112,30 @@ it('retargets live Eval and Executor Sessions when their model settings change',
   const executorBlock = settings.block('executor')
   await settings.save('executor', { ...(executorBlock.value as object), model }, executorBlock.revision, 'panel')
   expect(apply).toHaveBeenLastCalledWith('worker', model)
+  expect(store.settings().executor.model).toEqual(model)
+})
+
+it('applies the configured Executor model when an existing worker Session is opened outside a launch', async () => {
+  h = await startRuntime()
+  const { runtime } = h
+  const { settings, store } = runtime
+  await settings.pause(true, 'panel')
+  const executor = settings.block('executor')
+  await settings.save('executor', { ...(executor.value as object), model }, executor.revision, 'panel')
+  const llm = (h.ctx as unknown as { llm: { resolveCallConfig: ReturnType<typeof vi.fn> } }).llm
+  llm.resolveCallConfig.mockClear()
+
+  const trigger = feishu('88', '@bot inspect the stored worker')
+  runtime.receive(trigger)
+  await runtime.idle()
+  const result = await h.route({ kind: 'accept', trigger_id: trigger.id, title: 'Inspect stored worker', worktree_name: 'inspect-worker',
+    acknowledgement: 'Inspecting the stored worker.' })
+  const ticketId = (result.ticket as { ticket_id: string }).ticket_id
+  const sessionId = workerSessionId(ticketId)
+
+  await h.controller.create({ sessionId })
+  h.ctx.emit('agent/created', { agent: h.agents.get(sessionId) } as never)
+
+  await vi.waitFor(() => expect(llm.resolveCallConfig).toHaveBeenCalledWith(expect.objectContaining(model)))
   expect(store.settings().executor.model).toEqual(model)
 })

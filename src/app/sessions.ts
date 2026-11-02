@@ -240,12 +240,14 @@ export class Sessions {
   }
   private async decorate(agent: Agent): Promise<void> {
     if (this.bindings.has(agent)) return
-    const host = this.host
+    const ctx = this.ctx, host = this.host
     const master = agent.id === host.masterId
     const ticket = master ? undefined : this.ticketOf(agent)
     if (!master && !ticket) { this.limitSubagent(agent); return }
     const binding: SessionBinding = { disposers: [] }
     this.bindings.set(agent, binding)
+    const settings = host.store.settings()
+    await applyAgentRoleModel(ctx, agent, master ? settings.eval.model : settings.executor.model)
     this.retryHealth.restore(agent.id, agent.session.snapshotEvents())
     if (agent.status === 'idle') this.retryHealth.clear(agent.id)
     this.updateModelHealth()
