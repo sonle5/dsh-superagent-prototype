@@ -208,6 +208,9 @@ export class Runtime extends Service implements SourceHost {
     this.sessions.install()
     this.executor.install()
     await this.sessions.ensure(this.masterId, this.machine.stateDir, 'dsh-superagent orchestrator', 'orchestrator')
+    // Repair workers persisted before their Executor model changed. A cold Session is not decorated until its first request,
+    // so without this pass the visible route and next request would retain the prior model after a restart.
+    await this.sessions.applyRoleModel('worker', this.store.settings().executor.model)
     for (const id of this.settings.syncable()) await this.settings.sync(id).catch(() => { /* sync() records its failure in health. */ })
     // If stop() was called while awaiting setup, session creation, or policy sync, do not start background loops.
     if (this.closing()) return

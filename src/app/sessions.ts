@@ -7,7 +7,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import { dirname } from 'node:path'
 import { z } from 'zod'
 import { key, liveTicket, type Ticket } from '../core/index.ts'
-import { mandateInstructions, ticketOfSession } from '../executor/dsh.ts'
+import { mandateInstructions, ticketOfSession, workerSessionId } from '../executor/dsh.ts'
 import type { HealthEntry } from '../infra/health.ts'
 import type { RoleModel } from '../policy.ts'
 import { AgentDelivery, messageId } from './delivery.ts'
@@ -154,13 +154,29 @@ export class Sessions {
     await ctx.sessionController.rename({ sessionId: id as SessionId, title })
     return result.agent
   }
-  /** Retarget every live managed Session for `role` when that role's model setting changes. */
+  /** Retarget every managed Session for `role`, including idle workers persisted for an open Ticket. */
   async applyRoleModel(role: 'orchestrator' | 'worker', model: RoleModel | null): Promise<void> {
     const ctx = this.ctx
-    const agents = role === 'orchestrator'
-      ? [...this.bindings.keys()].filter(agent => agent.id === this.host.masterId)
-      : [...this.bindings.keys()].filter(agent => agent.id !== this.host.masterId)
-    await Promise.all(agents.map(agent => applyAgentRoleModel(ctx, agent, model)))
+    const agents = new Map<string, Agent>()
+    if (role === 'orchestrator') {
+      const agent = ctx.agents.get(this.host.masterId as SessionId)
+      if (agent) agents.set(agent.id, agent)
+    } else {
+      for (const agent of this.bindings.keys()) if (ticketOfSession(agent.id)) agents.set(agent.id, agent)
+      // A worker Session viewed without being activated is only a persisted log and projection. Resolve each worker of an
+      // open Ticket before changing its role so the pending route and the visible model selector change together.
+      for (const ticket of this.host.store.tickets.open()) {
+        const id = workerSessionId(ticket.id)
+        if (agents.has(id)) continue
+        const result = await ctx.sessionController.resolveAgent(id as SessionId)
+        if ('error' in result) {
+          if (result.error.code === 'session/not-found') continue
+          throw result.error
+        }
+        agents.set(result.agent.id, result.agent)
+      }
+    }
+    await Promise.all([...agents.values()].map(agent => applyAgentRoleModel(ctx, agent, model)))
   }
   /** Returns whether `sessionId` already holds the message delivered under `requestId`, or `false` if the session does not exist. */
   async holds(sessionId: string, requestId: string): Promise<boolean> {

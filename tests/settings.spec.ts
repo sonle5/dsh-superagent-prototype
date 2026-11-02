@@ -139,3 +139,39 @@ it('applies the configured Executor model when an existing worker Session is ope
   await vi.waitFor(() => expect(llm.resolveCallConfig).toHaveBeenCalledWith(expect.objectContaining(model)))
   expect(store.settings().executor.model).toEqual(model)
 })
+
+it('retargets an idle persisted worker when its Executor model changes', async () => {
+  h = await startRuntime()
+  const { runtime } = h
+  const { settings } = runtime
+  await settings.pause(true, 'panel')
+
+  const trigger = feishu('89', '@bot inspect the idle worker')
+  runtime.receive(trigger)
+  await runtime.idle()
+  const result = await h.route({ kind: 'accept', trigger_id: trigger.id, title: 'Inspect idle worker', worktree_name: 'inspect-idle-worker',
+    acknowledgement: 'Inspecting the idle worker.' })
+  const sessionId = workerSessionId((result.ticket as { ticket_id: string }).ticket_id)
+
+  await h.controller.create({ sessionId })
+  const worker = h.agents.get(sessionId) as unknown as {
+    id: string
+    session: { append: ReturnType<typeof vi.fn> }
+  }
+  h.ctx.emit('agent/created', { agent: worker } as never)
+
+  // Simulate an idle Session whose Agent was released: only its open Ticket and persisted session remain.
+  h.ctx.emit('agent/disposed', { agent: worker } as never)
+  h.agents.delete(sessionId)
+  const resolve = vi.mocked(h.controller.resolveAgent)
+  resolve.mockImplementation(async id => id === sessionId ? { agent: worker } : await h!.resolveDefault(id))
+  worker.session.append.mockClear()
+
+  const executor = settings.block('executor')
+  const next = { provider: 'one-nexus', model: 'glm-5.3-sontinh', reasoningEffort: 'max' }
+  await settings.save('executor', { ...(executor.value as object), model: next }, executor.revision, 'panel')
+
+  expect(resolve).toHaveBeenCalledWith(sessionId)
+  await vi.waitFor(() => expect(worker.session.append).toHaveBeenLastCalledWith('model/selection', next))
+  expect(worker.session.append).toHaveBeenCalledOnce()
+})
