@@ -99,3 +99,17 @@ it('records nothing for a pause that changes nothing, refuses a sync while setup
   vi.mocked(Setup.prototype.configured).mockRestore()
   expect(() => settings.block('source:x')).toThrow(new UserError('unknownBlock', { block: 'source:x' }))
 })
+
+it('retargets live Eval and Executor Sessions when their model settings change', async () => {
+  h = await startRuntime()
+  const { settings, store, sessions } = h.runtime
+  const apply = vi.spyOn(sessions, 'applyRoleModel')
+  const evalBlock = settings.block('eval')
+  await settings.save('eval', { ...(evalBlock.value as object), model }, evalBlock.revision, 'panel')
+  expect(apply).toHaveBeenLastCalledWith('orchestrator', model)
+
+  const executorBlock = settings.block('executor')
+  await settings.save('executor', { ...(executorBlock.value as object), model }, executorBlock.revision, 'panel')
+  expect(apply).toHaveBeenLastCalledWith('worker', model)
+  expect(store.settings().executor.model).toEqual(model)
+})

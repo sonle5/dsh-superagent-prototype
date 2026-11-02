@@ -63,8 +63,8 @@ export interface SettingsHost {
   /** DSH Cordis context used to validate and resolve role models. */
   readonly context: Context
   readonly lifetime: AbortSignal
-  /** Session manager through which the main Session is notified of saved settings. */
-  readonly sessions: Pick<Sessions, 'notify' | 'delivery'>
+  /** Session manager through which role-model changes reach live Sessions and saved settings reach the main Session. */
+  readonly sessions: Pick<Sessions, 'notify' | 'delivery' | 'applyRoleModel'>
   /** Source host passed to source kinds' policy syncs and label refreshes. */
   readonly sourceHost: SourceHost
   /** Setup state, account/command checks, and restart trigger when setup-read fields change. */
@@ -184,6 +184,8 @@ export class Settings {
       if (origin !== 'tool') sessions.notify(...settingsNotice(block, changedPaths(old, settings)))
       if (before !== after) engine.policyChanged(before, after, effects)
     })
+    if (block === 'eval' || block === 'executor') await sessions.applyRoleModel(block === 'eval' ? 'orchestrator' : 'worker',
+      block === 'eval' ? settings.eval.model : settings.executor.model)
     // Rewrite worker command shims immediately when `blockedCommands` changes.
     const blocked = settings.executor.blockedCommands
     const changed = blocked.join(' ') !== old.executor.blockedCommands.join(' ')
