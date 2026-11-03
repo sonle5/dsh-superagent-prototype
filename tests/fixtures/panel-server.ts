@@ -102,6 +102,8 @@ export interface PanelServer {
   health: Record<string, Health>
   /** When true, all API requests return an empty 404 to simulate the host plugin being stopped. */
   down: boolean
+  /** Return an empty 404 only for routes scoped to this deployment. */
+  downDeployment?: string
   /** Count of responses not yet consumed by the client. */
   pending: number
   form?: ConfigForm<Record<string, unknown>> | undefined
@@ -109,6 +111,10 @@ export interface PanelServer {
   dropped: DroppedReply[]
   failing: Extract<Problem, { kind: 'outgoing' }>['outgoing'][]
   fleet: FleetView
+  /** Hold the initial Fleet response while a test exercises panel startup. */
+  fleetLoading?: Promise<void>
+  /** Reject repository-scoped routes that omit their deployment prefix, as the controller does before selection. */
+  requiresDeploymentPrefix?: boolean
 }
 export let server: PanelServer
 
@@ -315,7 +321,7 @@ const ticketOf = (id: string) =>
 const SourceSave = z.object({ enabled: z.boolean(), config: z.unknown() })
 
 const ROUTES: { [K in keyof Api]: Route<K> } = {
-  'GET fleet': { answer: () => server.fleet },
+  'GET fleet': { answer: async () => { await server.fleetLoading; return server.fleet } },
   'POST deployments/:id/select': { answer: ({ params }) => {
     if (!server.fleet.deployments.some(deployment => deployment.id === params.id)) {
       return refuse(404, `Deployment not found: ${params.id}`)
@@ -492,13 +498,21 @@ export function usePanelServer(cleanup: () => void) {
     sessionStorage.clear()
     server = initial()
     vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit): Promise<Response> => {
-      if (server.down) return new Response(null, { status: 404 })
       const address = new URL(url, 'http://127.0.0.1:3082')
       const path = address.pathname.replace('/orchestrator/api/', '')
       const method = init?.method ?? 'GET'
       const body: unknown = init?.body ? JSON.parse(String(init.body)) : undefined
       server.requests.push({ path: decodeURIComponent(`${path}${address.search}`), method, ...body === undefined ? {} : { body } })
-      const routePath = /^deployment\/[a-z0-9][a-z0-9-]*\/(.+)$/.exec(path)?.[1] ?? path
+      if (server.down) return new Response(null, { status: 404 })
+      const deployment = /^deployment\/([^/]+)\//.exec(path)?.[1]
+      if (deployment && server.downDeployment === decodeURIComponent(deployment)) return new Response(null, { status: 404 })
+      const prefixed = /^deployment\/[a-z0-9][a-z0-9-]*\/(.+)$/.exec(path)?.[1]
+      const local = method === 'GET' && path === 'fleet'
+        || method === 'POST' && (path.startsWith('fleet/') || path.startsWith('deployments/'))
+      if (server.requiresDeploymentPrefix && !local && prefixed === undefined) {
+        return new Reply({ error: 'No operation' }, 404)
+      }
+      const routePath = prefixed ?? path
       const route = match(method, routePath.split('/'))
       if (!route) return new Reply({ error: 'Unknown operation' }, 404)
       const answer = await run(route.key, route.params, address.searchParams, body)

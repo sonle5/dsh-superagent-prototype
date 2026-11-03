@@ -98,7 +98,7 @@ function SearchResults({ result, query, onClose }: { result: SearchView; query: 
 }
 
 function Header() {
-  const { t, call, deployment, deployments, selectDeployment, notify } = usePanel()
+  const { t, call, deployment, deployments, fleetReady, fleetError, selectDeployment, notify } = usePanel()
   const [glossary, setGlossary] = useState(false)
   const [query, setQuery] = useState('')
   const [result, setResult] = useState<{ query: string; value: SearchView }>()
@@ -124,7 +124,8 @@ function Header() {
     <div className="dt-head-title"><h1 className="dt-title">{t('title')}</h1>
       <select className="dt-deployment-context" aria-label={t('deploymentContext')} title={t('activeDeployment')}
         value={deployment?.id ?? ''} disabled={!deployments.length} onChange={event => selectDeployment(event.target.value)}>
-        {!deployment && <option value="">{t('deploymentNone')}</option>}
+        {!deployment && <option value="">{fleetError ? t('fleetUnavailable') : fleetReady && !deployments.length
+          ? t('deploymentNone') : t('loading')}</option>}
         {deployments.map(item => <option key={item.id} value={item.id}>{item.repository || item.name}</option>)}
       </select>
     </div>
@@ -142,23 +143,26 @@ function Header() {
 }
 
 function Pages({ route, openTab }: { route: Route; openTab: (tab: Tab) => void }) {
-  const { t, deployment } = usePanel()
+  const { t, deployment, deployments, fleetReady } = usePanel()
   const { state, error, reload } = usePanelData()
   // Keep the active tab scrolled into view on narrow screens when routes change via links.
   useEffect(() => { document.getElementById(`dt-tab-${route.page}`)?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' }) }, [route.page])
-  const waiting = error ? <p className="dt-error" role="alert">{error.message}</p> : <p className="dt-hint">{t('loading')}</p>
+  const waiting = error ? <p className="dt-error" role="alert">{error.message}</p>
+    : <p className="dt-hint">{fleetReady && !deployments.length ? t('deploymentNone') : t('loading')}</p>
+  const scoped = (page: ReactNode) => deployment ? page : waiting
   const page = (() => {
     switch (route.page) {
       case 'fleet': return <FleetPage />
-      case 'overview': return <OverviewPage />
-      case 'source': return <SourceStatus />
-      case 'trigger': return route.id !== undefined ? <ThreadPage key={route.id} id={route.id} target={route.query?.trigger} />
-        : <TriggerStatus filter={route.query?.filter ?? 'subscribed'} />
-      case 'eval': return <EvalStatus filter={route.query?.filter ?? 'work'} window={route.query?.window}
-        paused={!!state?.paused} />
-      case 'execution': return route.id !== undefined ? <TicketPage key={route.id} id={route.id} />
-        : state ? <ExecutionStatus filter={route.query?.filter ?? 'open'} state={state} reload={reload} /> : waiting
-      case 'settings': return state ? <SettingsPage key={state.masterId} group={route.query.group} query={route.query} state={state} /> : waiting
+      case 'overview': return scoped(<OverviewPage />)
+      case 'source': return scoped(<SourceStatus />)
+      case 'trigger': return scoped(route.id !== undefined ? <ThreadPage key={route.id} id={route.id} target={route.query?.trigger} />
+        : <TriggerStatus filter={route.query?.filter ?? 'subscribed'} />)
+      case 'eval': return scoped(<EvalStatus filter={route.query?.filter ?? 'work'} window={route.query?.window}
+        paused={!!state?.paused} />)
+      case 'execution': return scoped(route.id !== undefined ? <TicketPage key={route.id} id={route.id} />
+        : state ? <ExecutionStatus filter={route.query?.filter ?? 'open'} state={state} reload={reload} /> : waiting)
+      case 'settings': return scoped(state ? <SettingsPage key={state.masterId} group={route.query.group} query={route.query} state={state} />
+        : waiting)
     }
   })()
   return <div className="dt-page">

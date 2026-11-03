@@ -5,6 +5,7 @@ import { expect, it } from 'vitest'
 import { en, zh } from '../src/client/locales.ts'
 import { usePanel, mount, remount, settle, all, click, type, text, field } from './fixtures/panel.tsx'
 import { server, found } from './fixtures/panel-server.ts'
+import { deferred } from './fixtures/async.ts'
 
 usePanel()
 it('states why a filtered search result has no Thread instead of opening an empty one', async () => {
@@ -60,11 +61,47 @@ it('shows domain terms in the interface language only and lists both languages i
   expect([...dialog.querySelectorAll('tr')].find(item => item.textContent?.startsWith('Main Session'))!.textContent).toContain('prompts call it the orchestrator')
 })
 
+it('waits for the Fleet before requesting a deployment-scoped page', async () => {
+  const loading = deferred()
+  server.fleetLoading = loading.promise
+  server.requiresDeploymentPrefix = true
+
+  await mount()
+  expect(text()).toContain(zh.loading)
+  expect(document.querySelector('.dt-error')).toBeNull()
+  expect(server.requests).toEqual([{ path: 'fleet', method: 'GET' }])
+
+  await act(async () => { loading.resolve() })
+  await settle()
+  expect(text()).toContain('修复回归')
+  expect(server.requests.filter(request => request.path === 'deployment/inference-support-loop/overview')).toHaveLength(1)
+})
+
+it('shows a neutral state when the Fleet has no deployments', async () => {
+  server.fleet.deployments = []
+  server.requiresDeploymentPrefix = true
+
+  await mount()
+  expect(field<HTMLSelectElement>(zh.deploymentContext).selectedOptions[0]?.textContent).toBe(zh.deploymentNone)
+  expect(text()).toContain(zh.deploymentNone)
+  expect(document.querySelector('.dt-error')).toBeNull()
+  expect(server.requests).toEqual([{ path: 'fleet', method: 'GET' }])
+})
+
 it('says dsh-superagent is not answering when its routes are gone, as while it restarts', async () => {
   server.down = true
   await mount()
   expect(text()).toContain(zh.hostNotRunning)
   expect(text()).not.toContain('404')
+  expect(server.requests).toEqual([{ path: 'fleet', method: 'GET' }])
+})
+
+it('still shows a genuine deployment failure after the Fleet resolves', async () => {
+  server.downDeployment = 'inference-support-loop'
+
+  await mount()
+  expect(document.querySelector('.dt-error[role="alert"]')?.textContent).toBe(zh.hostNotRunning)
+  expect(server.requests).toContainEqual({ path: 'deployment/inference-support-loop/state', method: 'GET' })
 })
 
 it('closes search results on Escape and on a click outside the search', async () => {

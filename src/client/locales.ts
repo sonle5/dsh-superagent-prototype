@@ -11,6 +11,7 @@ const TEXT = {
   activeDeployment: ['当前部署', 'Active deployment'],
   deploymentContext: ['切换部署', 'Deployment context'],
   deploymentNone: ['没有已登记的部署', 'No deployments registered'],
+  fleetUnavailable: ['无法读取部署', 'Deployments unavailable'],
   close: ['关闭', 'Close'],
   cancel: ['取消', 'Cancel'],
   confirm: ['确定', 'Confirm'],

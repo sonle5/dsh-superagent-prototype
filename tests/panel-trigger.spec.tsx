@@ -73,7 +73,8 @@ it('reads the page around a link\'s target once, also for a Trigger the Thread d
   await mount()
   await act(async () => { await vi.advanceTimersByTimeAsync(5000) }); await settle()
   expect(server.requests.filter(request => request.path.startsWith(remote('threads/'))).map(request => request.path)).toEqual([
-    remote('threads/feishu:oc_1:om_root?limit=50&around=gone'), remote('threads/feishu:oc_1:om_root?limit=50')])
+    remote('threads/feishu:oc_1:om_root?limit=50'), remote('threads/feishu:oc_1:om_root?limit=50&around=gone'),
+    remote('threads/feishu:oc_1:om_root?limit=50')])
 })
 
 it('shows a follow-up delivered to its Ticket without an Eval, a hand-back with why, and a Ticket that follows the Thread for context', async () => {

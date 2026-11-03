@@ -11,6 +11,8 @@ export interface PanelContext {
   call: Call
   deployment: DeploymentChoice | undefined
   deployments: DeploymentChoice[]
+  fleetReady: boolean
+  fleetError: Error | undefined
   selectDeployment: (id: string) => void
   navigate: (route: Route, replace?: boolean) => void
   back: () => void
@@ -160,8 +162,9 @@ export function PanelProvider({ t, interval = 5000, navigate = stay, back = stay
     const timer = setTimeout(() => setRestarting(undefined), 30_000)
     return () => clearTimeout(timer)
   }, [restarting])
-  const context = useMemo(() => ({ t, call, deployment, deployments, selectDeployment, navigate, back, backLabel, notify, restart }),
-    [t, call, deployment, deployments, selectDeployment, navigate, back, backLabel, notify, restart])
+  const context = useMemo(() => ({ t, call, deployment, deployments, fleetReady: fleet !== undefined, fleetError,
+    selectDeployment, navigate, back, backLabel, notify, restart }),
+  [t, call, deployment, deployments, fleet, fleetError, selectDeployment, navigate, back, backLabel, notify, restart])
   const data = useMemo(() => ({ state, error, reload, setup: state?.setup, running: state?.load.running ?? 0, restarts }), [state, error,
     reload, restarts])
   return <Panel.Provider value={context}><PanelState.Provider value={data}>
