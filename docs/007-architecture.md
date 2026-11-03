@@ -345,7 +345,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/http.ts` | The `/orchestrator/api` routes: the same-origin check, request limits, one status per kind of failure and validated forwarding to registered deployment APIs |
 | `src/app/fleet.ts` | The local fleet registry, aggregate reads from independent loopback deployments, stopped-versus-unreachable status, recent log tails, and lifecycle actions restricted to registered DSH profiles |
 | `src/app/native-auth.ts` | The private per-deployment capability shared by the controller and repository halves of native Session routing |
-| `src/app/native-transport.ts` | The controller and repository halves of deployment-aware native DSH transport: persisted selection, authenticated `/api` forwarding, Remote-stream WebSocket relay, cancellation and operator-peer compatibility; HTTP retains a durable no-interaction peer while every mux minted its own answer peer so closing a stream cannot invalidate API requests |
+| `src/app/native-aggregate.ts` | Deployment-scoped Session, Workspace and Remote-event identities; request-owner selection; inbound and outbound identity remapping; repository-prefixed titles; and bounded Session-list and search merges |
+| `src/app/native-transport.ts` | The controller and repository halves of deployment-aware native DSH transport: one aggregate Session/Workspace/control/event view, owner-routed unary and streaming calls, per-peer timeouts and partial availability, cancellation, per-stream event correlation and operator-peer compatibility; HTTP retains a durable no-interaction peer while every mux mints its own answer peer so closing a stream cannot invalidate API requests |
 | `src/app/api.ts` | `Api`, every route with its parameters, query, body and response, and the filters of the lists; it imports only types, so the panel bundles it |
 | `src/app/views/text.ts` | The two forms of a view's text: `preview`, plain text on one line, and `markdown` without HTML; `plain` and `readable` |
 | `src/app/views/records.ts` | The rows the views share: Triggers, Tickets, Threads, Decisions and Channel links, and `ownersOf`, the owners of follow-ups as one request reads them |
@@ -379,8 +380,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/feishu-image.ts` | Reads a Feishu message's image as an attachment for the assessing Session |
 | `src/client/index.tsx` | The client plugin entry: the sidebar entry, the main panel and the page in DeepSeek Harness's Plugin Manager |
 | `src/client/app.tsx` | The panel: header, search, glossary, tabs and the page of the current route |
-| `src/client/provider.tsx` | What every page reads from its host: copy, deployment context, calls, navigation, notices, the state poll, and `restart`, which reads the state quickly while dsh-superagent restarts; deployment changes persist the native selection and reload the Desktop shell |
-| `src/client/native-transport.ts` | Desktop-only replacement of the Gateway Remote WebSocket URL with the controller-owned deployment proxy |
+| `src/client/provider.tsx` | What every page reads from its host: copy, management deployment context, calls, navigation, notices, the state poll, and `restart`, which reads the state quickly while dsh-superagent restarts; deployment changes persist only the management/unscoped-selection context and never reload Desktop or replace the aggregate native Session tree |
+| `src/client/native-transport.ts` | Desktop-only replacement of the Gateway Remote WebSocket URL with the controller-owned aggregate native transport |
 | `src/client/api.ts` | Calls and polls of the management API, typed by `src/app/api.ts`, and the Decision filters of the Eval status |
 | `src/client/route.ts` | The tabs, the settings groups, the typed routes that `parseRoute` reads, and the route memory with the settings group opened last |
 | `src/client/overview.tsx` | The overview |
@@ -433,7 +434,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/runtime-concurrency.spec.ts` | Work that overlaps: Triggers during a pass, Tickets that change during deliveries and launches |
 | `tests/http.spec.ts` | The same-origin and loopback checks, the status of each kind of failure, the body limit, path parameters, queries and the validated deployment-management proxy |
 | `tests/fleet.spec.ts` | Fleet registry validation, aggregation from independent deployments, stopped-versus-unreachable status, log tails, managed-target lookup and fixed-profile lifecycle invocation |
-| `tests/native-proxy.spec.ts` | End-to-end controller-to-deployment HTTP and WebSocket forwarding, capability and origin rejection, operator-peer authentication, live stream echo and teardown |
+| `tests/native-aggregate.spec.ts` | Aggregate identity round trips and validation, request-tree remapping, owner detection, title projection prefixing and bounded Session-search merging |
+| `tests/native-proxy.spec.ts` | End-to-end aggregate HTTP and WebSocket routing across deployments: Session/search and Workspace/control/event aggregation, owner routing, partial availability and timeouts, title normalization, interactive uplinks and cancellation, per-stream event correlation, capability and origin rejection, operator-peer authentication and teardown |
 | `tests/native-transport.spec.ts` | Desktop Remote-mux URL routing and constructor restoration |
 | `tests/settings.spec.ts` | Settings saves that race a model or account check, a Policy sync that a save outran, and the refusals of the pause, a sync and a block |
 | `tests/views.spec.ts` | What the management views derive from the Store, such as the Thread a dropped message belongs to |

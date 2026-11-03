@@ -30,15 +30,15 @@ it('replaces only the Desktop WebSocket constructor while installed', () => {
   expect(globalThis.WebSocket).toBe(original)
 })
 
-it('recognizes the packaged desktop transport that supplies only a stream base URL', () => {
+it('recognizes the packaged desktop protocol with or without transport metadata', () => {
   vi.stubGlobal('location', { protocol: 'dsh-app:' })
+  expect(isDesktopShell()).toBe(true)
   ;(globalThis as { __DSH_TRANSPORT__?: unknown }).__DSH_TRANSPORT__ = {
     streamBaseUrl: 'ws://127.0.0.1:61479',
   }
   expect(isDesktopShell()).toBe(true)
-  expect(isDesktopShell.call(undefined)).toBe(true)
   ;(globalThis as { __DSH_TRANSPORT__?: unknown }).__DSH_TRANSPORT__ = {}
-  expect(isDesktopShell()).toBe(false)
+  expect(isDesktopShell()).toBe(true)
   vi.stubGlobal('location', { protocol: 'https:' })
   expect(isDesktopShell()).toBe(false)
 })

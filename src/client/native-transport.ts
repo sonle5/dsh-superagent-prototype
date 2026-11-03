@@ -59,9 +59,5 @@ export function reconnectDesktopConnection(
 
 /** Whether this page is the packaged Desktop shell rather than a deployment Web page. */
 export function isDesktopShell(): boolean {
-  const transport = (globalThis as {
-    __DSH_TRANSPORT__?: { ownsHost?: boolean; streamBaseUrl?: string }
-  }).__DSH_TRANSPORT__
   return globalThis.location?.protocol === 'dsh-app:'
-    && (transport?.ownsHost === true || typeof transport?.streamBaseUrl === 'string')
 }

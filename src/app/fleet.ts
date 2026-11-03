@@ -115,6 +115,17 @@ export interface FleetView {
   deployments: FleetDeploymentView[]
 }
 
+/** One authenticated loopback peer available to the controller's native transport. */
+export interface FleetNativeTarget {
+  id: string
+  url: string
+  repository: string
+  profile: string
+  stateDir: string
+  workspace: string
+  token: string
+}
+
 /** A lifecycle refusal with the HTTP status the management route should return. */
 export class FleetControlError extends Error {
   constructor(readonly status: 400 | 404 | 409, message: string) { super(message) }
@@ -299,12 +310,19 @@ export class Fleet {
   }
 
   /** Resolve a deployment only from the validated registry. */
-  managementTarget(id: string): { url: string; repository: string; profile: string; stateDir: string } {
+  managementTarget(id: string): Omit<FleetNativeTarget, 'token'> {
     const loaded = loadRegistry(this.registryPath)
     if (loaded.error) throw new FleetControlError(400, loaded.error)
     const deployment = loaded.value?.deployments.find(item => item.id === id)
     if (!deployment) throw new FleetControlError(404, `Deployment not found: ${id}`)
-    return { url: deployment.url, repository: deployment.repository, profile: deployment.profile, stateDir: deployment.stateDir }
+    return {
+      id: deployment.id,
+      url: deployment.url,
+      repository: deployment.repository,
+      profile: deployment.profile,
+      stateDir: deployment.stateDir,
+      workspace: deployment.workspace,
+    }
   }
 
   /** Select the deployment whose native DSH state and streams the Desktop controller serves. */
@@ -317,11 +335,26 @@ export class Fleet {
   }
 
   /** Resolve the selected deployment, or undefined before the first selection. */
-  nativeTarget(): { url: string; repository: string; profile: string; stateDir: string; token: string } | undefined {
+  nativeTarget(): FleetNativeTarget | undefined {
     const id = this.selectedId()
     if (id === undefined) return undefined
     const target = this.managementTarget(id)
     return { ...target, token: nativeToken(target.stateDir)! }
+  }
+
+  /** Resolve every validated deployment as an independently authenticated native peer. */
+  nativeTargets(): FleetNativeTarget[] {
+    const loaded = loadRegistry(this.registryPath)
+    if (loaded.error) throw new FleetControlError(400, loaded.error)
+    return (loaded.value?.deployments ?? []).map(deployment => ({
+      id: deployment.id,
+      url: deployment.url,
+      repository: deployment.repository,
+      profile: deployment.profile,
+      stateDir: deployment.stateDir,
+      workspace: deployment.workspace,
+      token: nativeToken(deployment.stateDir)!,
+    }))
   }
 
   private selectedId(): string | undefined {

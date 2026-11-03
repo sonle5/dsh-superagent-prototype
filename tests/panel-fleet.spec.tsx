@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { expect, it } from 'vitest'
+import { expect, it, onTestFinished, vi } from 'vitest'
 import { en, zh } from '../src/client/locales.ts'
 import { all, click, field, find, mount, remount, tab, text, type, usePanel } from './fixtures/panel.tsx'
 import { server } from './fixtures/panel-server.ts'
@@ -66,6 +66,25 @@ it('switches every management view to the selected deployment and remembers the 
 
   await remount()
   expect(field<HTMLSelectElement>(zh.deploymentContext).value).toBe('sglang')
+})
+
+it('changes only management context without reloading Desktop or rebinding native Sessions', async () => {
+  const reload = vi.fn()
+  vi.stubGlobal('location', { protocol: 'dsh-app:', reload })
+  server.fleet.selected = 'inference-support-loop'
+  localStorage.setItem('dsh.sessions.current', '{"sessionId":"inference-session"}')
+  onTestFinished(() => {
+    vi.unstubAllGlobals()
+    localStorage.clear()
+  })
+
+  await mount()
+  await type(field<HTMLSelectElement>(zh.deploymentContext), 'sglang')
+
+  expect(reload).not.toHaveBeenCalled()
+  expect(sessionStorage.getItem('dsh-superagent/deployment')).toBe('sglang')
+  expect(localStorage.getItem('dsh.sessions.current')).toBe('{"sessionId":"inference-session"}')
+  expect(server.requests).toContainEqual({ path: 'deployments/sglang/select', method: 'POST' })
 })
 
 it('migrates a stale desktop selection to the first registered deployment without privileging a repository', async () => {

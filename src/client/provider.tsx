@@ -5,7 +5,6 @@ import { caller, usePoll, type ApiMessages, type Call, type SetupView, type Stat
 import type { Route } from './route.ts'
 import STYLES from './client.css?raw'
 import { errorText, setupText, valueLabel, type T } from './text.ts'
-import { isDesktopShell } from './native-transport.ts'
 
 export interface PanelContext {
   t: T
@@ -108,18 +107,18 @@ export function PanelProvider({ t, interval = 5000, navigate = stay, back = stay
   const [toast, setToast] = useState<{ text: string; id: number }>()
   const notify = useCallback((text: string) => setToast({ text, id: Date.now() }), [])
   const activateDeployment = useCallback((id: string, persist: boolean) => {
-    const previous = deploymentId
-    setDeploymentId(id)
-    rememberDeployment(id)
-    if (!persist) return
+    if (!persist) {
+      setDeploymentId(id)
+      rememberDeployment(id)
+      return
+    }
     void localCall('POST deployments/:id/select', { id }).then(() => {
-      if (isDesktopShell()) globalThis.location.reload()
+      setDeploymentId(id)
+      rememberDeployment(id)
     }, failure => {
-      setDeploymentId(previous)
-      rememberDeployment(previous)
       notify(errorText(failure))
     })
-  }, [deploymentId, localCall, notify])
+  }, [localCall, notify])
   const selectDeployment = useCallback((id: string) => { activateDeployment(id, true) }, [activateDeployment])
   useEffect(() => {
     if (!fleet) return
