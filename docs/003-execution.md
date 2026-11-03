@@ -121,13 +121,17 @@ Sources poll subscribed Threads while a live Ticket subscribes, and for two week
 
 When an Executor Session reports `blocked` or `failed`, or fails to start or errors, which records `failed`, the Ticket takes no automatic Input.
 
-A passing failure of the model provider or the network, an HTTP 408, 429 or 5xx or a refused, reset or timed-out connection, is tried again first, three times with a growing backoff: a launch runs again, and a worker whose turn failed is told to go on; a failed prepare command is not tried again.
+A passing failure of the model provider or the network, an HTTP 408, 429 or 5xx, a refused, reset or timed-out connection, or the normalized
+`TIMEOUT`, `TRANSPORT`, `SERVER`, `RATE_LIMIT` or `EMPTY_RESPONSE` code, is tried again first, three times with a growing backoff: a launch
+runs again, and a worker whose turn failed is told to go on. A turn that exhausts its output-token ceiling follows the same continuation
+policy, up to the same three retries. A failed prepare command is not tried again.
 
 Once failed, CI and bot messages are recorded on it, but they are not delivered and do not wake the Session.
 
 Its tools stay available, so a person can continue in the Session directly.
 
-A launch that failed is not tried again on its own.
+A launch that failed is not tried again on its own. A failed Ticket retains the provider and model route, the failed stage, the Executor
+attempt and the provider retry count, so the panel can distinguish a provider outage from work that needs a different decision.
 
 A person's message, a later Report that is neither `blocked` nor `failed`, or a retry ends the hold.
 

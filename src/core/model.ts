@@ -214,6 +214,20 @@ export type AssignmentState = 'pending' | 'running' | 'ended'
  * ready (`ready`), a person must act to unblock or recover it (`blocked` or `failed`), or nothing is left to do (`dropped`).
  */
 export type ReportState = 'progress' | 'waiting' | 'ready' | 'blocked' | 'failed' | 'dropped'
+/** Provider-neutral diagnostics for a failed Assignment, retained with its latest report for recovery and the panel. */
+export interface AssignmentFailure {
+  /** Stable failure stage, such as `timeout`, `transport`, or `max-tokens`. */
+  stage: string
+  provider?: string
+  model?: string
+  /** Executor attempt that failed, counting the initial attempt and its continuation retries. */
+  attempt: number
+  /** Total Executor attempts allowed for this failure class. */
+  maxAttempts: number
+  /** Retries already spent inside the model provider before this Executor failure surfaced. */
+  providerRetries?: number
+  providerRetryLimit?: number
+}
 /** Binding between a ticket and one executor instance. */
 export interface Assignment {
   id: string
@@ -222,7 +236,7 @@ export interface Assignment {
   startedAt?: string
   endedAt?: string
   endedReason?: string
-  report?: { state: ReportState; summary: string; at: string }
+  report?: { state: ReportState; summary: string; at: string; failure?: AssignmentFailure }
   /** When Inputs last reached the worker; one at or after `report.at` means the worker has been busy with Inputs since that report. */
   deliveredAt?: string
   /**

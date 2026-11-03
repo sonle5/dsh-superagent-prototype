@@ -207,6 +207,87 @@ it('lets a worker go on after a passing provider failure, three times, before it
   fail(busy)
   await vi.waitFor(() => expect(latestAssignment(ticket())?.report).toMatchObject({ state: 'failed', summary: expect.stringContaining('Service Unavailable') }))
 })
+it('continues after normalized provider retries exhaust following a completed tool step', async () => {
+  const one = await h.acceptedTicket(feishu('1', '@bot 修一'))
+  const agent = h.agents.get(one.sessionId)!
+  const ticket = () => h.runtime.store.tickets.get(one.ticket.id)!
+  const session = (agent as unknown as { session: { requestHeader: () => unknown; snapshotEvents: () => unknown[] } }).session
+  Object.assign(session, {
+    requestHeader: () => ({ config: { provider: 'one-nexus', model: 'glm-5.3-sontinh' } }),
+    snapshotEvents: () => [
+      { type: 'tool/result', data: { turn: 2, step: 1 } },
+      { type: 'llm/retry', data: { turn: 2, step: 2, retry: 5, maxRetries: 5 } },
+    ],
+  })
+  const timeout = Object.assign(new Error('Request timed out.'), { name: 'LlmError', code: 'TIMEOUT' })
+  const fail = () => {
+    h.ctx.emit('agent/error', { agent, turn: 2, step: 2, error: timeout } as never)
+  }
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+  try {
+    fail()
+    await vi.advanceTimersByTimeAsync(15_000)
+    fail()
+    await vi.advanceTimersByTimeAsync(30_000)
+    fail()
+    await vi.advanceTimersByTimeAsync(60_000)
+  } finally {
+    vi.useRealTimers()
+  }
+  expect(h.deliveries.mock.calls.map(([call]) => call)
+    .filter(call => call.sessionId === one.sessionId && call.text.includes('Your last turn failed for a passing reason'))).toHaveLength(3)
+  expect(latestAssignment(ticket())?.report).toBeUndefined()
+  fail()
+  await vi.waitFor(() => expect(latestAssignment(ticket())?.report).toMatchObject({
+    state: 'failed',
+    summary: 'LlmError: Request timed out.',
+    failure: {
+      stage: 'timeout',
+      provider: 'one-nexus',
+      model: 'glm-5.3-sontinh',
+      attempt: 4,
+      maxAttempts: 4,
+      providerRetries: 5,
+      providerRetryLimit: 5,
+    },
+  }))
+})
+it('continues an output-token exhaustion under the same bounded recovery policy, then fails with diagnostics', async () => {
+  const one = await h.acceptedTicket(feishu('1', '@bot 修一'))
+  const agent = h.agents.get(one.sessionId)!
+  const session = (agent as unknown as { session: { requestHeader: () => unknown } }).session
+  Object.assign(session, {
+    requestHeader: () => ({ config: { provider: 'claude', model: 'claude-opus-5-5' } }),
+  })
+  const ticket = () => h.runtime.store.tickets.get(one.ticket.id)!
+  let turn = 1
+  const exhausted = () => {
+    h.ctx.emit('session/event', session as never,
+      { type: 'turn/end', data: { turn: turn++, reason: { kind: 'max-tokens' } } } as never)
+    agent.status = 'idle'
+    h.ctx.emit('agent/status', { agent, status: 'idle' } as never)
+  }
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+  try {
+    exhausted()
+    await vi.advanceTimersByTimeAsync(15_000)
+    exhausted()
+    await vi.advanceTimersByTimeAsync(30_000)
+    exhausted()
+    await vi.advanceTimersByTimeAsync(60_000)
+  } finally {
+    vi.useRealTimers()
+  }
+  expect(h.deliveries.mock.calls.map(([call]) => call)
+    .filter(call => call.sessionId === one.sessionId && call.text.includes('Your last turn failed for a passing reason'))).toHaveLength(3)
+  expect(latestAssignment(ticket())?.report).toBeUndefined()
+  exhausted()
+  await vi.waitFor(() => expect(latestAssignment(ticket())?.report).toMatchObject({
+    state: 'failed',
+    summary: expect.stringContaining('Model output token limit reached'),
+    failure: { stage: 'max-tokens', provider: 'claude', model: 'claude-opus-5-5', attempt: 4, maxAttempts: 4 },
+  }))
+})
 describe('a worker that goes on after a passing failure', () => {
   const busy = () => Object.assign(new Error('Service Unavailable'), { status: 503 })
   const told = (sessionId: string) => h.deliveries.mock.calls.map(([call]) => call)
@@ -790,7 +871,9 @@ it('wakes an idle worker for a status request in the slot kept for a person, whi
 })
 it('tells a passing failure of the provider or the network from one that a later try would meet again', () => {
   for (const error of [Object.assign(new Error('x'), { status: 429 }), Object.assign(new Error('x'), { status: 503 }),
-    Object.assign(new Error('connect'), { code: 'ECONNRESET' }), new TypeError('fetch failed'), new Error('getaddrinfo EAI_AGAIN api.example.com')]) {
+    Object.assign(new Error('connect'), { code: 'ECONNRESET' }), new TypeError('fetch failed'), new Error('getaddrinfo EAI_AGAIN api.example.com'),
+    Object.assign(new Error('Request timed out.'), { code: 'TIMEOUT' }), Object.assign(new Error('terminated'), { code: 'TRANSPORT' }),
+    Object.assign(new Error('empty'), { code: 'EMPTY_RESPONSE' })]) {
     expect(transient(error)).toBe(true)
   }
   for (const error of [Object.assign(new Error('x'), { status: 400 }), Object.assign(new Error('x'), { status: 401 }), new Error('context too long'), 'LlmError: offline']) {

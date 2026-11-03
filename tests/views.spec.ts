@@ -133,6 +133,21 @@ it('follows the Ticket\'s stage: a blocked Ticket a person answered since is wor
   expect(ticketDetail(host, 't1')!.assignments[0]).not.toHaveProperty('turnEndedAt')
 })
 
+it('keeps provider-neutral failure diagnostics with a failed Ticket', () => {
+  const host = views()
+  const ticket = { id: 't1', title: 'Fix', decisionId: 'd', channels: [], undelivered: [], createdAt: at, updatedAt: at,
+    mandate: { strength: 'explicit' as const, policyVersion: 'v', basis: { via: 'listed' as const }, actor: { source: 'feishu',
+      id: 'ou_alice' }, scope: '' },
+    origin: { triggerId: 'e1', triggerIds: ['e1'] }, assignments: [{ id: 'a1', state: 'running' as const, createdAt: at, startedAt: at,
+      report: { state: 'failed' as const, summary: 'LlmError: Request timed out.', at, failure: { stage: 'timeout', provider: 'one-nexus',
+        model: 'glm-5.3-sontinh', attempt: 4, maxAttempts: 4, providerRetries: 5, providerRetryLimit: 5 } } }],
+    inputs: [] as { id: string; kind: 'trigger'; triggerId: string; at: string; human?: true }[] }
+  store.tickets.save(ticket)
+  expect(ticketSummary(store.tickets.get('t1')!)).toMatchObject({ stage: 'person', action: 'failed',
+    failure: { stage: 'timeout', provider: 'one-nexus', model: 'glm-5.3-sontinh', attempt: 4, maxAttempts: 4 } })
+  expect(ticketDetail(host, 't1')!.assignments[0]!.report).toMatchObject({ failure: { providerRetries: 5, providerRetryLimit: 5 } })
+})
+
 it('does not show a follow-up that reached a ticket as waiting for an Eval, though an older version queued it', () => {
   const host = views()
   live('t1')

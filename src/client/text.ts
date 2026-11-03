@@ -5,6 +5,7 @@ import type { Localized } from '../sources/kind.ts'
 import type { SetupProblem } from '../setup.ts'
 import type { Health } from '../sources/host.ts'
 import { reasonText, type Reason } from '../core/reasons.ts'
+import type { AssignmentFailure } from '../core/model.ts'
 
 export type T = Translate<DshSuperagentKey>
 export const errorText = (failure: unknown): string => failure instanceof Error ? failure.message : String(failure)
@@ -34,6 +35,18 @@ function label(t: T, reason: Reason): string {
 export const setupText = (t: T, problem: Pick<SetupProblem, 'code' | 'values'>): string => t(`setup.${problem.code}`, problem.values)
 export const healthText = (t: T, health: Pick<Health, 'detail' | 'code' | 'values'>): string =>
   health.code ? t(`healthCode.${health.code}` as const, health.values) : health.detail
+/** One compact sentence for a failed Assignment's durable diagnostics. */
+export function failureText(t: T, failure: AssignmentFailure | undefined): string {
+  if (!failure) return ''
+  const stage = `failureStage.${failure.stage}` as DshSuperagentKey
+  const stageText = t(stage)
+  const route = [failure.provider, failure.model].filter(Boolean).join(' / ')
+  const attempt = t('failureAttempt', { attempt: String(failure.attempt), max: String(failure.maxAttempts) })
+  const provider = failure.providerRetries === undefined
+    ? ''
+    : t('failureProviderRetries', { attempt: String(failure.providerRetries), max: String(failure.providerRetryLimit ?? '?') })
+  return [route, stageText === stage ? failure.stage : stageText, attempt, provider].filter(Boolean).join(' · ')
+}
 /** Replaces Feishu and GitHub content placeholders (images, cards, media, forwards, unresolved mentions) with localized labels. */
 export function readableMarkers(t: T, text: string): string {
   return text.replace(/!\[[^\]]*\]\([^)]*\)|\[Image: [^\]]*\]|\[image\]/g, t('imageMarker'))

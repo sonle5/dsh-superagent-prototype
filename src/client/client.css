@@ -45,6 +45,7 @@
 .dt-banner-label { font-weight: 500; }
 .dt-banner .dt-md { display: inline; }
 .dt-banner .dt-md > p:first-child { display: inline; }
+.dt-banner-detail { display: block; margin-top: 4px; color: var(--dsw-alias-label-caption); }
 .dt-row-buttons { position: relative; z-index: 1; gap: 8px; margin-top: 4px; }
 .dt-row-actions { position: relative; z-index: 1; display: flex; align-items: center; gap: 4px; flex: none; margin-left: auto; font-size: 13px; line-height: 20px; }
 .dt-dot { flex: none; margin-top: 5px; }

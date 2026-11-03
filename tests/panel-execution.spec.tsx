@@ -76,6 +76,22 @@ it('shows a Ticket with its stage, its Mandate details with the Trigger and Deci
   expect(tab(zh['tab.trigger']).getAttribute('aria-selected')).toBe('true')
 })
 
+it('shows a failed Ticket\'s stage, provider route, and recovery attempts', async () => {
+  const failure = { stage: 'timeout', provider: 'one-nexus', model: 'glm-5.3-sontinh', attempt: 4, maxAttempts: 4,
+    providerRetries: 5, providerRetryLimit: 5 }
+  const detail = server.ticketDetails.t1!
+  server.ticketDetails.t1 = { ...detail, stage: 'person', action: 'failed', actions: { retry: true, stop: true },
+    summary: 'LlmError: Request timed out.', failure,
+    assignments: [{ ...detail.assignments[0]!, report: { state: 'failed', summary: 'LlmError: Request timed out.',
+      at: '2026-09-22T00:02:00Z', failure } }] }
+  await mount()
+  await click(all('.dt-open').find(button => button.textContent === '修复回归')!)
+  expect(document.querySelector('.dt-banner')?.textContent).toContain('请求超时')
+  expect(document.querySelector('.dt-banner')?.textContent).toContain('供应商已重试 5/5')
+  expect(document.querySelector('.dt-banner-detail')?.textContent).toBe(
+    'one-nexus / glm-5.3-sontinh · 请求超时 · 执行尝试 4/4 · 供应商已重试 5/5')
+})
+
 it('reports a missing Ticket instead of rendering an empty page', async () => {
   at({ page: 'execution', id: 'missing' })
   await mount()

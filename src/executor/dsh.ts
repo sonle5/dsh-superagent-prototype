@@ -5,8 +5,8 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { mkdir, rmdir, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { key, latestAssignment, latestReport, liveTicket, runningAssignment, threadKey, waitsForPerson } from '../core/index.ts'
-import type { AssessmentOutcome, Assignment, EngineForExecutor, Execution, Executor, Mandate, PolicyEffect, Ticket, TicketInput, Trigger }
-  from '../core/index.ts'
+import type { AssessmentOutcome, Assignment, AssignmentFailure, EngineForExecutor, Execution, Executor, Mandate, PolicyEffect, Ticket,
+  TicketInput, Trigger } from '../core/index.ts'
 import type { Machine } from '../deployment.ts'
 import { runAsWorker, verifyDirectory } from '../infra/environment.ts'
 import type { Settings } from '../policy.ts'
@@ -42,7 +42,8 @@ const fromPerson = (input?: TicketInput): boolean => input?.kind === 'trigger' ?
  */
 class PrepareFailed extends Error {}
 const PASSING = new RegExp(['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EAI_AGAIN', 'ENOTFOUND', 'EPIPE', 'UND_ERR', 'socket hang up', 'fetch failed',
-  'network error', 'overloaded', 'rate limit', '\\b(?:408|429|50[0-4])\\b'].join('|'), 'i')
+  'network error', 'overloaded', 'rate limit', '\\b(?:408|429|50[0-4])\\b',
+  '\\b(?:EMPTY_RESPONSE|MAX_TOKENS|RATE_LIMIT|SERVER|TIMEOUT|TRANSPORT)\\b'].join('|'), 'i')
 /**
  * True when an error represents a transient network or model-provider failure: an HTTP 408, 429, or 5xx status, or a
  * connection that was refused, reset, timed out, or could not resolve its host.
@@ -52,6 +53,51 @@ export function transient(error: unknown): boolean {
   if (typeof status === 'number') return status === 408 || status === 429 || status >= 500
   const text = error instanceof Error ? `${error.name} ${error.message} ${String((error as { code?: unknown }).code ?? '')}` : String(error)
   return PASSING.test(text)
+}
+const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value)
+const maxTokenError = (): Error => Object.assign(new Error('Model output token limit reached before the turn produced a usable result.'),
+  { code: 'MAX_TOKENS' })
+/** Stable panel wording for a provider or model failure, preferring its machine code over diagnostic prose. */
+function failureStage(error: unknown): string {
+  const code = record(error) && typeof error.code === 'string' ? error.code.toUpperCase() : ''
+  const stages: Record<string, string> = {
+    EMPTY_RESPONSE: 'empty-response',
+    MAX_TOKENS: 'max-tokens',
+    RATE_LIMIT: 'rate-limit',
+    SERVER: 'server',
+    TIMEOUT: 'timeout',
+    TRANSPORT: 'transport',
+  }
+  if (stages[code]) return stages[code]
+  const status = record(error) && typeof error.status === 'number' ? error.status : undefined
+  if (status === 408 || /tim(?:e|ed) out|ETIMEDOUT/i.test(String(error))) return 'timeout'
+  if (status === 429) return 'rate-limit'
+  if (status !== undefined && status >= 500) return 'server'
+  if (/ECONNRESET|ECONNREFUSED|EAI_AGAIN|ENOTFOUND|EPIPE|UND_ERR|socket hang up|fetch failed/i.test(String(error))) return 'transport'
+  return 'provider'
+}
+/** Current provider route and model from the Session's latest request header. */
+function modelRoute(agent: Agent): { provider?: string; model?: string } {
+  const config = agent.session.requestHeader()?.config
+  return {
+    ...(typeof config?.provider === 'string' ? { provider: config.provider } : {}),
+    ...(typeof config?.model === 'string' ? { model: config.model } : {}),
+  }
+}
+/** Provider retry counters from the latest model retry event for one failed step. */
+function providerRetry(agent: Agent, turn: number | undefined, step: number | undefined) {
+  if (turn === undefined || step === undefined) return {}
+  const events = agent.session.snapshotEvents() as readonly { type: string; data: unknown }[]
+  const event = events.findLast(item => {
+    if (item.type !== 'llm/retry' || !record(item.data)) return false
+    return item.data.turn === turn && item.data.step === step
+  })
+  if (!event || !record(event.data)) return {}
+  return {
+    ...(typeof event.data.retry === 'number' && Number.isInteger(event.data.retry) ? { providerRetries: event.data.retry } : {}),
+    ...(typeof event.data.maxRetries === 'number' && Number.isInteger(event.data.maxRetries)
+      ? { providerRetryLimit: event.data.maxRetries } : {}),
+  }
 }
 /** Appends a stable 12-character ticket ID suffix to a validated English worktree name. */
 const ticketWorktreeName = (name: string, id: string): string => `${WorktreeNameSchema.parse(name)}-${id.slice(0, 12)}`
@@ -414,11 +460,21 @@ export class DshExecutor implements Executor {
     this.failed(ticketId, String(error))
   }
   /** Records a `failed` report on the ticket and relays the failure to the main Session in one transaction. */
-  private failed(ticketId: string, summary: string): void {
+  private failed(ticketId: string, summary: string, failure?: AssignmentFailure): void {
     this.host.store.atomic(() => {
-      const updated = this.host.engine.report(ticketId, { state: 'failed', summary })
+      const updated = this.host.engine.report(ticketId, { state: 'failed', summary, ...(failure ? { failure } : {}) })
       this.relay(resultRelay(updated, 'failed', summary))
     })
+  }
+  /** Retains the provider route, recovery attempt, and failure stage with a failed report. */
+  private failure(agent: Agent, error: unknown, attempt: number, maxAttempts: number, turn?: number, step?: number): AssignmentFailure {
+    return {
+      stage: failureStage(error),
+      ...modelRoute(agent),
+      attempt,
+      maxAttempts,
+      ...providerRetry(agent, turn, step),
+    }
   }
   private relay({ id, text }: { id: string; text: string }): void { this.host.sessions.relay(id, text) }
   private async launch(ticket: Ticket, assignment: Assignment): Promise<void> {
@@ -502,12 +558,34 @@ export class DshExecutor implements Executor {
         if (read.length) this.host.engine.inputsRead(ticketId, read)
       }))
     }))
-    this.disposers.push(ctx.on('agent/error', ({ agent, error }) => {
+    this.disposers.push(ctx.on('agent/error', ({ agent, turn, step, error }) => {
       const ticket = this.ticketOf(agent)
       const assignment = ticket && runningAssignment(ticket)
       if (!ticket || !assignment || !liveTicket(ticket) || this.host.closing()) return
       if (this.retries(assignment.id, error)) { this.resumeAfter(ticket.id, assignment.id, error); return }
-      void this.background(Promise.resolve().then(() => { this.failed(ticket.id, String(error)) }))
+      const passing = transient(error)
+      void this.background(Promise.resolve().then(() => {
+        this.failed(ticket.id, String(error), this.failure(agent, error, passing ? TRANSIENT_TRIES + 1 : 1,
+          passing ? TRANSIENT_TRIES + 1 : 1, turn, step))
+      }))
+    }))
+    // Output-token exhaustion closes a turn without `agent/error`. Continue it under the same bounded recovery policy,
+    // then make the fourth exhaustion an explicit failed Ticket with diagnostics and the Retry action.
+    this.disposers.push(ctx.on('session/event', (session, event) => {
+      if (event.type !== 'turn/end' || !record(event.data) || !record(event.data.reason)
+        || event.data.reason.kind !== 'max-tokens' || this.host.closing()) return
+      const ticketId = ticketOfSession(session.id)
+      const ticket = ticketId === undefined ? undefined : this.host.store.tickets.get(ticketId)
+      const assignment = ticket && runningAssignment(ticket)
+      if (!ticket || !assignment || !liveTicket(ticket)) return
+      const agent = this.host.context.agents.get(session.id as SessionId)
+      if (!agent) return
+      const error = maxTokenError()
+      if (this.retries(assignment.id, error)) { this.resumeAfter(ticket.id, assignment.id, error); return }
+      const turn = typeof event.data.turn === 'number' ? event.data.turn : undefined
+      void this.background(Promise.resolve().then(() => {
+        this.failed(ticket.id, String(error), this.failure(agent, error, TRANSIENT_TRIES + 1, TRANSIENT_TRIES + 1, turn))
+      }))
     }))
   }
   /** Unsubscribes from host agent events and clears any pending transient-retry timers. */
@@ -570,7 +648,10 @@ export class DshExecutor implements Executor {
       }
       const sent = this.host.sessions.prompt(sessionId, `retry:${assignmentId}:${tries}`, text, 'queue')
       void this.background(sent.finally(() => { if (waking) this.slots.free(ticketId); this.resuming.delete(assignmentId) })
-        .catch(failure => { this.failed(ticketId, String(failure)) }))
+        .catch(failure => {
+          const agent = this.host.context.agents.get(sessionId as SessionId)
+          this.failed(ticketId, String(failure), agent ? this.failure(agent, failure, TRANSIENT_TRIES + 1, TRANSIENT_TRIES + 1) : undefined)
+        }))
     }
     this.after(TRANSIENT_BACKOFF_MS * 2 ** (tries - 1), go)
   }
