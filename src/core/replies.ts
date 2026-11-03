@@ -1,7 +1,7 @@
 /** The Engine's messages to Channels, each by the rule that allows it. */
 import { key } from './ids.ts'
 import { UserError } from './errors.ts'
-import { latestAssignment, liveTicket, ticketOutcome } from './model.ts'
+import { latestAssignment, liveTicket, threadKey, ticketOutcome } from './model.ts'
 import type { ChannelRef, Ticket, Trigger } from './model.ts'
 import type { ReplyStatus } from './ports.ts'
 import { EnginePart } from './part.ts'
@@ -21,7 +21,8 @@ export interface Reply { id: string; status: ReplyStatus; reused: boolean }
  * Replies writes the Engine's messages to Channels through the Outbox port: an acknowledgement, the answer to a person's
  * question, a ticket's result, and its question for a person, each only when its rule allows it, under a deterministic id
  * that keeps it from going out twice (idempotent). The Engine routes `reply` here; Tickets asks it for the acknowledgement
- * an accept carries, and Assignments asks it to withdraw a question a report replaced.
+ * an accept carries, and Assignments asks it to withdraw a question a report replaced. A result also posts a short linked
+ * notice to the latest active followed Thread, keeping the full result in the Ticket's original conversation.
  */
 export class Replies extends EnginePart {
   /**
@@ -84,6 +85,7 @@ export class Replies extends EnginePart {
     const channel = request.purpose === 'answer' ? trigger!.channel : asker?.channel ?? (ticket ? this.sourceChannel(ticket) : undefined)
     if (!channel) throw new UserError('noChannel')
     this.options.outbox.send({ id, channel, text: request.text, kind: 'reply', ...ticket ? { ticketId: ticket.id } : {} })
+    if (request.purpose === 'result' && ticket) this.noticeResult(ticket, id)
     if (request.purpose === 'answer' && ticket && trigger && ticket.answers?.includes(trigger.id)) {
       ticket.answers = ticket.answers.filter(item => item !== trigger.id)
       this.repo.tickets.save(ticket)
@@ -92,4 +94,20 @@ export class Replies extends EnginePart {
   }
   /** The conversation a ticket started in: its origin Trigger's Channel, else its first Channel. */
   private sourceChannel(ticket: Ticket): ChannelRef | undefined { return this.source(ticket)?.channel ?? ticket.channels[0] }
+  /** Point the latest active Thread a ticket follows, other than its source, at the canonical result. */
+  private noticeResult(ticket: Ticket, resultId: string): void {
+    const source = this.sourceChannel(ticket), url = source?.address.url
+    if (!source || !url) return
+    const open = new Set((ticket.follows ?? []).filter(follow => !follow.closed).map(follow => follow.thread))
+    const latest = this.repo.threads.list()
+      .filter(thread => open.has(thread.key) && thread.subscriptions.includes(ticket.id) && !thread.context?.includes(ticket.id))
+      .sort((left, right) => (right.lastAt ?? '').localeCompare(left.lastAt ?? ''))[0]
+    if (!latest) return
+    const channel = ticket.inputs.flatMap(input => input.kind === 'trigger' ? [this.repo.triggers.get(input.triggerId)] : [])
+      .filter((trigger): trigger is Trigger => !!trigger?.channel && trigger.threads.some(ref => threadKey(ref) === latest.key))
+      .sort((left, right) => right.at.localeCompare(left.at))[0]?.channel
+    if (!channel || channel.thread === source.thread) return
+    this.options.outbox.send({ id: key('result-followup', resultId, latest.key), channel,
+      text: `Completed. Canonical result and verification details: ${url}`, kind: 'notice', ticketId: ticket.id })
+  }
 }

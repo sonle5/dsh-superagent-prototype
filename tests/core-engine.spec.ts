@@ -1048,6 +1048,43 @@ describe('replies', () => {
     expect(h.engine.reply({ purpose: 'result', ticketId, text: 'Done' })).toMatchObject({ status: 'pending' })
     expect(h.outbox.at(-1)!.channel).toEqual(trigger('1').channel)
   })
+
+  it('posts one linked completion notice to the latest active followed thread', () => {
+    const h = harness()
+    const origin = trigger('1', {
+      source: 'github',
+      actor: { source: 'github', id: 'alice' },
+      threads: [{ source: 'github', id: '23' }],
+      channel: { source: 'github', thread: 'github:23', address: { number: '23', url: 'https://github.com/acme/widgets/issues/23' } },
+    })
+    h.engine.receive(origin)
+    h.pump()
+    const ticketId = h.decide(h.requests.at(-1)!, { kind: 'accept', title: 'Sync', scope: 'main', reason: 'requested' }).ticketId!
+    const pull = (id: string, number: string) => trigger(id, {
+      source: 'github',
+      actor: { source: 'github', id: 'alice' },
+      threads: [{ source: 'github', id: number }],
+      channel: { source: 'github', thread: `github:${number}`, address: { number, url: `https://github.com/acme/widgets/pull/${number}` } },
+    })
+
+    h.engine.bindThread(ticketId, { source: 'github', id: '24' }, true)
+    h.engine.receive(pull('2', '24'))
+    h.engine.bindThread(ticketId, { source: 'github', id: '25' }, true)
+    h.engine.receive(pull('3', '25'))
+    h.engine.report(ticketId, { state: 'ready', summary: 'Done' })
+
+    const result = h.engine.reply({ purpose: 'result', ticketId, text: 'Done' })
+    expect(h.outbox).toContainEqual({
+      id: key('result-followup', result.id, 'github:25'),
+      channel: { source: 'github', thread: 'github:25', address: { number: '25', url: 'https://github.com/acme/widgets/pull/25' } },
+      text: 'Completed. Canonical result and verification details: https://github.com/acme/widgets/issues/23',
+      kind: 'notice',
+      ticketId,
+    })
+
+    h.engine.reply({ purpose: 'result', ticketId, text: 'Done' })
+    expect(h.outbox.filter(message => message.kind === 'notice')).toHaveLength(1)
+  })
 })
 describe('ticket commands', () => {
   it('ends a ticket by the same rule on a close and on a ready report: once no PR it opened is open, as the latest of them ended', () => {
