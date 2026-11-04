@@ -80,6 +80,20 @@ function peerLabel(target: FleetNativeTarget): string {
   return target.id === LOCAL_TARGET_ID ? 'Desktop' : target.repository
 }
 
+/**
+ * Whether a Desktop-profile Session or Workspace path lies under a deployment's state directory.
+ * The deployment's own store is authoritative for such work; older Desktop-profile copies are hidden from the catalog.
+ */
+function deploymentOwnedPath(target: FleetNativeTarget, path: unknown, targets: readonly FleetNativeTarget[]): boolean {
+  if (target.id !== LOCAL_TARGET_ID || typeof path !== 'string') return false
+  return targets.some(peer => peer.id !== LOCAL_TARGET_ID && (path === peer.stateDir || path.startsWith(`${peer.stateDir}/`)))
+}
+
+function withoutDeploymentSessions(target: FleetNativeTarget, value: unknown, targets: readonly FleetNativeTarget[]): unknown {
+  if (!isRecord(value) || !Array.isArray(value.items)) return value
+  return { ...value, items: value.items.filter(item => !isRecord(item) || !deploymentOwnedPath(target, item.cwd, targets)) }
+}
+
 function requestTarget(request: IncomingMessage): { host: string; origin?: string } | undefined {
   const host = request.headers.host
   if (host === undefined) return undefined
@@ -475,7 +489,8 @@ async function aggregateRpc(
   for (let index = 0; index < responses.length; index++) {
     const response = responses[index]!
     if (response.status !== 'fulfilled' || !response.value.result.ok) continue
-    successful.push(responseValue(targets[index]!, envelope.method, response.value.result.value))
+    const value = responseValue(targets[index]!, envelope.method, response.value.result.value)
+    successful.push(envelope.method === 'session/list' ? withoutDeploymentSessions(targets[index]!, value, targets) : value)
   }
   if (successful.length === 0) {
     const detail = responses
@@ -730,7 +745,10 @@ function aggregateWorkspaceStream(
   const applyBaseline = (target: FleetNativeTarget, value: unknown): void => {
     const peer = peers.get(target.id)!
     const raw = isRecord(value) ? value : {}
-    peer.views = Array.isArray(raw.items) ? raw.items.map(item => workspaceValue(item, target)) : []
+    peer.views = Array.isArray(raw.items)
+      ? raw.items.filter(item => !isRecord(item) || !deploymentOwnedPath(target, item.path, targets))
+        .map(item => workspaceValue(item, target))
+      : []
     peer.order = peer.views.flatMap(item =>
       isRecord(item) && typeof item.workspaceId === 'string' ? [item.workspaceId] : [])
     peer.archived = Array.isArray(raw.archivedSessionIds)
@@ -781,6 +799,7 @@ function aggregateWorkspaceStream(
         }
         if (!peer.baseline) return
         if (value.type === 'upsert' && isRecord(value.workspace) && typeof value.workspace.workspaceId === 'string') {
+          if (deploymentOwnedPath(target, value.workspace.path, targets)) return
           const workspace = workspaceValue(value.workspace, target)
           const id = (workspace as { workspaceId: string }).workspaceId
           const index = peer.views.findIndex(item => isRecord(item) && item.workspaceId === id)

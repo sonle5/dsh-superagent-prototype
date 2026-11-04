@@ -722,6 +722,46 @@ it('keeps Desktop Sessions and modes on the Desktop profile while deployment Ses
   expect(sglang.calls.map(call => call.method)).toEqual(['session/list'])
 })
 
+it('hides Desktop-profile copies of Sessions under a deployment state directory', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'dsh-native-dedupe-'))
+  cleanup.push(() => rmSync(state, { recursive: true, force: true }))
+  const deploymentState = join(state, 'sglang')
+  const sglang = await peerHarness({
+    stateDir: deploymentState,
+    onHttp: envelope => ({
+      ok: true,
+      value: envelope.method === 'session/list'
+        ? { items: [{ sessionId: 'worker', updatedAt: 3, running: false, blank: false, cwd: join(deploymentState, 'work', 'sync') }] }
+        : undefined,
+    }),
+  })
+  writeFileSync(join(state, 'fleet.json'), JSON.stringify({
+    version: 1,
+    controlScript: '/usr/bin/true',
+    logDir: state,
+    deployments: [{ id: 'sglang', profile: 'superagent-sglang', repository: 'onenexus-team/sglang', url: sglang.url,
+      stateDir: deploymentState, workspace: '/tmp/sglang' }],
+  }))
+  const controller = await controllerHarness(state, {
+    onHttp: envelope => ({
+      ok: true,
+      value: envelope.method === 'session/list'
+        ? { items: [
+          { sessionId: 'worker', updatedAt: 1, running: false, blank: false, cwd: join(deploymentState, 'work', 'sync') },
+          { sessionId: 'perfrsi', updatedAt: 2, running: false, blank: false, cwd: '/tmp/perf' },
+        ] }
+        : null,
+    }),
+  })
+
+  const response = await nativeCall(controller, 'session/list', { args: {} })
+  const items = (response.result as { value: { items: { sessionId: string }[] } }).value.items
+  expect(items.map(item => item.sessionId)).toEqual([
+    nativeSessionId('sglang', 'worker'),
+    nativeSessionId('desktop.local', 'perfrsi'),
+  ])
+})
+
 it('answers the Desktop welcome settings read from the Desktop profile', async () => {
   const state = mkdtempSync(join(tmpdir(), 'dsh-native-welcome-'))
   cleanup.push(() => rmSync(state, { recursive: true, force: true }))
