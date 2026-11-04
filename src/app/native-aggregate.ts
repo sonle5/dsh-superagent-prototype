@@ -202,8 +202,9 @@ export function peerResponseValue(value: unknown, deployment: string, parent?: s
   }))
 }
 
-/** Prefix one human-facing title with the repository that owns it. */
+/** Prefix one human-facing title with the repository that owns it; the Desktop's own titles (no repository) stay as they are. */
 export function repositoryTitle(repository: string, title: string): string {
+  if (repository === '') return title
   const prefix = `${repository} · `
   return title.startsWith(prefix) ? title : `${prefix}${title}`
 }

@@ -3,6 +3,7 @@ import type { AddressInfo } from 'node:net'
 import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { gzipSync } from 'node:zlib'
 import { afterEach, expect, it, vi } from 'vitest'
 import WebSocket, { WebSocketServer } from 'ws'
 import { registerNativeTransport } from '../src/app/native-transport.ts'
@@ -41,19 +42,41 @@ async function listen(server: Server): Promise<string> {
   return `http://127.0.0.1:${(server.address() as AddressInfo).port}`
 }
 
-async function controllerHarness(state: string): Promise<string> {
+/** A Desktop profile with no Sessions of its own: empty baselines and a ready event stream. */
+function emptyDesktopStream(request: StreamRequest, send: (value: unknown) => void): void {
+  if (request.endpoint === 'workspace/follow') {
+    send({ type: 'baseline', value: { items: [], archivedSessionIds: [], pinnedSessionIds: [] } })
+  } else if (request.endpoint === 'session/control') {
+    send({ type: 'baseline', value: { projections: {} } })
+  } else if (request.endpoint === '$events') {
+    send({ type: 'ready', clientId: 'desktop-event-client', host: { home: '/Users/alice' } })
+  }
+}
+
+type LocalDesktop = {
+  onHttp?: (envelope: RpcEnvelope) => PeerReply | Promise<PeerReply>
+  onStream?: (request: StreamRequest, send: (value: unknown) => void) => void | Promise<void>
+}
+
+/** A controller profile whose own Desktop API answers through `local`, as the Desktop Host does behind the controller. */
+async function controllerHarness(state: string, local: LocalDesktop = {}): Promise<string> {
   let connectionRequest: ((request: IncomingMessage, response: ServerResponse, next: () => Promise<void>) => Promise<void>) | undefined
   let controllerUpgrade: UpgradeHandler | undefined
+  let localNative: Handler | undefined
   const ctx = {
     webServer: {
       host: '127.0.0.1' as const,
       port: 0,
+      register: (route: { handler: Handler }) => {
+        localNative = route.handler
+        return () => { localNative = undefined }
+      },
       registerUpgrade: (route: { handler: UpgradeHandler }) => {
         controllerUpgrade = route.handler
         return () => { controllerUpgrade = undefined }
       },
     },
-    connection: { requestRejection: () => undefined },
+    connection: { requestRejection: () => undefined, authenticatedUrl: (base: string) => `${base}/login` },
     logger: { warn: vi.fn() },
     on: (_event: string, handler: NonNullable<typeof connectionRequest>) => {
       connectionRequest = handler
@@ -62,13 +85,62 @@ async function controllerHarness(state: string): Promise<string> {
   }
   const dispose = registerNativeTransport(ctx as never, state, 'control')
   cleanup.push(dispose)
+  const localMux = new WebSocketServer({ noServer: true })
+  cleanup.push(() => new Promise<void>(resolve => localMux.close(() => resolve())))
+  const localApi = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
+    const chunks: Buffer[] = []
+    for await (const chunk of request) chunks.push(Buffer.from(chunk))
+    const envelope = JSON.parse(Buffer.concat(chunks).toString() || '{}') as RpcEnvelope
+    const reply = await local.onHttp?.(envelope) ?? { ok: true, value: undefined }
+    const body = JSON.stringify({ type: 'server-response', rpcId: envelope.rpcId, result: reply })
+    // The Desktop Host compresses API responses for clients that accept gzip.
+    if (request.headers['accept-encoding']?.includes('gzip')) {
+      response.writeHead(200, { 'content-type': 'application/json', 'content-encoding': 'gzip' })
+      response.end(gzipSync(body))
+      return
+    }
+    response.writeHead(200, { 'content-type': 'application/json' })
+    response.end(body)
+  }
   const server = createServer((request, response) => {
+    const path = new URL(request.url ?? '/', 'http://127.0.0.1').pathname
+    if (path === '/login') {
+      response.writeHead(303, { location: '/', 'set-cookie': 'dsh-auth-test=local; HttpOnly; Path=/' }).end()
+      return
+    }
+    if (path.startsWith('/orchestrator/native/api')) {
+      if (localNative === undefined) throw new Error('controller local native route is not installed')
+      void localNative(request, response)
+      return
+    }
     if (connectionRequest === undefined) throw new Error('controller native HTTP interceptor is not installed')
     void connectionRequest(request, response, async () => {
-      response.writeHead(500).end('controller-local API reached')
+      if (request.headers.cookie !== 'dsh-auth-test=local') {
+        response.writeHead(401).end()
+        return
+      }
+      await localApi(request, response)
     })
   })
   server.on('upgrade', (request, socket, head) => {
+    const path = new URL(request.url ?? '/', 'http://127.0.0.1').pathname
+    if (path === '/api/remote.mux' && request.headers.cookie === 'dsh-auth-test=local') {
+      localMux.handleUpgrade(request, socket, head, client => {
+        cleanup.push(() => client.terminate())
+        client.on('message', data => {
+          const frame = JSON.parse(data.toString()) as StreamRequest | { type: string }
+          if (frame.type !== 'open') return
+          const open = frame as StreamRequest
+          const send = (value: unknown): void => {
+            if (client.readyState === WebSocket.OPEN) {
+              client.send(JSON.stringify({ type: 'item', streamId: open.streamId, value }))
+            }
+          }
+          void (local.onStream ?? emptyDesktopStream)(open, send)
+        })
+      })
+      return
+    }
     if (controllerUpgrade === undefined) throw new Error('controller native upgrade route is not installed')
     controllerUpgrade(request, socket, head)
   })
@@ -184,7 +256,7 @@ function socketOpen(socket: WebSocket): Promise<void> {
   })
 }
 
-it('keeps durable HTTP authentication separate from a live Remote stream through the selected deployment', async () => {
+it('keeps unscoped API traffic on the Desktop profile and authenticates a deployment Session stream separately', async () => {
   const state = mkdtempSync(join(tmpdir(), 'dsh-native-proxy-'))
   cleanup.push(() => rmSync(state, { recursive: true, force: true }))
   const targetState = join(state, 'superagent-sglang')
@@ -296,12 +368,13 @@ it('keeps durable HTTP authentication separate from a live Remote stream through
     webServer: {
       host: '127.0.0.1' as const,
       get port() { return controllerPort },
+      register: () => () => {},
       registerUpgrade: (route: { handler: UpgradeHandler }) => {
         controllerUpgrade = route.handler
         return () => { controllerUpgrade = undefined }
       },
     },
-    connection: { requestRejection: () => undefined },
+    connection: { requestRejection: () => undefined, authenticatedUrl: (base: string) => `${base}/?token=test` },
     logger: { warn: vi.fn() },
     on: (_event: string, handler: NonNullable<typeof connectionRequest>) => {
       connectionRequest = handler
@@ -335,10 +408,9 @@ it('keeps durable HTTP authentication separate from a live Remote stream through
     body: JSON.stringify({ payload: 'fixture' }),
     signal: AbortSignal.timeout(3_000),
   })
-  expect(response.headers.get('set-cookie')).toBeNull()
-  expect(await response.json()).toEqual({ path: '/api/session/list', body: '{"payload":"fixture"}' })
+  expect(await response.text()).toBe('controller-local API reached')
   expect(admit).not.toHaveBeenCalled()
-  expect(received).toEqual([{ path: '/api/session/list', body: '{"payload":"fixture"}', internal: undefined }])
+  expect(received).toEqual([])
 
   const socket = new WebSocket(`${controllerUrl.replace('http:', 'ws:')}/orchestrator/native/remote.mux`)
   cleanup.push(() => socket.terminate())
@@ -347,7 +419,12 @@ it('keeps durable HTTP authentication separate from a live Remote stream through
     socket.once('message', data => resolve(JSON.parse(data.toString()) as unknown))
     socket.once('error', reject)
   })
-  socket.send(JSON.stringify({ type: 'open', streamId: 'live', endpoint: 'terminal/attach', payload: { args: [{ sessionId: 'local' }] } }))
+  socket.send(JSON.stringify({
+    type: 'open',
+    streamId: 'live',
+    endpoint: 'terminal/attach',
+    payload: { args: [{ sessionId: nativeSessionId('sglang', 'local') }] },
+  }))
   expect(await echoed).toEqual({
     type: 'item',
     streamId: 'live',
@@ -359,11 +436,11 @@ it('keeps durable HTTP authentication separate from a live Remote stream through
   await localClose
 
   const settings = await fetch(`${controllerUrl}/api/settings/describe`, { signal: AbortSignal.timeout(3_000) })
-  expect(settings.status).toBe(200)
-  expect(await settings.json()).toEqual({ path: '/api/settings/describe', body: '' })
-  expect(operatorSequence).toBe(2)
-  expect(issuedOperators).toEqual(['none', 'answer'])
-  expect([...operatorPeers.values()]).toEqual(['none'])
+  expect(await settings.text()).toBe('controller-local API reached')
+  expect(received).toEqual([])
+  expect(operatorSequence).toBe(1)
+  expect(issuedOperators).toEqual(['answer'])
+  expect([...operatorPeers.values()]).toEqual([])
 })
 
 it('aggregates native Sessions across every registered deployment', async () => {
@@ -429,9 +506,10 @@ it('aggregates native Sessions across every registered deployment', async () => 
     webServer: {
       host: '127.0.0.1' as const,
       port: 0,
+      register: () => () => {},
       registerUpgrade: () => () => {},
     },
-    connection: { requestRejection: () => undefined },
+    connection: { requestRejection: () => undefined, authenticatedUrl: (base: string) => `${base}/?token=test` },
     logger: { warn: vi.fn() },
     on: (_event: string, handler: NonNullable<typeof connectionRequest>) => {
       connectionRequest = handler
@@ -583,6 +661,84 @@ it('routes one scoped RPC to its owning deployment and remaps created identities
   expect(loop.calls).toEqual([])
   expect(sglang.calls).toHaveLength(1)
   expect(sglang.calls[0]?.payload).toEqual({ args: [{ sessionId: 'source-session' }] })
+})
+
+it('keeps Desktop Sessions and modes on the Desktop profile while deployment Sessions stay with their deployment', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'dsh-native-desktop-'))
+  cleanup.push(() => rmSync(state, { recursive: true, force: true }))
+  const sglang = await peerHarness({
+    stateDir: join(state, 'sglang'),
+    onHttp: envelope => ({
+      ok: true,
+      value: envelope.method === 'session/list'
+        ? { items: [{ sessionId: 'ticket-session', updatedAt: 1, running: false, blank: false, cwd: '/tmp/sglang' }] }
+        : undefined,
+    }),
+  })
+  writeFileSync(join(state, 'fleet.json'), JSON.stringify({
+    version: 1,
+    controlScript: '/usr/bin/true',
+    logDir: state,
+    deployments: [{ id: 'sglang', profile: 'superagent-sglang', repository: 'onenexus-team/sglang', url: sglang.url,
+      stateDir: join(state, 'sglang'), workspace: '/tmp/sglang' }],
+  }))
+  // The deployment selection is the Superagent management context; it no longer decides where Desktop work runs.
+  writeFileSync(join(state, 'native-deployment.json'), JSON.stringify({ version: 1, deployment: 'sglang' }))
+  const desktopCalls: RpcEnvelope[] = []
+  const controller = await controllerHarness(state, {
+    onHttp(envelope) {
+      desktopCalls.push(envelope)
+      if (envelope.method === 'session/create') return { ok: true, value: { sessionId: 'perfrsi-session' } }
+      if (envelope.method === 'agentPresets/list') return { ok: true, value: { presets: [{ id: 'perfrsi', name: 'PerfRSI' }] } }
+      if (envelope.method === 'session/list') {
+        return { ok: true, value: { items: [{ sessionId: 'perfrsi-session', updatedAt: 2, running: false, blank: false, cwd: '/tmp/perf' }] } }
+      }
+      return { ok: true, value: null }
+    },
+  })
+
+  expect(await nativeCall(controller, 'session/create', { args: [{ agentPreset: 'perfrsi' }] })).toMatchObject({
+    result: { ok: true, value: { sessionId: nativeSessionId('desktop.local', 'perfrsi-session') } },
+  })
+  expect(await nativeCall(controller, 'agentPresets/list', { args: [] })).toMatchObject({
+    result: { ok: true, value: { presets: [{ id: 'perfrsi', name: 'PerfRSI' }] } },
+  })
+  expect(await nativeCall(controller, 'session/list', { args: {} })).toMatchObject({
+    result: {
+      ok: true,
+      value: {
+        items: [
+          { sessionId: nativeSessionId('desktop.local', 'perfrsi-session') },
+          { sessionId: nativeSessionId('sglang', 'ticket-session') },
+        ],
+      },
+    },
+  })
+  expect(await nativeCall(controller, 'session/rename', {
+    args: [{ sessionId: nativeSessionId('desktop.local', 'perfrsi-session'), title: 'PerfRSI musespark' }],
+  })).toMatchObject({ result: { ok: true } })
+  expect(desktopCalls.map(call => call.method)).toEqual(['session/create', 'agentPresets/list', 'session/list', 'session/rename'])
+  expect(desktopCalls[3]?.payload).toEqual({ args: [{ sessionId: 'perfrsi-session', title: 'PerfRSI musespark' }] })
+  expect(sglang.calls.map(call => call.method)).toEqual(['session/list'])
+})
+
+it('answers the Desktop welcome settings read from the Desktop profile', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'dsh-native-welcome-'))
+  cleanup.push(() => rmSync(state, { recursive: true, force: true }))
+  writeFileSync(join(state, 'fleet.json'), JSON.stringify({ version: 1, deployments: [] }))
+  const controller = await controllerHarness(state, {
+    onHttp: envelope => ({ ok: true, value: envelope.method === 'settings/describe' ? { namespaces: [] } : null }),
+  })
+  const response = await fetch(`${controller}/api/settings/describe`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ type: 'client-request', rpcId: 'welcome', method: 'settings/describe', payload: { args: {} } }),
+  })
+  expect(await response.json()).toEqual({
+    type: 'server-response',
+    rpcId: 'welcome',
+    result: { ok: true, value: { namespaces: [] } },
+  })
 })
 
 it('prefixes both Session and Workspace titles in unary rename responses', async () => {
@@ -1169,7 +1325,7 @@ it('applies a later Session-control baseline as projection updates after the agg
   ]))
 })
 
-it('merges Session events, scopes global events, and correlates waterfall results with the owning peer', async () => {
+it('merges Session events, takes global events only from the Desktop profile, and correlates waterfall results', async () => {
   const state = mkdtempSync(join(tmpdir(), 'dsh-native-events-'))
   cleanup.push(() => rmSync(state, { recursive: true, force: true }))
   let loopEventGeneration = 0
@@ -1211,7 +1367,13 @@ it('merges Session events, scopes global events, and correlates waterfall result
     ],
   }))
   writeFileSync(join(state, 'native-deployment.json'), JSON.stringify({ version: 1, deployment: 'loop' }))
-  const controller = await controllerHarness(state)
+  const controller = await controllerHarness(state, {
+    onStream(request, send) {
+      if (request.endpoint !== '$events') return
+      send({ type: 'ready', clientId: 'desktop-event-client', host: { home: '/Users/alice' } })
+      send({ type: 'emit', event: 'settings/document-updated', args: ['desktop-settings'] })
+    },
+  })
   const { socket, next } = await openMux(controller)
   socket.send(JSON.stringify({
     type: 'open',
@@ -1255,14 +1417,14 @@ it('merges Session events, scopes global events, and correlates waterfall result
       value: {
         type: 'emit',
         event: 'settings/document-updated',
-        args: ['loop-settings'],
+        args: ['desktop-settings'],
       },
     },
   ]))
   expect(events.flatMap(frame => {
     const value = frame.value as { event?: string; args?: unknown[] }
     return value.event === 'settings/document-updated' ? value.args ?? [] : []
-  })).toEqual(['loop-settings'])
+  })).toEqual(['desktop-settings'])
 
   socket.send(JSON.stringify({
     type: 'open',
@@ -1341,7 +1503,7 @@ it('merges Session events, scopes global events, and correlates waterfall result
   })
 })
 
-it('ends Workspace, control, and event streams when no deployment is available', async () => {
+it('keeps Desktop Workspace, control, and event streams open when every deployment is offline', async () => {
   const state = mkdtempSync(join(tmpdir(), 'dsh-native-no-streams-'))
   cleanup.push(() => rmSync(state, { recursive: true, force: true }))
   writeFileSync(join(state, 'fleet.json'), JSON.stringify({
@@ -1359,33 +1521,19 @@ it('ends Workspace, control, and event streams when no deployment is available',
   }))
   const controller = await controllerHarness(state)
 
-  for (const [streamId, endpoint] of [
-    ['workspace', 'workspace/follow'],
-    ['control', 'session/control'],
+  for (const [streamId, endpoint, baseline] of [
+    ['workspace', 'workspace/follow', { items: [], archivedSessionIds: [], pinnedSessionIds: [] }],
+    ['control', 'session/control', { projections: {} }],
   ] as const) {
     const { socket, next } = await openMux(controller)
     socket.send(JSON.stringify({ type: 'open', streamId, endpoint, payload: { args: [] } }))
-    expect(await next()).toMatchObject({
-      type: 'error',
-      streamId,
-      error: { code: 'gateway/service-unavailable' },
-    })
-    expect(await next()).toMatchObject({ type: 'end', streamId })
+    expect(await next()).toMatchObject({ type: 'item', streamId, value: { type: 'baseline', value: baseline } })
   }
 
   const { socket, next } = await openMux(controller)
   socket.send(JSON.stringify({ type: 'open', streamId: 'events', endpoint: '$events', payload: { args: {} } }))
-  expect(await next()).toMatchObject({
-    type: 'item',
-    streamId: 'events',
-    value: { type: 'ready' },
-  })
-  expect(await next()).toMatchObject({
-    type: 'error',
-    streamId: 'events',
-    error: { code: 'gateway/service-unavailable' },
-  })
-  expect(await next()).toMatchObject({ type: 'end', streamId: 'events' })
+  expect(await next()).toMatchObject({ type: 'item', streamId: 'events', value: { type: 'ready' } })
+  socket.send(JSON.stringify({ type: 'cancel', streamId: 'events' }))
 })
 
 it('routes interactive terminal streams and their uplink frames to the Session owner', async () => {
@@ -1654,7 +1802,7 @@ it('creates one private controller capability per deployment', () => {
   expect(statSync(join(state, 'native-proxy-token')).mode & 0o777).toBe(0o600)
 })
 
-it('returns a redacted 502 when the selected deployment is unavailable', async () => {
+it('reports an offline deployment only for requests that name its Sessions', async () => {
   const state = mkdtempSync(join(tmpdir(), 'dsh-native-unavailable-'))
   cleanup.push(() => rmSync(state, { recursive: true, force: true }))
   writeFileSync(join(state, 'fleet.json'), JSON.stringify({
@@ -1668,34 +1816,15 @@ it('returns a redacted 502 when the selected deployment is unavailable', async (
       workspace: '/Users/alice/src/sglang-superagent',
     }],
   }))
-  writeFileSync(join(state, 'native-deployment.json'), JSON.stringify({ version: 1, deployment: 'sglang' }))
-  let connectionRequest: ((request: IncomingMessage, response: ServerResponse, next: () => Promise<void>) => Promise<void>) | undefined
-  const ctx = {
-    webServer: {
-      host: '127.0.0.1',
-      port: 0,
-      registerUpgrade: () => () => {},
-    },
-    connection: { requestRejection: () => undefined },
-    logger: { warn: vi.fn() },
-    on: (_event: string, handler: NonNullable<typeof connectionRequest>) => {
-      connectionRequest = handler
-      return () => { connectionRequest = undefined }
-    },
-  }
-  const dispose = registerNativeTransport(ctx as never, state, 'control')
-  cleanup.push(dispose)
-  const server = createServer((request, response) => {
-    if (connectionRequest === undefined) throw new Error('controller native HTTP interceptor is not installed')
-    void connectionRequest(request, response, async () => {
-      response.writeHead(500).end('controller-local API reached')
-    })
+  const controller = await controllerHarness(state, {
+    onHttp: envelope => ({ ok: true, value: envelope.method === 'session/list' ? { items: [] } : undefined }),
   })
-  const url = await listen(server)
-  ctx.webServer.port = Number(new URL(url).port)
-  const response = await fetch(`${url}/api/session/list`, { method: 'POST' })
-  expect(response.status).toBe(502)
-  expect(await response.text()).toMatch(/^Deployment unavailable:/)
+  expect(await nativeCall(controller, 'session/list', { args: {} })).toMatchObject({ result: { ok: true, value: { items: [] } } })
+  expect(await nativeCall(controller, 'session/rename', {
+    args: [{ sessionId: nativeSessionId('sglang', 'session'), title: 'x' }],
+  })).toMatchObject({
+    result: { ok: false, error: { message: expect.stringMatching(/^onenexus-team\/sglang is unavailable:/) } },
+  })
 })
 
 it('rejects a non-loopback native routing profile', () => {

@@ -2,7 +2,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-connection'
 import { isLoopbackHost } from '@deepseek-ai/dsh-host-webserver'
-import { randomUUID } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { Readable, type Duplex } from 'node:stream'
 import { WebSocket, WebSocketServer, type RawData } from 'ws'
@@ -21,12 +21,14 @@ import {
   repositoryTitle,
   requestOwner,
 } from './native-aggregate.ts'
-import { matchesNativeToken } from './native-auth.ts'
+import { matchesNativeToken, nativeToken } from './native-auth.ts'
 
 const NATIVE_API = '/orchestrator/native/api'
 const NATIVE_MUX = '/orchestrator/native/remote.mux'
 const INTERNAL_REQUEST_HEADER = 'x-orchestrator-request'
 const INTERNAL_HEADER = 'x-dsh-superagent-native'
+/** Marks the controller's request to its own API; its value lives only in this process. */
+const LOCAL_HEADER = 'x-dsh-superagent-local'
 const MAX_RPC_BODY_BYTES = 300 * 1024 * 1024
 const SESSION_SEARCH_RESULT_LIMIT = 20
 const PEER_REQUEST_TIMEOUT_MS = 10_000
@@ -49,9 +51,34 @@ const HOP_HEADERS = new Set([
   'upgrade',
   INTERNAL_REQUEST_HEADER,
   INTERNAL_HEADER,
+  LOCAL_HEADER,
 ])
 
 type NativeRole = 'control' | 'repository'
+
+/**
+ * Peer id of the controller profile's own Sessions. Registry ids cannot contain a dot, so it never names a deployment.
+ * Sessions a person starts in Desktop, in any mode, belong to this profile rather than to a Superagent deployment.
+ */
+const LOCAL_TARGET_ID = 'desktop.local'
+
+/** The controller profile as a peer: it serves its own Session catalog through the repository half of the transport. */
+function localTarget(ctx: Context, stateDir: string): FleetNativeTarget {
+  return {
+    id: LOCAL_TARGET_ID,
+    url: `http://127.0.0.1:${ctx.webServer.port}/`,
+    repository: '',
+    profile: '',
+    stateDir,
+    workspace: '',
+    token: nativeToken(stateDir)!,
+  }
+}
+
+/** Name of a peer in diagnostics. */
+function peerLabel(target: FleetNativeTarget): string {
+  return target.id === LOCAL_TARGET_ID ? 'Desktop' : target.repository
+}
 
 function requestTarget(request: IncomingMessage): { host: string; origin?: string } | undefined {
   const host = request.headers.host
@@ -70,7 +97,8 @@ function internalRequest(request: IncomingMessage, port: number, stateDir: strin
 function responseHeaders(response: Response): Record<string, string> {
   const headers: Record<string, string> = {}
   for (const [name, value] of response.headers) {
-    if (!HOP_HEADERS.has(name.toLowerCase())) headers[name] = value
+    // fetch has already decoded the body, so its original encoding no longer describes it.
+    if (!HOP_HEADERS.has(name.toLowerCase()) && name.toLowerCase() !== 'content-encoding') headers[name] = value
   }
   return headers
 }
@@ -300,7 +328,7 @@ function peerSignal(signal: AbortSignal): AbortSignal {
 }
 
 function withoutRepositoryTitle(repository: string, value: unknown): unknown {
-  if (typeof value !== 'string') return value
+  if (typeof value !== 'string' || repository === '') return value
   const prefix = `${repository} · `
   return value.startsWith(prefix) ? value.slice(prefix.length) : value
 }
@@ -350,9 +378,9 @@ async function callPeer(
     redirect: 'error',
     signal: peerSignal(signal),
   })
-  if (!response.ok) throw new Error(`${response.status} from ${target.repository}`)
+  if (!response.ok) throw new Error(`${response.status} from ${peerLabel(target)}`)
   const parsed = serverEnvelope(await response.json() as unknown, envelope.rpcId)
-  if (parsed === undefined) throw new Error(`Invalid native response from ${target.repository}`)
+  if (parsed === undefined) throw new Error(`Invalid native response from ${peerLabel(target)}`)
   return parsed
 }
 
@@ -394,7 +422,7 @@ async function aggregateRpc(
       }
       const clientId = localEventClient(state, target.id, controllerClientId)
       if (clientId === undefined) {
-        return aggregateFailure(envelope.rpcId, `Remote event stream is unavailable for ${target.repository}`)
+        return aggregateFailure(envelope.rpcId, `Remote event stream is unavailable for ${peerLabel(target)}`)
       }
       const args = envelope.payload.args
       if (Array.isArray(args) && isRecord(args[0]) && typeof args[0].clientId === 'string') {
@@ -421,7 +449,7 @@ async function aggregateRpc(
     } catch (error) {
       return aggregateFailure(
         envelope.rpcId,
-        redactSensitive(`${target.repository} is unavailable: ${error instanceof Error ? error.message : String(error)}`),
+        redactSensitive(`${peerLabel(target)} is unavailable: ${error instanceof Error ? error.message : String(error)}`),
       )
     }
     if (!response.result.ok) {
@@ -452,10 +480,10 @@ async function aggregateRpc(
   if (successful.length === 0) {
     const detail = responses
       .map((response, index) => response.status === 'rejected'
-        ? `${targets[index]!.repository}: ${response.reason instanceof Error ? response.reason.message : String(response.reason)}`
+        ? `${peerLabel(targets[index]!)}: ${response.reason instanceof Error ? response.reason.message : String(response.reason)}`
         : response.value.result.ok
           ? undefined
-          : `${targets[index]!.repository}: ${response.value.result.error.message}`)
+          : `${peerLabel(targets[index]!)}: ${response.value.result.error.message}`)
       .filter((value): value is string => value !== undefined)
       .join('; ')
     return aggregateFailure(envelope.rpcId, redactSensitive(`No deployment answered ${envelope.method}${detail ? ` (${detail})` : ''}`))
@@ -530,7 +558,7 @@ function openUpstreamStream(
     options.onError(error)
   }
   const openTimer = setTimeout(() => {
-    failure({ code: 'gateway/service-unavailable', message: `${target.repository} Remote stream did not open`, details: {} })
+    failure({ code: 'gateway/service-unavailable', message: `${peerLabel(target)} Remote stream did not open`, details: {} })
     socket.terminate()
   }, UPSTREAM_OPEN_TIMEOUT_MS)
   socket.on('open', () => {
@@ -567,11 +595,11 @@ function openUpstreamStream(
   })
   socket.on('error', () => {
     clearTimeout(openTimer)
-    if (!closed) failure({ code: 'gateway/internal', message: `${target.repository} Remote stream failed`, details: {} })
+    if (!closed) failure({ code: 'gateway/internal', message: `${peerLabel(target)} Remote stream failed`, details: {} })
   })
   socket.on('close', () => {
     clearTimeout(openTimer)
-    if (!closed) failure({ code: 'gateway/internal', message: `${target.repository} Remote stream closed`, details: {} })
+    if (!closed) failure({ code: 'gateway/internal', message: `${peerLabel(target)} Remote stream closed`, details: {} })
   })
   return {
     send(value) {
@@ -788,7 +816,7 @@ function aggregateWorkspaceStream(
       },
       onError(error) {
         peer.ended = true
-        warn(`Workspace stream for ${target.repository} ended: ${error.message}`)
+        warn(`Workspace stream for ${peerLabel(target)} ended: ${error.message}`)
         maybeFlush()
         maybeEnd()
       },
@@ -901,7 +929,7 @@ function aggregateControlStream(
       },
       onError(error) {
         ended.add(target.id)
-        warn(`Session control stream for ${target.repository} ended: ${error.message}`)
+        warn(`Session control stream for ${peerLabel(target)} ended: ${error.message}`)
         maybeFlush()
         maybeEnd()
       },
@@ -948,7 +976,6 @@ function aggregateEventsStream(
   streamId: string,
   targets: readonly FleetNativeTarget[],
   state: NativeControllerState,
-  selected: () => string | undefined,
   warn: (message: string) => void,
   onClosed: () => void,
 ): UpstreamStream {
@@ -988,7 +1015,7 @@ function aggregateEventsStream(
         if (value.type === 'emit') {
           if (typeof value.event !== 'string') return
           const isSessionEvent = SESSION_EVENTS.has(value.event)
-          if (!isSessionEvent && selected() !== target.id) return
+          if (!isSessionEvent && target.id !== LOCAL_TARGET_ID) return
           sendMuxItem(client, streamId, {
             ...value,
             args: eventArgs(target, value.event, value.args),
@@ -1012,7 +1039,7 @@ function aggregateEventsStream(
       onError(error) {
         ended.add(target.id)
         unbindEventClient(state, target.id, controllerClientId)
-        warn(`Session event stream for ${target.repository} ended: ${error.message}`)
+        warn(`Session event stream for ${peerLabel(target)} ended: ${error.message}`)
         maybeEnd()
       },
       onEnd() {
@@ -1035,13 +1062,6 @@ function aggregateEventsStream(
 
 function controllerUpgrade(ctx: Context, stateDir: string, server: WebSocketServer, state: NativeControllerState) {
   const fleet = new Fleet(stateDir)
-  const selectedId = (): string | undefined => {
-    try {
-      return fleet.nativeTarget()?.id
-    } catch {
-      return undefined
-    }
-  }
   return (request: IncomingMessage, socket: Duplex, head: Buffer): void => {
     if (ctx.connection.requestRejection(request) !== undefined) {
       socket.destroy()
@@ -1090,12 +1110,10 @@ function controllerUpgrade(ctx: Context, stateDir: string, server: WebSocketServ
         }
 
         let targets: FleetNativeTarget[]
-        let fallback: FleetNativeTarget | undefined
+        let fallback: FleetNativeTarget
         try {
-          targets = fleet.nativeTargets()
-          const selected = selectedId()
-          fallback = targets.find(target => target.id === selected) ?? targets[0]
-          if (fallback === undefined) throw new Error('No deployments are registered')
+          fallback = localTarget(ctx, stateDir)
+          targets = [fallback, ...fleet.nativeTargets()]
         } catch (error) {
           sendMuxError(client, message.streamId, {
             code: 'gateway/service-unavailable',
@@ -1117,7 +1135,7 @@ function controllerUpgrade(ctx: Context, stateDir: string, server: WebSocketServ
         } else if (message.endpoint === '$events') {
           route = {
             endpoint: message.endpoint,
-            stream: aggregateEventsStream(client, message.streamId, targets, state, selectedId, warn, closed),
+            stream: aggregateEventsStream(client, message.streamId, targets, state, warn, closed),
           }
         } else {
           let target: FleetNativeTarget
@@ -1230,7 +1248,12 @@ function repositoryUpgrade(ctx: Context, stateDir: string, server: WebSocketServ
   }
 }
 
-function repositoryHttp(ctx: Context, stateDir: string, auth: ReturnType<typeof repositoryAuth>) {
+function repositoryHttp(
+  ctx: Context,
+  stateDir: string,
+  auth: ReturnType<typeof repositoryAuth>,
+  local: Record<string, string> = {},
+) {
   return async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     if (!internalRequest(request, ctx.webServer.port, stateDir)) {
       response.writeHead(403)
@@ -1248,6 +1271,7 @@ function repositoryHttp(ctx: Context, stateDir: string, auth: ReturnType<typeof 
         origin: base,
         cookie: await auth.http(),
         'sec-fetch-site': 'same-origin',
+        ...local,
       })
     } catch (error) {
       const message = redactSensitive(error instanceof Error ? error.message : String(error))
@@ -1258,43 +1282,34 @@ function repositoryHttp(ctx: Context, stateDir: string, auth: ReturnType<typeof 
   }
 }
 
-function controlHttp(ctx: Context, stateDir: string, state: NativeControllerState) {
+function controlHttp(ctx: Context, stateDir: string, state: NativeControllerState, localNonce: string) {
   const fleet = new Fleet(stateDir)
   return async (request: IncomingMessage, response: ServerResponse, next: () => Promise<void>): Promise<void> => {
     if (request.url !== '/api' && !request.url?.startsWith('/api/') && !request.url?.startsWith('/api?')) {
       await next()
       return
     }
+    // The Desktop's own peer route reaches this profile's API; only this process knows the marker.
+    if (request.headers[LOCAL_HEADER] === localNonce) {
+      await next()
+      return
+    }
     let targets: FleetNativeTarget[]
-    let selected: FleetNativeTarget | undefined
+    let fallback: FleetNativeTarget
     try {
-      targets = fleet.nativeTargets()
-      const selection = fleet.nativeTarget()
-      selected = selection === undefined ? undefined : targets.find(target => target.id === selection.id)
+      fallback = localTarget(ctx, stateDir)
+      targets = [fallback, ...fleet.nativeTargets()]
     } catch (error) {
       response.writeHead(503, { 'content-type': 'text/plain; charset=utf-8' })
       response.end(redactSensitive(error instanceof Error ? error.message : String(error)))
       return
     }
-    if (targets.length === 0) {
-      await next()
-      return
-    }
-    const fallback = selected ?? targets[0]!
     const source = new URL(request.url ?? '/', 'http://dsh.internal')
     const json = request.method === 'POST'
       && request.headers['content-type']?.split(';', 1)[0]?.trim().toLowerCase() === 'application/json'
+    // Non-RPC API traffic (settings, files, attachments) names no Session, so it is the Desktop profile's own.
     if (!json) {
-      const proxied = new URL(`/orchestrator/native${source.pathname}`, fallback.url)
-      proxied.search = source.search
-      try {
-        await proxyHttp(request, response, proxied, nativeHeaders(fallback))
-      } catch (error) {
-        if (!response.headersSent) response.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' })
-        if (!response.writableEnded) {
-          response.end(redactSensitive(`Deployment unavailable: ${error instanceof Error ? error.message : String(error)}`))
-        }
-      }
+      await next()
       return
     }
 
@@ -1354,10 +1369,22 @@ export function registerNativeTransport(ctx: Context, stateDir: string, role: Na
   const disposers: (() => void)[] = []
   if (role === 'control') {
     const state: NativeControllerState = { eventClients: new Map() }
-    disposers.push(ctx.on('connection/request', controlHttp(ctx, stateDir, state)))
+    const auth = repositoryAuth(ctx)
+    const localNonce = randomBytes(32).toString('base64url')
+    const control = controllerUpgrade(ctx, stateDir, server, state)
+    const local = repositoryUpgrade(ctx, stateDir, server, auth)
+    disposers.push(ctx.on('connection/request', controlHttp(ctx, stateDir, state, localNonce)))
+    disposers.push(ctx.webServer.register({
+      kind: 'prefix',
+      path: NATIVE_API,
+      handler: repositoryHttp(ctx, stateDir, auth, { [LOCAL_HEADER]: localNonce }),
+    }))
     disposers.push(ctx.webServer.registerUpgrade({
       path: NATIVE_MUX,
-      handler: controllerUpgrade(ctx, stateDir, server, state),
+      handler: (request, socket, head) => {
+        if (internalRequest(request, ctx.webServer.port, stateDir)) local(request, socket, head)
+        else control(request, socket, head)
+      },
     }))
   } else {
     const auth = repositoryAuth(ctx)
