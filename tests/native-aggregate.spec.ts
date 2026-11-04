@@ -12,6 +12,7 @@ import {
   peerSessionControlValue,
   peerSessionFollowValue,
   peerSessionProjectionsValue,
+  peerSessionListValue,
   mergeSessionSearches,
   repositoryTitle,
   requestDeployments,
@@ -125,6 +126,28 @@ it('remaps Session follow headers and attributes title projections to the reposi
         subagentCatalog: [{ id: nativeSessionId('loop', 'child') }],
       },
     },
+  })
+})
+
+it('keeps each Session-list row projection block and attributes its title', () => {
+  const loop = target('loop')
+  expect(peerSessionListValue({
+    items: [
+      { sessionId: 'session', projections: { kind: 'cached', asOfSeq: 4, values: { title: 'Review', subagentCatalog: [{ id: 'child' }] } } },
+      { sessionId: 'blank' },
+    ],
+  }, loop)).toEqual({
+    items: [
+      {
+        sessionId: nativeSessionId('loop', 'session'),
+        projections: {
+          kind: 'cached',
+          asOfSeq: 4,
+          values: { title: 'onenexus-team/loop · Review', subagentCatalog: [{ id: nativeSessionId('loop', 'child') }] },
+        },
+      },
+      { sessionId: nativeSessionId('loop', 'blank') },
+    ],
   })
 })
 

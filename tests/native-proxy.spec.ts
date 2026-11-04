@@ -722,6 +722,26 @@ it('keeps Desktop Sessions and modes on the Desktop profile while deployment Ses
   expect(sglang.calls.map(call => call.method)).toEqual(['session/list'])
 })
 
+it('routes a question answer for a Desktop Session to the Desktop profile', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'dsh-native-answer-'))
+  cleanup.push(() => rmSync(state, { recursive: true, force: true }))
+  writeFileSync(join(state, 'fleet.json'), JSON.stringify({ version: 1, deployments: [] }))
+  const desktopCalls: RpcEnvelope[] = []
+  const controller = await controllerHarness(state, {
+    onHttp(envelope) {
+      desktopCalls.push(envelope)
+      return { ok: true, value: true }
+    },
+  })
+  const answer = { answers: [{ id: 'gate_mode', selected: ['Natural gate stage + perf stage'] }] }
+  expect(await nativeCall(controller, 'userQuestions/answer', {
+    args: [nativeSessionId('desktop.local', 'perfrsi-session'), 'toolu_1', answer],
+  })).toMatchObject({ result: { ok: true, value: true } })
+  expect(desktopCalls.map(call => [call.method, call.payload])).toEqual([
+    ['userQuestions/answer', { args: ['perfrsi-session', 'toolu_1', answer] }],
+  ])
+})
+
 it('hides Desktop-profile copies of Sessions under a deployment state directory', async () => {
   const state = mkdtempSync(join(tmpdir(), 'dsh-native-dedupe-'))
   cleanup.push(() => rmSync(state, { recursive: true, force: true }))

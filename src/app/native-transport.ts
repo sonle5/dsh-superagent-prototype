@@ -16,6 +16,7 @@ import {
   peerSessionControlValue,
   peerSessionFollowValue,
   peerSessionProjectionsValue,
+  peerSessionListValue,
   peerRequestValue,
   peerResponseValue,
   repositoryTitle,
@@ -367,6 +368,7 @@ function outboundPeerPayload(target: FleetNativeTarget, endpoint: string, value:
 function responseValue(target: FleetNativeTarget, endpoint: string, value: unknown): unknown {
   if (endpoint === 'session/follow') return peerSessionFollowValue(value, target)
   if (endpoint === 'session/projections') return peerSessionProjectionsValue(value, target)
+  if (endpoint === 'session/list') return peerSessionListValue(value, target)
   if (endpoint === 'session/control') return peerSessionControlValue(value, target)
   const mapped = peerResponseValue(value, target.id)
   if (endpoint !== 'session/rename' && endpoint !== 'workspace/rename') return mapped

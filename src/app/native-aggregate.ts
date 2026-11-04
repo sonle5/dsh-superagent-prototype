@@ -239,6 +239,25 @@ export function peerSessionProjectionsValue(value: unknown, target: FleetNativeT
 }
 
 /**
+ * Remap one Session-list page. Each row's `projections` is that Session's own block (`kind`, `asOfSeq`, `values`),
+ * not a map keyed by Session id, so it keeps its fields and only its values are remapped.
+ * @param value - Peer-local Session-list response.
+ * @param target - Peer that produced the response.
+ * @returns Aggregate Session-list response.
+ */
+export function peerSessionListValue(value: unknown, target: FleetNativeTarget): unknown {
+  if (!isRecord(value) || !Array.isArray(value.items)) return peerResponseValue(value, target.id)
+  return {
+    ...peerResponseValue(value, target.id) as JsonRecord,
+    items: value.items.map(item => {
+      if (!isRecord(item) || !isRecord(item.projections)) return peerResponseValue(item, target.id)
+      const { projections, ...row } = item
+      return { ...peerResponseValue(row, target.id) as JsonRecord, projections: projectionBaseline(projections, target) }
+    }),
+  }
+}
+
+/**
  * Remap a Session follow frame, including the otherwise ambiguous ids in its opening header.
  * @param value - Peer-local Session follow frame.
  * @param target - Peer that produced the frame.
