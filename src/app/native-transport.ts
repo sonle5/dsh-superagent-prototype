@@ -1243,7 +1243,30 @@ function repositoryAuth(ctx: Context) {
   }
 }
 
-function repositoryUpgrade(ctx: Context, stateDir: string, server: WebSocketServer, auth: ReturnType<typeof repositoryAuth>) {
+/**
+ * Operator cookie of each live `$events` stream, keyed by the Host's event client id.
+ * The gateway accepts `$events/result` only from the Peer that opened the stream.
+ */
+type EventCookies = Map<string, string>
+
+function eventReadyClientId(data: RawData): string | undefined {
+  let frame: unknown
+  try {
+    frame = JSON.parse(data.toString()) as unknown
+  } catch {
+    return undefined
+  }
+  if (!isRecord(frame) || frame.type !== 'item' || !isRecord(frame.value)) return undefined
+  return frame.value.type === 'ready' && typeof frame.value.clientId === 'string' ? frame.value.clientId : undefined
+}
+
+function repositoryUpgrade(
+  ctx: Context,
+  stateDir: string,
+  server: WebSocketServer,
+  auth: ReturnType<typeof repositoryAuth>,
+  eventCookies: EventCookies,
+) {
   return (request: IncomingMessage, socket: Duplex, head: Buffer): void => {
     if (!internalRequest(request, ctx.webServer.port, stateDir)) {
       socket.destroy()
@@ -1257,6 +1280,16 @@ function repositoryUpgrade(ctx: Context, stateDir: string, server: WebSocketServ
         const base = `http://127.0.0.1:${ctx.webServer.port}`
         const upstream = new WebSocket(webSocketUrl(base, '/api/remote.mux'), {
           headers: { cookie: value, origin: base, 'sec-fetch-site': 'same-origin' },
+        })
+        const clientIds: string[] = []
+        upstream.on('message', (data, binary) => {
+          const clientId = binary ? undefined : eventReadyClientId(data)
+          if (clientId === undefined) return
+          clientIds.push(clientId)
+          eventCookies.set(clientId, value)
+        })
+        upstream.on('close', () => {
+          for (const clientId of clientIds) eventCookies.delete(clientId)
         })
         client.off('message', hold)
         relaySockets(client, upstream, early)
@@ -1273,6 +1306,7 @@ function repositoryHttp(
   ctx: Context,
   stateDir: string,
   auth: ReturnType<typeof repositoryAuth>,
+  eventCookies: EventCookies,
   local: Record<string, string> = {},
 ) {
   return async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
@@ -1287,13 +1321,27 @@ function repositoryHttp(
     const target = new URL(`/api${suffix}`, base)
     target.search = source.search
     try {
-      await proxyHttp(request, response, target, {
+      const headers = {
         host: `127.0.0.1:${ctx.webServer.port}`,
         origin: base,
         cookie: await auth.http(),
         'sec-fetch-site': 'same-origin',
         ...local,
-      })
+      }
+      if (request.method !== 'POST') {
+        await proxyHttp(request, response, target, headers)
+        return
+      }
+      const body = await readRequestBody(request)
+      let envelope: ClientRpcEnvelope | undefined
+      try {
+        envelope = clientEnvelope(JSON.parse(body.toString('utf8')) as unknown)
+      } catch {
+        envelope = undefined
+      }
+      const clientId = envelope?.method === '$events/result' ? eventResultClientId(envelope.payload) : undefined
+      const eventCookie = clientId === undefined ? undefined : eventCookies.get(clientId)
+      await proxyBufferedHttp(request, response, target, body, eventCookie === undefined ? headers : { ...headers, cookie: eventCookie })
     } catch (error) {
       const message = redactSensitive(error instanceof Error ? error.message : String(error))
       ctx.logger.warn('native Session proxy request failed for %s: %s', target.pathname, message)
@@ -1388,17 +1436,18 @@ export function registerNativeTransport(ctx: Context, stateDir: string, role: Na
   if (!isLoopbackHost(ctx.webServer.host)) throw new Error('Native Session routing requires a loopback Web server')
   const server = new WebSocketServer({ noServer: true, perMessageDeflate: false })
   const disposers: (() => void)[] = []
+  const eventCookies: EventCookies = new Map()
   if (role === 'control') {
     const state: NativeControllerState = { eventClients: new Map() }
     const auth = repositoryAuth(ctx)
     const localNonce = randomBytes(32).toString('base64url')
     const control = controllerUpgrade(ctx, stateDir, server, state)
-    const local = repositoryUpgrade(ctx, stateDir, server, auth)
+    const local = repositoryUpgrade(ctx, stateDir, server, auth, eventCookies)
     disposers.push(ctx.on('connection/request', controlHttp(ctx, stateDir, state, localNonce)))
     disposers.push(ctx.webServer.register({
       kind: 'prefix',
       path: NATIVE_API,
-      handler: repositoryHttp(ctx, stateDir, auth, { [LOCAL_HEADER]: localNonce }),
+      handler: repositoryHttp(ctx, stateDir, auth, eventCookies, { [LOCAL_HEADER]: localNonce }),
     }))
     disposers.push(ctx.webServer.registerUpgrade({
       path: NATIVE_MUX,
@@ -1409,10 +1458,10 @@ export function registerNativeTransport(ctx: Context, stateDir: string, role: Na
     }))
   } else {
     const auth = repositoryAuth(ctx)
-    disposers.push(ctx.webServer.register({ kind: 'prefix', path: NATIVE_API, handler: repositoryHttp(ctx, stateDir, auth) }))
+    disposers.push(ctx.webServer.register({ kind: 'prefix', path: NATIVE_API, handler: repositoryHttp(ctx, stateDir, auth, eventCookies) }))
     disposers.push(ctx.webServer.registerUpgrade({
       path: NATIVE_MUX,
-      handler: repositoryUpgrade(ctx, stateDir, server, auth),
+      handler: repositoryUpgrade(ctx, stateDir, server, auth, eventCookies),
     }))
   }
   return () => {

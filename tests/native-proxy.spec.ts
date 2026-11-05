@@ -1853,6 +1853,109 @@ it('rejects the repository capability on a request with a foreign Origin', async
   expect(response.status).toBe(403)
 })
 
+it('sends an event result as the operator that opened its event stream', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'dsh-native-event-peer-'))
+  cleanup.push(() => rmSync(state, { recursive: true, force: true }))
+  const token = nativeToken(state)!
+  let nativeHttp: Handler | undefined
+  let nativeUpgrade: UpgradeHandler | undefined
+  let operatorSequence = 0
+  const operators = new Map<string, 'none' | 'answer'>()
+  const streamOperator = new Map<string, string>()
+  const results: { method: string; cookie: string | undefined }[] = []
+  const ctx = {
+    webServer: {
+      host: '127.0.0.1',
+      port: 0,
+      register: (route: { handler: Handler }) => {
+        nativeHttp = route.handler
+        return () => { nativeHttp = undefined }
+      },
+      registerUpgrade: (route: { handler: UpgradeHandler }) => {
+        nativeUpgrade = route.handler
+        return () => { nativeUpgrade = undefined }
+      },
+    },
+    connection: { authenticatedUrl: (base: string) => `${base}/?token=test`, admit: vi.fn() },
+    logger: { warn: vi.fn() },
+  }
+  cleanup.push(registerNativeTransport(ctx as never, state, 'repository'))
+  const mux = new WebSocketServer({ noServer: true })
+  cleanup.push(() => new Promise<void>(resolve => mux.close(() => resolve())))
+  const server = createServer((request, response) => {
+    const url = new URL(request.url ?? '/', 'http://127.0.0.1')
+    if (url.pathname.startsWith('/orchestrator/native/api')) {
+      void nativeHttp!(request, response)
+      return
+    }
+    if (url.pathname === '/connect') {
+      const interactions = url.searchParams.get('interactions') === 'answer' ? 'answer' : 'none'
+      const cookie = `dsh-auth-test=${interactions}-${++operatorSequence}`
+      operators.set(cookie, interactions)
+      response.writeHead(302, { location: './api/remote.mux', 'set-cookie': `${cookie}; HttpOnly; Path=/` }).end()
+      return
+    }
+    void (async () => {
+      const chunks: Buffer[] = []
+      for await (const chunk of request) chunks.push(Buffer.from(chunk))
+      const envelope = JSON.parse(Buffer.concat(chunks).toString()) as RpcEnvelope
+      results.push({ method: envelope.method, cookie: request.headers.cookie })
+      // The DSH gateway accepts an event result only from the Peer that opened the event stream.
+      const clientId = ((envelope.payload as { args: { clientId: string } }).args).clientId
+      const accepted = streamOperator.get(clientId) === request.headers.cookie
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({
+        type: 'server-response',
+        rpcId: envelope.rpcId,
+        result: accepted
+          ? { ok: true, value: null }
+          : { ok: false, error: { code: 'gateway/interactions-forbidden', message: 'another Peer', details: {} } },
+      }))
+    })()
+  })
+  server.on('upgrade', (request, socket, head) => {
+    const url = new URL(request.url ?? '/', 'http://127.0.0.1')
+    if (url.pathname === '/orchestrator/native/remote.mux') {
+      nativeUpgrade!(request, socket, head)
+      return
+    }
+    const cookie = request.headers.cookie!
+    mux.handleUpgrade(request, socket, head, client => {
+      cleanup.push(() => client.terminate())
+      client.on('message', data => {
+        const frame = JSON.parse(data.toString()) as StreamRequest
+        if (frame.type !== 'open' || frame.endpoint !== '$events') return
+        streamOperator.set('event-client-1', cookie)
+        client.send(JSON.stringify({ type: 'item', streamId: frame.streamId, value: { type: 'ready', clientId: 'event-client-1', host: { home: '' } } }))
+      })
+    })
+  })
+  const url = await listen(server)
+  ctx.webServer.port = Number(new URL(url).port)
+  const headers = { 'x-orchestrator-request': '1', 'x-dsh-superagent-native': token }
+
+  const socket = new WebSocket(`${url.replace('http:', 'ws:')}/orchestrator/native/remote.mux`, { headers })
+  cleanup.push(() => socket.terminate())
+  await socketOpen(socket)
+  const next = frameReader(socket)
+  socket.send(JSON.stringify({ type: 'open', streamId: 'events', endpoint: '$events', payload: { args: {} } }))
+  expect(await next()).toMatchObject({ value: { type: 'ready', clientId: 'event-client-1' } })
+
+  const response = await fetch(`${url}/orchestrator/native/api`, {
+    method: 'POST',
+    headers: { ...headers, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      type: 'client-request',
+      rpcId: 'answer',
+      method: '$events/result',
+      payload: { args: { clientId: 'event-client-1', eventId: 'question-1', outcome: { kind: 'next' } } },
+    }),
+  })
+  expect(await response.json()).toMatchObject({ result: { ok: true } })
+  expect(results).toEqual([{ method: '$events/result', cookie: streamOperator.get('event-client-1') }])
+  expect(operators.get(results[0]!.cookie!)).toBe('answer')
+})
+
 it('creates one private controller capability per deployment', () => {
   const state = mkdtempSync(join(tmpdir(), 'dsh-native-token-'))
   cleanup.push(() => rmSync(state, { recursive: true, force: true }))
