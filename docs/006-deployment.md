@@ -1,14 +1,16 @@
 # 006 Deployment
 
-Use this guide to install, configure and operate dsh-superagent. It covers accounts, startup checks, upgrades and troubleshooting, building on [001 Domain model](001-domain.md) through [005 Panel](005-panel.md).
+Use this guide to install, configure and operate dsh-superagent for one repository or a Desktop-managed fleet. It covers accounts, startup checks, upgrades and troubleshooting, building on [001 Domain model](001-domain.md) through [005 Panel](005-panel.md).
 
 ## What runs
 
-- **A dedicated DeepSeek Harness profile**, called `superagent` in this guide. Create it from the Web profile template. It loads the bundle and serves its panel on `127.0.0.1`. Keep it separate from the profile you work in: the plugin changes process-wide `PATH` and git settings, and its process needs independent restarts and upgrades.
-- **An agent GitHub account.** The agent comments, pushes branches and opens pull requests as this account, through a GitHub CLI signed in only as that account.
+- **A dedicated DeepSeek Harness profile per repository**, called `superagent-<deployment>` in this guide. Create each from the Web profile template. It loads the bundle and serves its internal panel on `127.0.0.1`. Keep these separate from the profile you work in: the plugin changes process-wide `PATH` and git settings, and each process restarts independently.
+- **An agent GitHub account.** The agent comments, pushes branches and opens pull requests as this account, through a GitHub CLI signed in only as that account. Reuse it only for repositories trusted to the same operator OS user and credential set.
 - **Optional:** a Feishu bot for chat requests.
 
 Plugin configuration holds the state directory and machine limits. Use the panel for everything else: Sources for the repository and accounts, Policy for allowed lists, and Execution for worker directories and commands.
+
+For several repositories, install the bundle and control script once, then create one independent managed profile per repository. DeepSeek Harness Desktop runs a repository-neutral controller in `mode: control` and presents every managed profile as a peer in Fleet. The repository profiles keep separate ports, state, Sessions, worktrees and model overrides; Desktop remains the single operator interface.
 
 ### Permissions and isolation
 
@@ -16,21 +18,24 @@ The bundle defines `dsh-superagent-worker` for Executors and `dsh-superagent-rou
 
 Opening a blank managed Session in the Web UI can select the profile's default preset. dsh-superagent restores its role-specific preset before the first turn.
 
-Both presets run with `danger-full-access` as the operator's OS user and read messages from subscribed Threads. Account wrappers choose the agent's credentials by default; they do not isolate the process. A worker can execute programs by path and read the operator's home directory. For isolation, use a dedicated OS account containing only the agent's credentials.
+Both presets run with `danger-full-access` as the operator's OS user and read messages from subscribed Threads. Account wrappers choose the agent's credentials by default; they do not isolate the process. A worker can execute programs by path and read the operator's home directory, sibling profiles, repositories and credentials. Repository files, Issues, pull requests, CI output and tool output are untrusted model input. Allowing external contributors to shape them can expose everything the worker can reach; prompt injection may induce disclosure or unsafe commands. Profiles and Fleet separate runtime state, not security domains. For stronger isolation, use a dedicated OS account or Desktop environment containing only that trust domain's credentials, and keep high-value secrets outside it.
 
 ## Prerequisites
 
 - Node.js 22.19+ or 24+, pnpm, git 2.32+, Python 3.8+ and tmux
 - GitHub CLI (`gh`) 2.48 or later. Source CLI fields must point to `gh` or `lark-cli` wrappers; the host relies on their subcommands and output formats.
-- A repository on github.com; GitHub Enterprise Server is not supported. To create a checkout per Ticket, keep a local clone from which the prepare command can add worktrees. Install `git-lfs` if that repository uses Git LFS.
-- A model provider configured for DeepSeek Harness. dsh-superagent uses the profile's default model unless the Eval or Execution settings name another.
+- One or more repositories on github.com; GitHub Enterprise Server is not supported. To create a checkout per Ticket, keep a separate local clone for each deployment from which its prepare command can add worktrees. Install `git-lfs` if a repository uses Git LFS.
+- DeepSeek Harness Desktop for the Fleet control plane, plus `curl` and `jq` for the documented Management API examples.
+- A model provider configured in every new DeepSeek Harness profile. dsh-superagent uses that profile's default model unless its Eval or Execution settings name another.
 - For Feishu: `lark-cli` (tested with 1.0.90) and a Feishu or Lark app with a bot
+
+Below, `$DSH_HOME` means `${DSH_HOME:-$HOME/.dsh}`.
 
 ## Accounts
 
 ### Agent GitHub account
 
-1. Create a GitHub user account for the agent and give it write access to the repository. A GitHub App cannot be the agent, because dsh-superagent reads the account's notifications.
+1. Create a GitHub user account for the agent and give it write access to each repository. A GitHub App cannot be the agent, because dsh-superagent reads the account's notifications. A shared account exposes their union of access to every worker that can use it.
 2. Give it a GitHub CLI that uses only its own credentials:
 
    ```sh
@@ -70,25 +75,35 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
 
 ## Install
 
-Run this block once, on a machine that has no `superagent` profile yet:
+Run this block once in this checkout:
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.2.1-rc.3
 git clone <this repository> dsh-superagent && cd dsh-superagent
 pnpm install && pnpm build
-dsh superagent --from-default-profile web --dump-config > /dev/null
-dsh plugin --profile superagent add "link:$PWD"
+dsh --version
 ```
 
-The pinned version above is public; other versions must satisfy `engines.dsh` in `package.json`.
+When this repository is already the checkout, skip the `git clone` line. DeepSeek Harness Desktop is the preferred source of `dsh`; otherwise install `@deepseek-ai/dsh@<compatible-version>` using its current release guidance and verify that `dsh --version` satisfies `engines.dsh` in `package.json`. Check `command -v dsh` before creating profiles. Do not replace a newer Desktop-provided command with an older global package.
 
-The fourth command creates `~/.dsh/profiles/superagent` from the DeepSeek Harness Web template. The fifth installs this bundle. Set `DSH_HOME` to relocate the default `~/.dsh` directory.
+For each deployment, install this bundle into a new profile:
 
-Run the profile-creation command only for a new installation. If the profile already exists, that command replaces it and deletes its `cordis.patch.yml`, including machine configuration. Do not use it for upgrades.
+```sh
+dsh plugin --profile superagent-<deployment> add "link:$PWD"
+```
+
+For the Desktop fleet controller, also install the bundle into the Desktop profile if it is not already present:
+
+```sh
+dsh plugin --profile <desktop-profile> add "link:$PWD"
+```
+
+`dsh plugin` initializes a missing profile and supports an existing one, but it changes the profile's package files; review those changes before restarting. On DeepSeek Harness Desktop the profile is normally `desktop`. `DSH_HOME` relocates the default `~/.dsh` directory. Reuse one bundle checkout and one control script for every local deployment. Use this bundle version for the controller and all managed profiles; profiles restart independently but upgrade together.
 
 ## Machine configuration
 
-Copy [examples/profile.cordis.patch.yml](../examples/profile.cordis.patch.yml) to `~/.dsh/profiles/superagent/cordis.patch.yml`, replacing that file, and replace every `<placeholder>`. For Feishu, also enable the `dsh-superagent-feishu` entry there. The `webserver` entry sets the panel's port.
+For each new repository-bound profile, merge the entries from [examples/profile.cordis.patch.yml](../examples/profile.cordis.patch.yml) into `$DSH_HOME/profiles/<profile>/cordis.patch.yml`, then replace every `<placeholder>` with the values from that deployment's row. Use a unique loopback port and absolute state directory. Configure a model provider and default model through that profile's normal DSH provider settings, including its `agent-default-model` entry; initialization does not copy them from Desktop. Non-secret provider entries may be adapted from a working profile, but keep key material in the referenced environment or credential store, not this repository. For Feishu, also enable the `dsh-superagent-feishu` entry. If providers or other machine configuration already exist in the file, keep them; the template is a patch fragment, not a replacement for the whole profile.
+
+Across deployments, resolve and verify that state directories, workspaces and effective execution roots do not overlap. A deployment's execution root may be under its own state directory. Fleet rejects duplicate ids, profiles and URLs, but it does not enforce state-directory uniqueness. If `executor.directory` is unset, the effective Ticket root is `<stateDir>/work`.
 
 | Key | Required | Meaning |
 | --- | --- | --- |
@@ -100,13 +115,13 @@ After the first start, edit machine limits in **Settings → Deployment** or the
 ## Start and stop
 
 ```sh
-scripts/dsh-superagent start
-scripts/dsh-superagent status
+scripts/dsh-superagent --profile <profile> --url <url> start
+scripts/dsh-superagent --profile <profile> --url <url> status
 ```
 
-`start` runs `dsh --profile superagent` in tmux session `dsh-superagent`, or `dsh-<profile>` for another profile. It waits up to one minute for the runtime to become ready or report a setup requirement. On a first run it prints the missing setup information. It refuses duplicate instances, including ones started outside this script.
+`start` runs `dsh --profile <profile>` in tmux session `dsh-<profile>`. It waits up to one minute for the runtime to become ready or report a setup requirement. On a first run it prints the missing setup information. It refuses duplicate instances, including ones started outside this script. Pass both `--profile` and `--url` for every managed deployment; the profile name does not imply its port.
 
-`stop` and `restart` request graceful shutdown and wait up to five minutes for Executors. They never force-kill the process or touch other tmux sessions.
+`stop` and `restart` request graceful shutdown and wait up to five minutes for Executors from the script, or one minute when invoked by Fleet. They never force-kill the process or touch other tmux sessions.
 
 `status` prints process ids, health and setup problems. For a different profile or port, use `--profile` and `--url`, or set `DSH_SUPERAGENT_PROFILE` and `DSH_SUPERAGENT_URL`.
 
@@ -132,11 +147,11 @@ The launcher also gives each named profile a private native DSH catalog. On star
 
 Profiles created before catalog isolation may have histories in the global `$DSH_HOME/sessions` directory. Stop every managed peer before the first isolated start, copy only the Session directories whose recorded working directories are owned by the deployment (including its `work/` directories) into that profile's private `runtime/sessions`, and do not copy the global `workspace.json`. Begin with an empty private storage root; DSH rebuilds Workspace grouping and projection caches from the copied Session headers. Keep the original global stores as the Desktop profile's history and as the migration backup; the launcher never copies or deletes Session data.
 
-Open the URL printed in the log, then choose **Superagent** in the sidebar.
+For a standalone profile, open the URL printed in the log and choose **Superagent** in the sidebar. For a managed fleet, treat each peer URL as an internal endpoint and use the **Superagent** Fleet view in Desktop.
 
 ### Native fleet
 
-The Desktop profile can be a repository-neutral control plane. Its `dsh-superagent` entry runs in `mode: control`, so it mounts the Fleet controller and keeps the shared Superagent panel without starting the repository Runtime, GitHub or Feishu Source plugins, or the Executor Session presets. The controller reads every deployment from `<control stateDir>/fleet.json`; it does not synthesize an embedded repository deployment:
+The Desktop profile can be a repository-neutral control plane. Install the bundle into that profile first, then merge [control.cordis.patch.yml](../examples/control.cordis.patch.yml) into the existing `$DSH_HOME/profiles/<desktop profile>/cordis.patch.yml`; do not replace that file, because it also contains the operator's providers and machine settings. Its `dsh-superagent` entry runs in `mode: control`, so it mounts the Fleet controller and keeps the shared Superagent panel without starting the repository Runtime, GitHub or Feishu Source plugins, or the Executor Session presets. The controller reads every deployment from `<control stateDir>/fleet.json`; it does not synthesize an embedded repository deployment:
 
 ```json
 {
@@ -149,7 +164,7 @@ The Desktop profile can be a repository-neutral control plane. Its `dsh-superage
       "profile": "superagent-inference-support-loop",
       "repository": "onenexus-team/inference-support-loop",
       "url": "http://127.0.0.1:3082",
-      "stateDir": "/Users/me/.dsh/state/superagent",
+      "stateDir": "/Users/me/.dsh/state/superagent-inference-support-loop",
       "workspace": "/Users/me/src/inference-support-loop"
     },
     {
@@ -164,16 +179,18 @@ The Desktop profile can be a repository-neutral control plane. Its `dsh-superage
 }
 ```
 
-Use [control.cordis.patch.yml](../examples/control.cordis.patch.yml) as the controller profile override. Each registered repository still uses [profile.cordis.patch.yml](../examples/profile.cordis.patch.yml) and keeps its own port, state directory, credentials, worktree and model configuration. The controller state is separate from all repository state:
+Use [control.cordis.patch.yml](../examples/control.cordis.patch.yml) as the controller profile override. Each registered repository still uses [profile.cordis.patch.yml](../examples/profile.cordis.patch.yml) and keeps its own profile, port, state, Session catalog, worktree root and role-model overrides. Provider, GitHub and other credentials are shared unless separately provisioned. The controller state is separate from all repository state:
 
 ```text
 $DSH_HOME/state/superagent-control       controller and fleet registry
-$DSH_HOME/state/superagent               inference-support-loop
+$DSH_HOME/state/superagent-inference-support-loop  inference-support-loop
 $DSH_HOME/state/superagent-sglang        SGLang
 $DSH_HOME/profiles/<profile>/runtime     each peer's native Session catalog and Workspace records
 ```
 
-The registry is local machine configuration. The panel does not accept a command, repository URL or executable from the browser: lifecycle actions run only the configured control script with a registered profile and loopback URL. Start and stop remain explicit per deployment, and an intentional stop stays stopped. Create and install each DSH profile with the normal deployment procedure before registering it here; the fleet layer does not clone repositories or copy credentials between profiles.
+The registry is local machine configuration. Paths must be absolute. `workspace` describes the clean local checkout associated with the deployment and is shown by Fleet; the registry neither creates nor validates it nor selects the Ticket execution root. Keep it aligned with the Execution prepare command. Across deployments, reject duplicate or overlapping `stateDir`, `workspace` and execution-root paths; a deployment may use its own `<stateDir>/work`. Fleet does not enforce this, so check the real paths before creating the registry. The panel does not accept a command, repository URL or executable from the browser: lifecycle actions run only the configured control script with a registered profile and loopback URL. Start and stop remain explicit per deployment, and an intentional stop stays stopped. Create and install each DSH profile with the normal deployment procedure before registering it here; the fleet layer does not clone repositories or copy credentials between profiles.
+
+The Fleet controller is a single-operator control plane. Every registered peer's Sessions are exposed to the same Desktop profile and OS user. Register only repositories in one trust boundary; use separate OS users or Desktop environments for different trust domains.
 
 The card title is the repository's exact `owner/name`. Every card is a peer: each has the same Start, Stop, Restart and Manage behavior, subject only to whether the shared fixed control script is executable.
 
@@ -189,10 +206,10 @@ Each peer's loopback URL is an internal management endpoint behind the Desktop c
 
 ### Hourly check
 
-Create the hourly check in the DeepSeek Harness profile you normally use, not in `superagent`. It must keep running when the agent service is down. Ask an agent in that profile to create an hourly schedule using this prompt, with the checkout path filled in:
+Create one hourly check per deployment in the DeepSeek Harness profile you normally use, not in the managed profile. It must keep running when the agent service is down. Ask an agent in that profile to create an hourly schedule using this prompt, with the checkout path, profile and URL filled in:
 
 ```text
-Check dsh-superagent: run `scripts/dsh-superagent --profile superagent status` in <checkout>. Exit 0: do nothing and say nothing. Exit 2: do not restart; tell me each part under `errors` with its detail, unless you already told me about the same ones. Exit 3: do not restart; tell me what `setup` says setup needs, unless you already told me. If it reports manually_stopped: true, leave it stopped. Otherwise (exit 1) run `scripts/dsh-superagent --profile superagent --respect-stop restart`, which exits the same way: 0 means it recovered, so say nothing; 2 and 3 are reported as above; if it exits 1 or fails otherwise, read the newest .artifacts/dsh-superagent-superagent-*.log and the Troubleshooting section of docs/006-deployment.md, fix what you can, and tell me what was wrong and what you did.
+Check dsh-superagent: run `scripts/dsh-superagent --profile <profile> --url <url> status` in <checkout>. Exit 0: do nothing and say nothing. Exit 2: do not restart; tell me each part under `errors` with its detail, unless you already told me about the same ones. Exit 3: do not restart; tell me what `setup` says setup needs, unless you already told me. If it reports manually_stopped: true, leave it stopped. Otherwise (exit 1) run `scripts/dsh-superagent --profile <profile> --url <url> --respect-stop restart`, which exits the same way: 0 means it recovered, so say nothing; 2 and 3 are reported as above; if it exits 1 or fails otherwise, read the newest .artifacts/dsh-superagent-<profile>-*.log and the Troubleshooting section of docs/006-deployment.md, fix what you can, and tell me what was wrong and what you did.
 ```
 
 `--respect-stop` preserves an intentional stop. Only `stop` writes the marker; `start` clears it. `restart` writes no marker, so the check can recover a restart whose shutdown timed out.
@@ -201,7 +218,7 @@ Check dsh-superagent: run `scripts/dsh-superagent --profile superagent status` i
 
 Setup must succeed before polling or work starts. Overview lists missing requirements and links to their settings. A settings change runs setup again. If you fix something outside the application, such as CLI authentication, choose **Check again**.
 
-1. **Sources.** Set the GitHub repository (`owner/name`) and agent CLI, for example `/home/me/.local/bin/gh-agent`. Requests normally arrive through the agent account's notifications. A new Issue or comment mentioning the account arrives on the next poll; adding a mention by editing an existing Issue body does not. Post a new comment instead. For Feishu, set the bot CLI, chats, each chat's receive-all or mentions-only mode, and whether to receive direct messages.
+1. **Sources.** Set the GitHub repository (`owner/name`) and agent CLI, for example `/home/me/.local/bin/gh-agent`. Requests normally arrive through the agent account's notifications. A new Issue or comment mentioning the account arrives on the next poll; adding a mention by editing an existing Issue body does not. Post a new comment instead. For Feishu, set the bot CLI, chats, each chat's receive-all or mentions-only mode, and whether to receive direct messages. Every running deployment must use disjoint chats and direct-message scopes. With one shared bot identity, enable direct messages for at most one deployment, and set `otherChats: mentions` for at most one deployment; use separate bots for separate direct-message or catch-all scopes. Deduplication is profile-local, so overlapping scopes can process the same message more than once.
 2. **Policy.** The two example rules can be edited or removed. Under **On each Source**, add the GitHub accounts and Feishu users who may ask for work; until a list has someone, no request can become a Ticket. With Feishu, a chat can be chosen to sync the list from, at startup and on **Sync now**.
 3. **Execution.** The directory root and a prepare command. To give each Ticket a checkout of the repository:
 
@@ -285,14 +302,17 @@ A file in `worker-bin` or `worker-gitconfig` that dsh-superagent did not write s
 
 ## Try it
 
-From an allowed GitHub account, open an Issue or post a comment containing `@<agent login> <request>`. Within a polling interval (one minute by default), Overview should show a Ticket. The agent acknowledges the request, works in its own Session and directory, and delivers in the original conversation. For Feishu, mention the bot in a configured chat.
+From an allowed GitHub account, open an Issue or post a comment containing `@<agent login> <request>`. Within a polling interval (one minute by default), that deployment's Overview should show exactly one Ticket. The agent acknowledges the request, works in its own Session and directory, and delivers in the original conversation. For Feishu, mention the bot in a configured chat. Repeat this check for every repository deployment.
 
 ## Upgrade
 
-1. Wait until no Executor is in the middle of a turn.
-2. Back up `<stateDir>/orchestrator.sqlite`.
-3. Run `git pull && pnpm install && pnpm build`.
-4. Run `scripts/dsh-superagent restart` and inspect its status.
+1. Wait until no Executor is in the middle of a turn in any managed deployment.
+2. Gracefully stop every managed deployment with `scripts/dsh-superagent --profile <profile> --url <url> stop`.
+3. Quit DeepSeek Harness Desktop.
+4. Back up every deployment's `<stateDir>/orchestrator.sqlite`; if present, back up its `-wal` and `-shm` sidecars in the same snapshot.
+5. Run `git pull && pnpm install && pnpm build` while those processes are stopped.
+6. Start and verify every deployment with `scripts/dsh-superagent --profile <profile> --url <url> start`.
+7. Reopen DeepSeek Harness Desktop so the controller loads the rebuilt bundle.
 
 A restart ends running Assignments and starts replacements with recovery notes. Team text and overridden prompt parts are retained; parts without overrides follow the new defaults. Review parts marked **Default updated** after upgrading.
 
