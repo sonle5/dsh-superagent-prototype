@@ -17,9 +17,10 @@ import type { Localized, SourceKind } from './kind.ts'
 import { z } from 'zod'
 
 export { commentTrigger, type GithubComment } from './github-trigger.ts'
-/** A notification of the agent account; `subject.url` is the API address of its Issue or PR. */
+/** A notification of the agent account; `subject.url` is its Issue or PR and `latest_comment_url` its newest comment. */
 const NotificationSchema = z.looseObject({
-  repository: z.looseObject({ full_name: z.string() }), subject: z.looseObject({ url: z.string().nullish() }),
+  repository: z.looseObject({ full_name: z.string() }),
+  subject: z.looseObject({ url: z.string().nullish(), latest_comment_url: z.string().nullish() }),
 })
 
 const GithubConfigSchema = GithubAccountsSchema.extend({ pollSeconds: z.number().int().min(60).max(3600).default(60),
@@ -152,7 +153,8 @@ interface Round {
 const newRound = (signal?: AbortSignal): Round => ({ started: new Date().toISOString(), signal, pulls: new Map(), read: new Set(),
   failures: [], dropped: [], abandoned: [], tally: { skipped: 0 } })
 const stopped = (ctx: SourceContext, round: Round): boolean => !!round.signal?.aborted || !ctx.config(SOURCE)
-export interface Retry { since: string; pr: boolean; failedAt?: string; attempts?: number }
+interface ExactComment { path: string; kind: 'conversation' | 'inline' | 'review' }
+export interface Retry { since: string; pr: boolean; comment?: ExactComment; failedAt?: string; attempts?: number }
 const RETRY_WINDOW_MS = 24 * 3600_000
 /** True when GitHub returns HTTP 410 (Gone); HTTP 404 is retried because it can indicate revoked access to a private repository. */
 const deleted = (error: unknown): boolean => error instanceof CliError && error.code === 410
@@ -318,9 +320,12 @@ async function pollNotifications(ctx: SourceContext, round: Round): Promise<{ co
   for (const notification of notifications.reverse()) {
     if (!sameName(notification.repository.full_name, repository)) continue
     const address = githubAddress(notification.subject.url ?? '', repository)
-    if (!address || address.discussion || items.has(address.number)) continue
+    if (!address || address.discussion) continue
     const { number, pr } = address
-    items.set(number, { since: [state.get(KV.github.cursor(number)) ?? since, since].sort().at(-1)!, pr })
+    const previous = items.get(number)
+    const comment = exactComment(notification.subject.latest_comment_url, repository)
+    items.set(number, { ...previous, since: previous?.since ?? [state.get(KV.github.cursor(number)) ?? since, since].sort().at(-1)!,
+      pr, ...comment ? { comment } : {} })
   }
   for (const [number, item] of items) {
     if (stopped(ctx, round)) return { count: notifications.length, interval }
@@ -354,7 +359,9 @@ async function readNotified(ctx: SourceContext, round: Round, number: number, it
       const { login } = ctx.deployment.github
       const opened = Date.parse(issue.created_at) >= Date.parse(since) && !sameName(issue.user.login, login)
       if (opened) await ctx.receive(issueTrigger(issue, login))
-      await intakeComments(ctx, { number, isPr: false, url: issue.html_url }, since, round)
+      const ref = { number, isPr: false, url: issue.html_url }
+      await intakeComments(ctx, ref, since, round)
+      await intakeExactComment(ctx, round, ref, item.comment)
       nameThread(ctx, number, issue.title)
     }
   }
@@ -366,7 +373,9 @@ async function readNotified(ctx: SourceContext, round: Round, number: number, it
       const opened = { number, title: pr.title ?? '', body: pr.body, user: pr.user, created_at: pr.created_at, html_url: pr.html_url }
       await ctx.receive(pullTrigger(opened, login))
     }
-    await intakeComments(ctx, { number, isPr: true, url: pr.html_url, prAuthor: pr.user.login }, since, round)
+    const ref = { number, isPr: true, url: pr.html_url, prAuthor: pr.user.login }
+    await intakeComments(ctx, ref, since, round)
+    await intakeExactComment(ctx, round, ref, item.comment)
     if (pr.title) nameThread(ctx, number, pr.title)
   }
   ctx.state.set(KV.github.cursor(number), cursorAt(round.started))
@@ -380,6 +389,39 @@ function pull(ctx: SourceContext, round: Round, number: number): Promise<Pull> {
     round.pulls.set(number, read)
   }
   return read
+}
+/**
+ * Extracts an exact comment endpoint from a notification without allowing another repository.
+ * GitHub uses repository-level endpoints for Issue and review comments, and some Enterprise versions use nested forms.
+ */
+function exactComment(url: string | null | undefined, repository: string): ExactComment | undefined {
+  if (!url) return
+  let parsed: URL
+  try { parsed = new URL(url) }
+  catch { return }
+  if (parsed.origin !== 'https://api.github.com') return
+  const [root, owner, name, ...rest] = parsed.pathname.split('/').filter(Boolean)
+  if (root !== 'repos' || !sameName(`${owner ?? ''}/${name ?? ''}`, repository)) return
+  const path = rest.join('/')
+  if (/^(?:issues\/comments|issues\/\d+\/comments)\/\d+$/.test(path)) return { path, kind: 'conversation' }
+  if (/^(?:pulls\/comments|pulls\/\d+\/comments)\/\d+$/.test(path)) return { path, kind: 'inline' }
+  if (/^pulls\/\d+\/reviews\/\d+$/.test(path)) return { path, kind: 'review' }
+}
+/** Reads the exact comment named by a notification, even when its timestamp is older than an already advanced cursor. */
+async function intakeExactComment(ctx: SourceContext, round: Round, ref: PullRef, exact?: ExactComment): Promise<void> {
+  if (!exact) return
+  const commands = ctx.commands.withSignal(round.signal)
+  let comment: GithubComment
+  try { comment = await commands.api(CommentSchema, exact.path) }
+  catch (error) {
+    // The notification remains after GitHub deletes its latest comment. Its other discussion was already read above.
+    if (error instanceof CliError && (error.code === 404 || error.code === 410)) return
+    throw error
+  }
+  const { login } = ctx.deployment.github
+  if (sameName(comment.user.login, login)) return
+  const trigger = commentTrigger(comment, ref, exact.kind, login)
+  if (trigger.text) await ctx.receive(trigger)
 }
 async function intakeComments(ctx: SourceContext, ref: PullRef, since: string, round: Round): Promise<void> {
   const commands = ctx.commands.withSignal(round.signal)

@@ -68,10 +68,11 @@ const agentsPull = (number: number, ref: string): Pull =>
 const openPull = (number: number) => ({ number, title: 'Fix the margin', state: 'open',
   html_url: `https://github.com/acme/widgets/pull/${number}`, user: { login: 'carol' },
   head: { sha: 'abc', ref: 'fix', repo: { full_name: 'acme/widgets' } } })
-const notification = (number: number, kind: 'issues' | 'pulls' = 'issues') => ({ id: `n${number}`, updated_at: '2026-09-09T00:00:00Z',
+const notification = (number: number, kind: 'issues' | 'pulls' = 'issues', subject: Record<string, unknown> = {}) => ({
+  id: `n${number}`, updated_at: '2026-09-09T00:00:00Z',
   reason: 'mention',
   repository: { full_name: 'acme/widgets' }, subject: { url: `https://api.github.com/repos/acme/widgets/${kind}/${number}`,
-    type: kind === 'pulls' ? 'PullRequest' : 'Issue', title: '' } })
+    type: kind === 'pulls' ? 'PullRequest' : 'Issue', title: '', ...subject } })
 const refused = (status: number, text: string) => commandError({ stderr: `gh: ${text} (HTTP ${status})`, code: 1 })
 /** Stubs `gh api` calls against `acme/widgets` and returns the requested paths in order. */
 function github(h: ReturnType<typeof host>, routes: Record<string, unknown>): string[] {
@@ -861,6 +862,77 @@ describe('github source', () => {
     // An Issue has only its conversation; the comments are read since the notification cursor.
     const since = encodeURIComponent('2026-09-08T00:00:00.000Z')
     expect(reads.filter(path => path.includes('/comments'))).toEqual([`issues/12/comments?per_page=100&since=${since}`])
+    h.store.close()
+  })
+  it('takes in the exact mentioned comment from a delayed notification after the thread cursor moved past it', async () => {
+    const h = host()
+    const url = 'https://github.com/acme/widgets/issues/12'
+    const comment: GithubComment = { id: 5, body: '@agent-bot can you take this?', user: { login: 'alice', type: 'User' },
+      html_url: `${url}#issuecomment-5`, created_at: '2026-09-09T00:00:00Z', updated_at: '2026-09-09T00:00:00Z' }
+    h.store.set('github-since', '2026-09-09T00:20:00.000Z')
+    h.store.set('github-cursor:12', '2026-09-09T00:20:00.000Z')
+    const delayed = notification(12, 'issues', {
+      latest_comment_url: 'https://api.github.com/repos/acme/widgets/issues/comments/5' })
+    github(h, { notifications: [delayed], 'issues/12': issue(12, { created_at: '2026-08-01T00:00:00Z' }),
+      'issues/comments/5': comment })
+    await pollRound(h)
+    const expected = commentTrigger(comment, { number: 12, isPr: false, url }, 'conversation', 'agent-bot')
+    expect(h.receive.mock.calls.map(([trigger]) => trigger)).toEqual([expected])
+    expect(h.store.read.threadTriggers('github:12', 10)).toEqual([expect.objectContaining({ id: expected.id, text: expected.text })])
+    // Replaying the same delayed notification reaches the same deterministic Trigger, not a second unit of work.
+    await pollRound(h)
+    expect(h.store.read.threadTriggers('github:12', 10)).toEqual([expect.objectContaining({ id: expected.id, text: expected.text })])
+    h.store.close()
+  })
+  it('reads the exact inline review comment named by a delayed notification', async () => {
+    const h = host()
+    const pr = openPull(9)
+    const comment: GithubComment = { id: 6, body: '@agent-bot please check this branch', user: { login: 'carol', type: 'User' },
+      html_url: 'https://github.com/acme/widgets/pull/9#discussion_r6', path: 'src/render.ts', line: 43,
+      diff_hunk: '@@ -40,3 +40,4 @@\n context\n+added', created_at: '2026-09-09T00:00:00Z', updated_at: '2026-09-09T00:00:00Z' }
+    h.store.set('github-since', '2026-09-09T00:20:00.000Z')
+    h.store.set('github-cursor:9', '2026-09-09T00:20:00.000Z')
+    github(h, { notifications: [notification(9, 'pulls', {
+      latest_comment_url: 'https://api.github.com/repos/acme/widgets/pulls/comments/6' })],
+    'pulls/9': pr, 'pulls/comments/6': comment })
+    await pollRound(h)
+    const expected = commentTrigger(comment, { number: 9, isPr: true, url: pr.html_url, prAuthor: 'carol' }, 'inline', 'agent-bot')
+    expect(h.receive.mock.calls.map(([trigger]) => trigger)).toEqual([expected])
+    expect(expected.text).toBe('src/render.ts:43\n@@ -40,3 +40,4 @@\n context\n+added\n\n@agent-bot please check this branch')
+    h.store.close()
+  })
+  it('does not wedge a delayed notification when its exact comment was deleted', async () => {
+    const h = host()
+    h.store.set('github-since', '2026-09-09T00:20:00.000Z')
+    h.store.set('github-cursor:12', '2026-09-09T00:20:00.000Z')
+    github(h, { notifications: [notification(12, 'issues', {
+      latest_comment_url: 'https://api.github.com/repos/acme/widgets/issues/comments/5' })],
+    'issues/12': issue(12, { created_at: '2026-08-01T00:00:00Z' }), 'issues/comments/5': refused(404, 'Not Found') })
+    await pollRound(h)
+    expect(h.receive).not.toHaveBeenCalled()
+    expect(h.store.get('github-retry')).toEqual({})
+    expect(h.store.get('github-cursor:12')).toBeDefined()
+    h.store.close()
+  })
+  it('keeps a delayed exact comment in the retry map when its read fails transiently', async () => {
+    const h = host()
+    const url = 'https://github.com/acme/widgets/issues/12'
+    const comment: GithubComment = { id: 5, body: '@agent-bot retry this', user: { login: 'alice', type: 'User' },
+      html_url: `${url}#issuecomment-5`, created_at: '2026-09-09T00:00:00Z', updated_at: '2026-09-09T00:00:00Z' }
+    h.store.set('github-since', '2026-09-09T00:20:00.000Z')
+    const delayed = notification(12, 'issues', {
+      latest_comment_url: 'https://api.github.com/repos/acme/widgets/issues/comments/5' })
+    const routes: Record<string, unknown> = { notifications: [delayed], 'issues/12': issue(12, { created_at: '2026-08-01T00:00:00Z' }),
+      'issues/comments/5': refused(502, 'Bad Gateway') }
+    github(h, routes)
+    await expect(pollRound(h)).rejects.toThrow('#12: Error: gh: Bad Gateway (HTTP 502)')
+    expect(h.store.get('github-retry')).toEqual({ 12: expect.objectContaining({
+      comment: { path: 'issues/comments/5', kind: 'conversation' } }) })
+    routes.notifications = []
+    routes['issues/comments/5'] = comment
+    await pollRound(h)
+    expect(h.receive.mock.calls.map(([trigger]) => trigger.text)).toEqual(['@agent-bot retry this'])
+    expect(h.store.get('github-retry')).toEqual({})
     h.store.close()
   })
   it('keeps one body Trigger for an Issue that a later poll reads again', async () => {
