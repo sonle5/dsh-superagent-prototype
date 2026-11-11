@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it } from 'vitest'
 import { Fleet, FleetControlError } from '../src/app/fleet.ts'
+import { nativeToken } from '../src/app/native-auth.ts'
 
 const servers: Server[] = []
 const directories: string[] = []
@@ -44,6 +45,8 @@ it('aggregates independent deployments and their Tickets, Triggers, health, work
   const state = workspace()
   const inference = await listen('onenexus-team/inference-support-loop')
   const sglang = await listen('onenexus-team/sglang')
+  nativeToken(join(state, 'superagent'))
+  nativeToken(join(state, 'superagent-sglang'))
   const logDir = join(state, '.artifacts')
   mkdirSync(logDir)
   writeFileSync(join(logDir, 'dsh-superagent-superagent-sglang-20261102-000000-1.log'),
@@ -72,6 +75,35 @@ it('aggregates independent deployments and their Tickets, Triggers, health, work
   expect(view.deployments[1]?.log?.tail).toContain('Authorization: Bearer [redacted]')
   expect(view.deployments[1]?.log?.tail).not.toContain('private-token')
   expect(view.deployments[1]?.log?.tail).not.toContain('private-bearer')
+})
+
+it('authenticates every deployment request with its native capability', async () => {
+  const state = workspace()
+  const stateDir = join(state, 'superagent-sglang')
+  const token = nativeToken(stateDir)!
+  const requests: string[] = []
+  const server = createServer((request, response) => {
+    requests.push(String(request.headers['x-dsh-superagent-native']))
+    if (request.headers['x-dsh-superagent-native'] !== token) {
+      response.writeHead(401).end(JSON.stringify({ error: 'unauthorized' }))
+      return
+    }
+    response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({
+      setup: { problem: null, feishuProblem: null, accounts: { repository: 'onenexus-team/sglang', agent: 'agent-bot' } },
+      load: { running: 0, queued: 0, maxWorkers: 1 }, paused: false,
+      health: { runtime: { state: 'ready', detail: '' } },
+    }))
+  })
+  servers.push(server)
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  writeFileSync(join(state, 'fleet.json'), JSON.stringify({
+    version: 1, controlScript: '/usr/bin/true', logDir: join(state, '.artifacts'),
+    deployments: [{ id: 'sglang', profile: 'superagent-sglang', repository: 'onenexus-team/sglang',
+      url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, stateDir, workspace: '/Users/alice/src/sglang-superagent' }],
+  }))
+
+  expect(await new Fleet(state).view()).toMatchObject({ deployments: [{ id: 'sglang', status: 'ready' }] })
+  expect(requests).toEqual([token, token, token])
 })
 
 it('distinguishes an intentionally stopped deployment from an unreachable one', async () => {
@@ -109,7 +141,7 @@ it('invokes only the configured fixed script for a registered profile', async ()
   const fleet = new Fleet(state)
   expect(await fleet.control('sglang', 'restart')).toMatchObject({ id: 'sglang', action: 'restart', code: 0 })
   expect(readFileSync(argumentsFile, 'utf8'))
-    .toBe('restart\n--profile\nsuperagent-sglang\n--url\nhttp://127.0.0.1:3083\n--stop-timeout\n60\n')
+    .toBe(`restart\n--profile\nsuperagent-sglang\n--url\nhttp://127.0.0.1:3083\n--state-dir\n${join(state, 'superagent-sglang')}\n--stop-timeout\n60\n`)
   await expect(fleet.control('missing', 'start')).rejects.toEqual(expect.objectContaining<Partial<FleetControlError>>({
     status: 404, message: 'Deployment not found: missing',
   }))
@@ -125,11 +157,19 @@ it('persists one validated deployment for native Session routing', async () => {
     { id: 'sglang', profile: 'superagent-sglang', repository: 'onenexus-team/sglang', url: 'http://127.0.0.1:3083',
       stateDir: join(state, 'superagent-sglang'), workspace: '/Users/alice/src/sglang-superagent' }],
   }))
+  const inferenceToken = nativeToken(join(state, 'superagent'))!
+  const sglangToken = nativeToken(join(state, 'superagent-sglang'))!
 
   const fleet = new Fleet(state)
   expect(fleet.nativeTarget()).toBeUndefined()
   expect(fleet.select('sglang')).toEqual({ selected: 'sglang' })
-  expect(fleet.nativeTarget()).toMatchObject({ repository: 'onenexus-team/sglang', profile: 'superagent-sglang' })
+  expect(fleet.nativeTarget()).toMatchObject({ repository: 'onenexus-team/sglang', profile: 'superagent-sglang', token: sglangToken })
+  expect(fleet.nativeTargets()).toEqual(expect.arrayContaining([
+    expect.objectContaining({ id: 'inference-support-loop', token: inferenceToken }),
+    expect.objectContaining({ id: 'sglang', token: sglangToken }),
+  ]))
+  rmSync(join(state, 'superagent-sglang', 'native-proxy-token'))
+  expect(() => fleet.nativeTargets()).toThrow(/native capability/)
   expect((await fleet.view()).selected).toBe('sglang')
   expect(() => new Fleet(state).select('missing')).toThrow('Deployment not found: missing')
 })

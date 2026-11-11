@@ -115,15 +115,15 @@ After the first start, edit machine limits in **Settings → Deployment** or the
 ## Start and stop
 
 ```sh
-scripts/dsh-superagent --profile <profile> --url <url> start
-scripts/dsh-superagent --profile <profile> --url <url> status
+scripts/dsh-superagent --profile <profile> --url <url> --state-dir <stateDir> start
+scripts/dsh-superagent --profile <profile> --url <url> --state-dir <stateDir> status
 ```
 
 `start` runs `dsh --profile <profile>` in tmux session `dsh-<profile>`. It waits up to one minute for the runtime to become ready or report a setup requirement. On a first run it prints the missing setup information. It refuses duplicate instances, including ones started outside this script. Pass both `--profile` and `--url` for every managed deployment; the profile name does not imply its port.
 
 `stop` and `restart` request graceful shutdown and wait up to five minutes for Executors from the script, or one minute when invoked by Fleet. They never force-kill the process or touch other tmux sessions.
 
-`status` prints process ids, health and setup problems. For a different profile or port, use `--profile` and `--url`, or set `DSH_SUPERAGENT_PROFILE` and `DSH_SUPERAGENT_URL`.
+`status` prints process ids, health and setup problems. For a different profile or port, use `--profile` and `--url`, or set `DSH_SUPERAGENT_PROFILE` and `DSH_SUPERAGENT_URL`. `--state-dir` defaults to `$DSH_HOME/state/<profile>` and must be passed for a custom state directory; Fleet supplies it automatically from its registry.
 
 `status`, `start` and `restart` exit with one of four codes:
 
@@ -232,9 +232,9 @@ Setup must succeed before polling or work starts. Overview lists missing require
 
 ### Management API
 
-The panel uses a local HTTP API that agents can also call. `SETUP.md` uses it to save settings, and the service script reads `GET state`.
+The panel uses a local HTTP API that agents and the service script can also call. `SETUP.md` uses it to save settings, and the service script reads `GET state`.
 
-Send requests to `http://127.0.0.1:<port>/orchestrator/api/` with `x-orchestrator-request: 1`. The host must be `127.0.0.1:<port>` or `localhost:<port>`. Missing headers or an `Origin` from another site receive 403.
+The panel's browser requests use the signed DSH web session. Machine callers send requests to `http://127.0.0.1:<port>/orchestrator/api/` with `x-orchestrator-request: 1` and `x-dsh-superagent-native` containing the contents of `<stateDir>/native-proxy-token`. The host must be `127.0.0.1:<port>` or `localhost:<port>`. Missing credentials, a missing marker or an `Origin` from another site receive 401 or 403. The deployment creates the token; callers must read it, not create a replacement.
 
 API saves have the panel's permissions. They can change execution environment and setup account fields, unlike saves made through the main Session's tools.
 
@@ -282,8 +282,9 @@ Changing a repository or CLI runs the corresponding setup check first. A failed 
 
 ```sh
 api=http://127.0.0.1:3082/orchestrator/api
-rev=$(curl -s -H 'x-orchestrator-request: 1' $api/settings | jq '.sources[] | select(.id == "github") | .revision')
-curl -s -X PUT -H 'x-orchestrator-request: 1' -H 'content-type: application/json' $api/settings/source:github \
+token=$(tr -d '\n' < "$DSH_HOME/state/superagent/native-proxy-token")
+rev=$(curl -s -H 'x-orchestrator-request: 1' -H "x-dsh-superagent-native: $token" $api/settings | jq '.sources[] | select(.id == "github") | .revision')
+curl -s -X PUT -H 'x-orchestrator-request: 1' -H "x-dsh-superagent-native: $token" -H 'content-type: application/json' $api/settings/source:github \
   -d "{\"value\": {\"enabled\": true, \"config\": {\"repository\": \"acme/widgets\", \"cli\": \"$HOME/.local/bin/gh-agent\"}}, \"revision\": $rev}"
 ```
 

@@ -28,6 +28,8 @@ import { sourcesStatus, type SetupState } from './views/sources.ts'
 import { decisionList, search, threadDetail, threadList } from './views/threads.ts'
 import { executorLoad, ticketDetail, ticketList } from './views/tickets.ts'
 import { Fleet, FleetControlError, redactSensitive, type FleetAction } from './fleet.ts'
+import { INTERNAL_HEADER } from './native-transport.ts'
+import { matchesNativeToken } from './native-auth.ts'
 import { LIMITS } from '../limits.ts'
 
 export interface HttpHost {
@@ -305,7 +307,8 @@ function registerManagement(ctx: Context, stateDir: string, runtime?: HttpHost):
     try {
       response = await fetch(targetUrl, {
         method,
-        headers: { accept: 'application/json', 'x-orchestrator-request': '1', ...payload ? { 'content-type': 'application/json' } : {} },
+        headers: { accept: 'application/json', 'x-orchestrator-request': '1', 'x-dsh-superagent-native': target.token,
+          ...payload ? { 'content-type': 'application/json' } : {} },
         ...payload ? { body: payload } : {},
         redirect: 'error',
         signal: AbortSignal.timeout(15_000),
@@ -322,6 +325,14 @@ function registerManagement(ctx: Context, stateDir: string, runtime?: HttpHost):
       const url = new URL(req.url ?? '/', 'http://localhost')
       if (!url.pathname.startsWith('/orchestrator/api/')) { res.writeHead(404); res.end(); return }
       if (!sameOrigin(req, ctx.webServer.port)) { json(res, 403, { error: 'Same-origin management request required' }); return }
+      if (!matchesNativeToken(stateDir, req.headers[INTERNAL_HEADER])) {
+        const rejection = ctx.connection.requestRejection(req)
+        if (rejection !== undefined) {
+          json(res, rejection, { error: rejection === 401
+            ? 'Signed-in management request required' : 'Trusted management request required' })
+          return
+        }
+      }
       try {
         await runtime?.ready
         const deployment = deploymentPath.exec(url.pathname)

@@ -1,6 +1,6 @@
 # 009 Cloud fleet
 
-> **Status: design.** Nothing in this document is implemented yet. It describes the target of the cloud fleet work and is updated as parts land.
+> **Status: in progress.** The gateway and self-service onboarding remain design. The deployment-management credential boundary described under Trust boundaries is implemented; this document is updated as the remaining parts land.
 
 This document describes a fleet that runs on one always-on Linux server shared by several people, with DeepSeek Harness Desktop as an optional client. It builds on [006 Deployment](006-deployment.md) and [007 Architecture](007-architecture.md).
 
@@ -33,7 +33,7 @@ Desktop stores no Superagent state for server deployments. It loads a snapshot a
 ## Trust boundaries
 
 - **One Linux user per person.** It owns that person's deployments, agent GitHub login, model credentials and worktrees. Permissions and isolation in 006 Deployment still apply inside one user: workers run with `danger-full-access` as that user.
-- **Loopback is shared by every Linux user on the server.** The management API currently accepts any local request that carries the `x-orchestrator-request` header, so one person's worker could call another person's deployment. On a shared server each deployment must require a credential on its management API, as native Session routing already does.
+- **Loopback is shared by every Linux user on the server.** Each deployment's management API admits the signed DSH panel session or its own native capability. The deployment creates `native-proxy-token`; the controller and service script only read it, and native Session routing uses the same credential. This closes the path where one local worker could call another person's deployment by sending only the request marker.
 - **Deployment tokens stay on the server.** Desktop holds only its gateway session.
 - **The gateway is unprivileged.** Creating Linux users and services belongs to a separate privileged helper that offers a fixed set of operations.
 

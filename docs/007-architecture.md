@@ -342,8 +342,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/tools/tool.ts` | The `Tool` type, `readTool`, the `orchestrator_read` of both roles, and `AcknowledgementSchema` |
 | `src/app/tools/main.ts` | The main Session's tools |
 | `src/app/tools/executor.ts` | An Executor Session's tools |
-| `src/app/http.ts` | The `/orchestrator/api` routes: the same-origin check, request limits, one status per kind of failure and validated forwarding to registered deployment APIs |
-| `src/app/fleet.ts` | The local fleet registry, aggregate reads from independent loopback deployments, stopped-versus-unreachable status, recent log tails, and lifecycle actions restricted to registered DSH profiles |
+| `src/app/http.ts` | The `/orchestrator/api` routes: signed-panel or native-capability admission, the same-origin check, request limits, one status per kind of failure and validated forwarding to registered deployment APIs |
+| `src/app/fleet.ts` | The local fleet registry, aggregate reads from independent loopback deployments, native-capability reads, stopped-versus-unreachable status, recent log tails, and lifecycle actions restricted to registered DSH profiles |
 | `src/app/native-auth.ts` | The private per-deployment capability shared by the controller and repository halves of native Session routing |
 | `src/app/native-aggregate.ts` | Deployment-scoped Session, Workspace and Remote-event identities; request-owner selection; inbound and outbound identity remapping; repository-prefixed titles; and bounded Session-list and search merges |
 | `src/app/native-transport.ts` | The controller and repository halves of deployment-aware native DSH transport: one aggregate Session/Workspace/control/event view, owner-routed unary and streaming calls, per-peer timeouts and partial availability, cancellation, per-stream event correlation and operator-peer compatibility; HTTP retains a durable no-interaction peer while every mux mints its own answer peer so closing a stream cannot invalidate API requests |
@@ -432,8 +432,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/runtime.spec.ts` | The whole application on a simulated DeepSeek Harness host, through tools and HTTP |
 | `tests/tools.spec.ts` | The Sessions' tools: what `orchestrator_read` reads for each role, and the shapes and checks of the other main Session tools |
 | `tests/runtime-concurrency.spec.ts` | Work that overlaps: Triggers during a pass, Tickets that change during deliveries and launches |
-| `tests/http.spec.ts` | The same-origin and loopback checks, the status of each kind of failure, the body limit, path parameters, queries and the validated deployment-management proxy |
-| `tests/fleet.spec.ts` | Fleet registry validation, aggregation from independent deployments, stopped-versus-unreachable status, log tails, managed-target lookup and fixed-profile lifecycle invocation |
+| `tests/http.spec.ts` | Management admission, same-origin and loopback checks, the status of each kind of failure, the body limit, path parameters, queries and the validated deployment-management proxy |
+| `tests/fleet.spec.ts` | Fleet registry validation, aggregation from independent deployments, native-capability forwarding, stopped-versus-unreachable status, log tails, managed-target lookup and fixed-profile lifecycle invocation |
 | `tests/native-aggregate.spec.ts` | Aggregate identity round trips and validation, request-tree remapping, owner detection, title projection prefixing and bounded Session-search merging |
 | `tests/native-proxy.spec.ts` | End-to-end aggregate HTTP and WebSocket routing across deployments: Session/search and Workspace/control/event aggregation, owner routing, partial availability and timeouts, title normalization, interactive uplinks and cancellation, per-stream event correlation, capability and origin rejection, operator-peer authentication and teardown |
 | `tests/native-transport.spec.ts` | Desktop Remote-mux URL routing and constructor restoration |
@@ -446,7 +446,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/cards.spec.ts` | The rules the built-in text must state, file by file |
 | `tests/model-surface.spec.ts` | Everything models read: tools, prompts, skills and inputs, checked against the tool schemas, the execution environment and the glossary, within a size budget per role |
 | `tests/deployment.spec.ts`, `tests/environment.spec.ts`, `tests/index.spec.ts` | The plugin configuration and setup, the agent's process environment, the plugin entry |
-| `tests/service-script.spec.ts` | `scripts/dsh-superagent` against fake `ps`, `tmux` and `dsh` |
+| `tests/service-script.spec.ts` | `scripts/dsh-superagent` against fake `ps`, `tmux`, `dsh` and management API processes |
 | `tests/control.spec.ts` | The control-only plugin entry and its independent controller state |
 | `tests/client.spec.tsx`, `tests/navigation.spec.ts`, `tests/controls.spec.tsx` | The client plugin's registration and polling, Session navigation and route memory, the local controls, and the panel's imports, which have no cycle |
 | `tests/panel-overview.spec.tsx`, `panel-source.spec.tsx`, `panel-trigger.spec.tsx`, `panel-eval.spec.tsx`, `panel-execution.spec.tsx` | Each page of the panel, against a fake management API answered by route |

@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { gzipSync } from 'node:zlib'
@@ -62,6 +62,14 @@ function emptyDesktopStream(request: StreamRequest, send: (value: unknown) => vo
   }
 }
 
+/** Provision the native capabilities that each fixture deployment would create during its own startup. */
+function provisionFleet(state: string): void {
+  try {
+    const registry = JSON.parse(readFileSync(join(state, 'fleet.json'), 'utf8')) as { deployments?: { stateDir: string }[] }
+    for (const deployment of registry.deployments ?? []) nativeToken(deployment.stateDir)
+  } catch { /* The controller can also start with no registry. */ }
+}
+
 type LocalDesktop = {
   onHttp?: (envelope: RpcEnvelope) => PeerReply | Promise<PeerReply>
   onStream?: (request: StreamRequest, send: (value: unknown) => void) => void | Promise<void>
@@ -69,6 +77,7 @@ type LocalDesktop = {
 
 /** A controller profile whose own Desktop API answers through `local`, as the Desktop Host does behind the controller. */
 async function controllerHarness(state: string, local: LocalDesktop = {}): Promise<string> {
+  provisionFleet(state)
   let connectionRequest: ((request: IncomingMessage, response: ServerResponse, next: () => Promise<void>) => Promise<void>) | undefined
   let controllerUpgrade: UpgradeHandler | undefined
   let localNative: Handler | undefined
@@ -521,6 +530,7 @@ it('aggregates native Sessions across every registered deployment', async () => 
       workspace: `/Users/alice/src/${item.id}`,
     })),
   }))
+  provisionFleet(state)
 
   let connectionRequest: ((request: IncomingMessage, response: ServerResponse, next: () => Promise<void>) => Promise<void>) | undefined
   const controllerCtx = {

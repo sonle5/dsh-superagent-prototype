@@ -163,9 +163,9 @@ function api(base: string, path: string): string {
   return `${base.replace(/\/$/, '')}/orchestrator/api/${path}`
 }
 
-async function json<T extends z.ZodType>(url: string, schema: T): Promise<z.infer<T>> {
+async function json<T extends z.ZodType>(url: string, schema: T, token: string): Promise<z.infer<T>> {
   const response = await fetch(url, {
-    headers: { 'x-orchestrator-request': '1', accept: 'application/json' },
+    headers: { 'x-orchestrator-request': '1', 'x-dsh-superagent-native': token, accept: 'application/json' },
     signal: AbortSignal.timeout(2_500),
   })
   if (!response.ok) throw new Error(`${response.status} from ${new URL(url).pathname}`)
@@ -212,10 +212,14 @@ function stopped(logDir: string | undefined, profile: string): boolean {
 
 async function snapshot(deployment: DeploymentConfig, logDir: string | undefined, canControl: boolean): Promise<FleetDeploymentView> {
   try {
-    const state = await json(api(deployment.url, 'state'), State)
+    const token = nativeToken(deployment.stateDir, false)
+    if (token === undefined) throw new Error('Deployment native capability is missing')
+    const state = await json(api(deployment.url, 'state'), State, token)
     const [tickets, threads] = await Promise.all([
-      json(api(deployment.url, 'tickets?state=open&limit=1000'), Tickets).catch(() => emptyTickets.parse({})),
-      json(api(deployment.url, 'threads?filter=recent&limit=20'), Threads).catch(() => emptyThreads.parse({})),
+      json(api(deployment.url, 'tickets?state=open&limit=1000'), Tickets, token)
+        .catch(() => emptyTickets.parse({})),
+      json(api(deployment.url, 'threads?filter=recent&limit=20'), Threads, token)
+        .catch(() => emptyThreads.parse({})),
     ])
     const status = statusOf(state)
     const stage = (value: string) => tickets.items.filter(ticket => ticket.stage.stage === value).length
@@ -301,7 +305,7 @@ export class Fleet {
     if (this.busy.has(id)) throw new FleetControlError(409, `Another lifecycle action is already running for ${id}`)
     this.busy.add(id)
     try {
-      const args = [action, '--profile', deployment.profile, '--url', deployment.url]
+      const args = [action, '--profile', deployment.profile, '--url', deployment.url, '--state-dir', deployment.stateDir]
       if (action !== 'start') args.push('--stop-timeout', '60')
       const result = await run(script, args)
       if (![0, 2, 3].includes(result.code)) throw new FleetControlError(400, result.output || `${action} failed`)
@@ -310,11 +314,13 @@ export class Fleet {
   }
 
   /** Resolve a deployment only from the validated registry. */
-  managementTarget(id: string): Omit<FleetNativeTarget, 'token'> {
+  managementTarget(id: string): FleetNativeTarget {
     const loaded = loadRegistry(this.registryPath)
     if (loaded.error) throw new FleetControlError(400, loaded.error)
     const deployment = loaded.value?.deployments.find(item => item.id === id)
     if (!deployment) throw new FleetControlError(404, `Deployment not found: ${id}`)
+    const token = nativeToken(deployment.stateDir, false)
+    if (token === undefined) throw new FleetControlError(400, `Deployment native capability is missing for ${id}`)
     return {
       id: deployment.id,
       url: deployment.url,
@@ -322,6 +328,7 @@ export class Fleet {
       profile: deployment.profile,
       stateDir: deployment.stateDir,
       workspace: deployment.workspace,
+      token,
     }
   }
 
@@ -338,23 +345,14 @@ export class Fleet {
   nativeTarget(): FleetNativeTarget | undefined {
     const id = this.selectedId()
     if (id === undefined) return undefined
-    const target = this.managementTarget(id)
-    return { ...target, token: nativeToken(target.stateDir)! }
+    return this.managementTarget(id)
   }
 
   /** Resolve every validated deployment as an independently authenticated native peer. */
   nativeTargets(): FleetNativeTarget[] {
     const loaded = loadRegistry(this.registryPath)
     if (loaded.error) throw new FleetControlError(400, loaded.error)
-    return (loaded.value?.deployments ?? []).map(deployment => ({
-      id: deployment.id,
-      url: deployment.url,
-      repository: deployment.repository,
-      profile: deployment.profile,
-      stateDir: deployment.stateDir,
-      workspace: deployment.workspace,
-      token: nativeToken(deployment.stateDir)!,
-    }))
+    return (loaded.value?.deployments ?? []).map(deployment => this.managementTarget(deployment.id))
   }
 
   private selectedId(): string | undefined {

@@ -11,15 +11,23 @@ import { createServer, type Server } from 'node:http'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { AddressInfo } from 'node:net'
+import { nativeToken } from '../src/app/native-auth.ts'
 
 type Handler = (req: unknown, res: unknown) => Promise<void>
 type Headers = Record<string, string | undefined>
 const cleanup: (() => void)[] = []
 afterEach(() => { for (const dispose of cleanup.splice(0).reverse()) dispose() })
 /** Mount management HTTP routes on a fake web server and return a request helper that includes default panel headers. */
-function serve(runtime: Partial<Record<keyof HttpHost, unknown>>, host = '127.0.0.1') {
+function serve(
+  runtime: Partial<Record<keyof HttpHost, unknown>>,
+  host = '127.0.0.1',
+  requestRejection: () => number | undefined = () => undefined,
+) {
   let handler: Handler = async () => {}
-  const ctx = { webServer: { host, port: 3082, register: (route: { handler: Handler }) => { handler = route.handler; return () => {} } } }
+  const ctx = {
+    webServer: { host, port: 3082, register: (route: { handler: Handler }) => { handler = route.handler; return () => {} } },
+    connection: { requestRejection },
+  }
   const machine = runtime.machine as Partial<HttpHost['machine']> | undefined
   registerHttp(ctx as never, { ready: Promise.resolve(), ...runtime, machine: { stateDir: tmpdir(), ...machine } } as unknown as HttpHost)
   return async (method: string, path: string, body?: unknown, headers: Headers = {}) => {
@@ -32,9 +40,12 @@ function serve(runtime: Partial<Record<keyof HttpHost, unknown>>, host = '127.0.
     return { status, body: JSON.parse(text) as Record<string, unknown> }
   }
 }
-function serveControl(stateDir: string, host = '127.0.0.1') {
+function serveControl(stateDir: string, host = '127.0.0.1', requestRejection: () => number | undefined = () => undefined) {
   let handler: Handler = async () => {}
-  const ctx = { webServer: { host, port: 3082, register: (route: { handler: Handler }) => { handler = route.handler; return () => {} } } }
+  const ctx = {
+    webServer: { host, port: 3082, register: (route: { handler: Handler }) => { handler = route.handler; return () => {} } },
+    connection: { requestRejection },
+  }
   registerControlHttp(ctx as never, stateDir)
   return async (method: string, path: string, body?: unknown, headers: Headers = {}) => {
     let status = 0, text = ''
@@ -102,6 +113,21 @@ it('answers only a same-origin request from the panel on the loopback address', 
   expect(() => serve({}, '0.0.0.0')).toThrow('Orchestrator management requires a loopback Web server')
 })
 
+it('admits the panel session or the deployment native capability', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'dsh-management-auth-'))
+  cleanup.push(() => { rmSync(state, { recursive: true, force: true }) })
+  const token = nativeToken(state)!
+  const call = serve({
+    machine: { stateDir: state },
+    sessions: { delivery: async () => 'injected' },
+    engine: { unsubscribe: () => true },
+  }, '127.0.0.1', () => 401)
+  expect(await call('POST', 'threads/github%3A1/unsubscribe')).toEqual({ status: 401,
+    body: { error: 'Signed-in management request required' } })
+  expect(await call('POST', 'threads/github%3A1/unsubscribe', undefined, { 'x-dsh-superagent-native': token }))
+    .toMatchObject({ status: 200 })
+})
+
 it('answers a prompt save that lost a race with 409, and a settings body over 128 KiB with 400', async () => {
   const saves: unknown[] = []
   const call = serve({
@@ -120,13 +146,14 @@ it('answers a prompt save that lost a race with 409, and a settings body over 12
 })
 
 it('forwards management routes only to deployments registered in the local fleet', async () => {
-  const seen: { method?: string; path?: string; orchestrator?: string; body: string }[] = []
+  const seen: { method?: string; path?: string; orchestrator?: string; native?: string; body: string }[] = []
   const apiKeyField = ['api', 'key'].join('_')
   const target: Server = createServer(async (request, response) => {
     const chunks: Buffer[] = []
     for await (const chunk of request) chunks.push(Buffer.from(chunk))
     const path = request.url?.split('?')[0]
     seen.push({ method: request.method, path, orchestrator: request.headers['x-orchestrator-request'] as string | undefined,
+      native: request.headers['x-dsh-superagent-native'] as string | undefined,
       body: Buffer.concat(chunks).toString('utf8') })
     if (path === '/orchestrator/api/settings/executor' && request.method === 'PUT') {
       response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ revision: 2, restarting: false }))
@@ -143,6 +170,9 @@ it('forwards management routes only to deployments registered in the local fleet
   cleanup.push(() => { target.close() })
   const state = mkdtempSync(join(tmpdir(), 'dsh-fleet-proxy-'))
   cleanup.push(() => { rmSync(state, { recursive: true, force: true }) })
+  const targetState = mkdtempSync(join(tmpdir(), 'dsh-fleet-proxy-target-'))
+  cleanup.push(() => { rmSync(targetState, { recursive: true, force: true }) })
+  const targetToken = nativeToken(targetState)!
   writeFileSync(join(state, 'fleet.json'), JSON.stringify({
     version: 1,
     controlScript: '/usr/bin/true',
@@ -152,7 +182,7 @@ it('forwards management routes only to deployments registered in the local fleet
       profile: 'superagent-sglang',
       repository: 'onenexus-team/sglang',
       url: `http://127.0.0.1:${(target.address() as AddressInfo).port}`,
-      stateDir: join(state, 'superagent-sglang'),
+      stateDir: targetState,
       workspace: join(state, 'workspace'),
     }],
   }))
@@ -164,8 +194,9 @@ it('forwards management routes only to deployments registered in the local fleet
   expect(await call('PUT', 'deployment/sglang/settings/executor', { value: {}, revision: 1 })).toEqual({ status: 200,
     body: { revision: 2, restarting: false } })
   expect(seen).toEqual([
-    { method: 'GET', path: '/orchestrator/api/state', orchestrator: '1', body: '' },
-    { method: 'PUT', path: '/orchestrator/api/settings/executor', orchestrator: '1', body: '{"value":{},"revision":1}' },
+    { method: 'GET', path: '/orchestrator/api/state', orchestrator: '1', native: targetToken, body: '' },
+    { method: 'PUT', path: '/orchestrator/api/settings/executor', orchestrator: '1', native: targetToken,
+      body: '{"value":{},"revision":1}' },
   ])
 
   expect(await call('GET', 'deployment/missing/state')).toEqual({ status: 404,

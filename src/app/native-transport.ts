@@ -26,8 +26,8 @@ import { matchesNativeToken, nativeToken } from './native-auth.ts'
 
 const NATIVE_API = '/orchestrator/native/api'
 const NATIVE_MUX = '/orchestrator/native/remote.mux'
-const INTERNAL_REQUEST_HEADER = 'x-orchestrator-request'
-const INTERNAL_HEADER = 'x-dsh-superagent-native'
+export const INTERNAL_REQUEST_HEADER = 'x-orchestrator-request'
+export const INTERNAL_HEADER = 'x-dsh-superagent-native'
 /** Marks the controller's request to its own API; its value lives only in this process. */
 const LOCAL_HEADER = 'x-dsh-superagent-local'
 const MAX_RPC_BODY_BYTES = 300 * 1024 * 1024
@@ -1471,6 +1471,8 @@ function controlHttp(ctx: Context, stateDir: string, state: NativeControllerStat
  */
 export function registerNativeTransport(ctx: Context, stateDir: string, role: NativeRole): () => void {
   if (!isLoopbackHost(ctx.webServer.host)) throw new Error('Native Session routing requires a loopback Web server')
+  // The process that owns the state directory creates the capability; the controller and service script only read it.
+  nativeToken(stateDir)
   const server = new WebSocketServer({ noServer: true, perMessageDeflate: false })
   const disposers: (() => void)[] = []
   const eventCookies: EventCookies = new Map()

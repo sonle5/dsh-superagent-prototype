@@ -135,6 +135,29 @@ it('starts a profile with private Session and workspace storage', async () => {
   const launchedOverlay = join(realpathSync(root), '.artifacts', 'control', 'profiles', 'superagent-sglang', 'dsh-home.yml')
   expect(tmux.find(word => word.startsWith('umask 077; exec '))).toContain(`--patch '${launchedOverlay}'`)
 }, 20_000)
+
+it('authenticates health checks with the deployment native capability', async () => {
+  const stateDir = join(root, 'state', 'superagent-sglang')
+  const token = 'A'.repeat(43)
+  mkdirSync(stateDir, { recursive: true })
+  writeFileSync(join(stateDir, 'native-proxy-token'), `${token}\n`, { mode: 0o600 })
+  const pid = sleeper()
+  processes(service(pid, 'superagent-sglang'))
+  server = createServer((request, response) => {
+    if (request.url !== '/orchestrator/api/state'
+      || request.headers['x-orchestrator-request'] !== '1'
+      || request.headers['x-dsh-superagent-native'] !== token) {
+      response.writeHead(401).end()
+      return
+    }
+    response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(READY))
+  })
+  await new Promise<void>(resolve => server!.listen(0, '127.0.0.1', resolve))
+  const url = `http://127.0.0.1:${(server!.address() as AddressInfo).port}`
+
+  expect(await run('status', '--profile', 'superagent-sglang', '--url', url, '--state-dir', stateDir))
+    .toMatchObject({ code: 0 })
+}, 20_000)
 it('waits only for the process it stopped', async () => {
   const pid = sleeper()
   // Another instance shows up once the stopped one ended.
