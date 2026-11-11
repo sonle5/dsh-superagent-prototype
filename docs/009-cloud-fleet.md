@@ -1,6 +1,6 @@
 # 009 Cloud fleet
 
-> **Status: in progress.** The gateway and self-service onboarding remain design. The deployment-management credential boundary described under Trust boundaries is implemented; this document is updated as the remaining parts land.
+> **Status: in progress.** GitHub device sign-in, organization admission, the server-local registry, and deployment management forwarding are implemented. Native Session forwarding through the gateway, self-service onboarding, server installation files, and the Fleet-controller integration remain design and are updated as they land.
 
 This document describes a fleet that runs on one always-on Linux server shared by several people, with DeepSeek Harness Desktop as an optional client. It builds on [006 Deployment](006-deployment.md) and [007 Architecture](007-architecture.md).
 

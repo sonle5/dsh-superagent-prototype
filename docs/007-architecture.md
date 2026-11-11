@@ -290,7 +290,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 
 | Path | Responsibility |
 | --- | --- |
-| `src/index.ts` | The main plugin entry: in `repository` mode, reads the machine settings, starts the Runtime, and gives it the restart that a save of a Source's account uses; in `control` mode, mounts only Fleet lifecycle, the fixed deployment-management proxy and native Session routing |
+| `src/index.ts` | The main plugin entry: in `repository` mode, reads the machine settings, starts the Runtime, and gives it the restart that a save of a Source's account uses; in `control` mode, mounts only Fleet lifecycle, the fixed deployment-management proxy and native Session routing; in `gateway` mode, mounts only the public gateway API |
 | `src/deployment.ts` | The plugin `Config` and `Machine`; `resolveDeployment` and `resolveFeishuBot` read the repository and the accounts from the Source settings, each CLI run as Executor shells run it; `SETUP_FIELDS` lists the Source fields setup reads. The code names no person, account or organization |
 | `src/setup.ts` | Setup problems: `SetupError`, with a code, the place that fixes it and the English text the log, the main Session and the panel share |
 | `src/policy.ts` | The Policy: the settings schemas by block, the Policy version, the gate and Mandate revalidation |
@@ -343,6 +343,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/tools/main.ts` | The main Session's tools |
 | `src/app/tools/executor.ts` | An Executor Session's tools |
 | `src/app/http.ts` | The `/orchestrator/api` routes: signed-panel or native-capability admission, the same-origin check, request limits, one status per kind of failure and validated forwarding to registered deployment APIs |
+| `src/app/gateway.ts` | The `/gateway/api` routes: GitHub device sign-in, organization membership admission, a signed gateway session, the server-local deployment registry, and deployment-id forwarding to the credential-protected management API |
 | `src/app/fleet.ts` | The local fleet registry, aggregate reads from independent loopback deployments, native-capability reads, stopped-versus-unreachable status, recent log tails, and lifecycle actions restricted to registered DSH profiles |
 | `src/app/native-auth.ts` | The private per-deployment capability shared by the controller and repository halves of native Session routing |
 | `src/app/native-aggregate.ts` | Deployment-scoped Session, Workspace and Remote-event identities; request-owner selection; inbound and outbound identity remapping; repository-prefixed titles; and bounded Session-list and search merges |
@@ -430,6 +431,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/delivery.spec.ts` | `AgentDelivery` |
 | `tests/retry-health.spec.ts`, `tests/role-models.spec.ts` | Model budget retries, and the models of the two roles |
 | `tests/runtime.spec.ts` | The whole application on a simulated DeepSeek Harness host, through tools and HTTP |
+| `tests/gateway.spec.ts` | The public gateway: GitHub device and organization sign-in, session-cookie issuance, registry reads, same-origin admission and deployment management forwarding |
 | `tests/tools.spec.ts` | The Sessions' tools: what `orchestrator_read` reads for each role, and the shapes and checks of the other main Session tools |
 | `tests/runtime-concurrency.spec.ts` | Work that overlaps: Triggers during a pass, Tickets that change during deliveries and launches |
 | `tests/http.spec.ts` | Management admission, same-origin and loopback checks, the status of each kind of failure, the body limit, path parameters, queries and the validated deployment-management proxy |
