@@ -1,6 +1,6 @@
 # 009 Cloud fleet
 
-> **Status: in progress.** GitHub device sign-in, organization admission, the server-local registry, authenticated deployment management and native Session forwarding, and the Fleet-controller integration are implemented. Self-service onboarding and server installation files remain design and are updated as they land.
+> **Status: implemented, pending Linux acceptance.** GitHub device sign-in, organization admission, the per-person server registry, self-service onboarding, credential setup, authenticated deployment management and native Session forwarding, server installation files, and the Fleet-controller integration are implemented. No production Droplet has run the full acceptance test yet.
 
 This document describes a fleet that runs on one always-on Linux server shared by several people, with DeepSeek Harness Desktop as an optional client. It builds on [006 Deployment](006-deployment.md) and [007 Architecture](007-architecture.md).
 
@@ -19,6 +19,7 @@ Desktop                               Gateway (always on)
  ├─ local Sessions                     ├─ sign-in
  └─ Fleet controller ── HTTPS ──────▶  ├─ each person's deployment list
     signs in; no fleet file            └─ forwards by deployment id ─▶ deployments ─▶ GitHub
+                                      privileged helper: Linux users, units, token copies
                                       one Linux user per person: deployments, credentials, worktrees
                                       systemd: start at boot, restart on failure, health check
 ```
@@ -26,6 +27,7 @@ Desktop                               Gateway (always on)
 - **Deployment.** Unchanged in shape: one `mode: repository` profile per repository, bound to loopback.
 - **Gateway.** New. It is the only listener reachable from outside the server. It signs people in, keeps each person's deployment list, and forwards management and native Session requests to the deployment they name.
 - **Fleet controller.** The existing `mode: control` plugin in Desktop. It signs in to one gateway address and reads its fleet from the gateway. A local `fleet.json` keeps working for deployments on the operator's own computer.
+- **Onboarding helper.** New. The unprivileged gateway calls one fixed root helper through `sudo`. It creates one Linux user for each person and one DSH profile, environment file, systemd unit, state directory, worktree root and token directory for each deployment.
 - **systemd.** Starts the gateway and every deployment at boot and restarts them on failure. A timer runs the `status` check of `scripts/dsh-superagent` and restarts a deployment that exits 1.
 
 Desktop stores no Superagent state for server deployments. It loads a snapshot and then follows events while it is open, as it does for local deployments.
@@ -37,6 +39,8 @@ Desktop stores no Superagent state for server deployments. It loads a snapshot a
 - **Deployment tokens stay on the server.** Desktop holds only its gateway session.
 - **The controller's gateway state is local to the controller profile.** Before sign-in, `<control stateDir>/gateway.json` contains only the gateway URL. After sign-in it also contains the gateway's opaque session token; it never contains the GitHub access token.
 - **The gateway is unprivileged.** Creating Linux users and services belongs to a separate privileged helper that offers a fixed set of operations.
+- **Legacy shared deployments are owner-scoped.** An entry in `deployments` is visible only to the `ownerLogin` named on it. New self-service deployments live under `people` and are visible only to that person.
+- **Self-service GitHub credentials use one fixed operation.** Desktop sends the agent GitHub PAT to the gateway once. The gateway passes it to the helper, which writes a `0700` wrapper owned by that person’s Linux user and updates the deployment’s GitHub Source. The token is not stored in the registry, returned by the API or committed.
 
 ## Sign-in
 
@@ -59,10 +63,19 @@ The Fleet controller's `<stateDir>/gateway.json` is different from the gateway's
 
 ## People and deployments
 
-- The first sign-in creates the person's Linux user.
+- `Create my cloud account` creates the person's Linux user and registry entry.
 - Adding a deployment creates its profile and service and starts it.
 - A repository has one deployment. Two deployments for one repository would both answer on GitHub, so people who share a repository share its deployment.
-- Each person brings an agent GitHub account and model credentials. A shared agent account exposes the union of its access to every worker that can use it.
+
+### Credentials
+
+Each person brings an agent GitHub account and model credentials.
+
+1. Create a fine-grained agent GitHub PAT with only the repository access that deployment needs.
+2. In Desktop, sign in to Cloud Fleet, create the cloud account and deployment, then paste the PAT into **Configure agent credentials**. The helper writes a per-deployment `gh` wrapper and saves that wrapper in the GitHub Source; it never stores the PAT in the gateway registry.
+3. Configure model providers through the connected deployment's normal DSH provider settings. Those credentials belong to that person's Linux user and profile, not to the gateway.
+
+Token-based agent credentials are still reachable by that person's worker because the worker runs as that Linux user. That is the intended agent-account boundary, not an isolation boundary against prompt injection; use a dedicated agent GitHub account with least-privilege access.
 
 ## Address
 
@@ -83,5 +96,4 @@ The fleet has one address. A server can start on its IP address with a short-liv
 
 ## Open decisions
 
-- How the gateway reads deployment tokens that belong to other Linux users.
-- Whether the agent GitHub login and model credentials can be entered from Desktop, without a shell.
+None. The Linux Droplet, TLS certificate issuance/renewal and Mac-off acceptance test remain operational validation work rather than design decisions.

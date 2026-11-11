@@ -1,0 +1,303 @@
+#!/usr/bin/env python3
+"""Create one self-service Superagent person or deployment from fixed JSON input.
+
+Run as root through a sudoers rule that names this file. The gateway supplies JSON on stdin;
+this helper never accepts an arbitrary command, credential, profile name, or path.
+"""
+
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import shutil
+import hashlib
+import subprocess
+import sys
+import time
+
+LOGIN = re.compile(r"^[A-Za-z0-9-]+$")
+ID = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+NAME = re.compile(r"^[a-z_][a-z0-9-]*$")
+GITHUB_TOKEN = re.compile(r"^[A-Za-z0-9_-]{20,255}$")
+PORT_RANGE = range(3082, 4000)
+
+
+class OnboardingError(Exception):
+    pass
+
+
+def require(value, pattern, name):
+    if not isinstance(value, str) or pattern.fullmatch(value) is None:
+        raise OnboardingError(f"invalid {name}")
+    return value
+
+
+def absolute(value, name):
+    if not isinstance(value, str) or not Path(value).is_absolute():
+        raise OnboardingError(f"{name} must be an absolute path")
+    return value
+
+
+def config(request):
+    required = ["gatewayUser", "gatewayGroup", "checkout", "baseDir"]
+    missing = [name for name in required if name not in request]
+    if missing:
+        raise OnboardingError(f"missing configuration: {', '.join(missing)}")
+    require(request["gatewayUser"], NAME, "gatewayUser")
+    require(request["gatewayGroup"], NAME, "gatewayGroup")
+    checkout = absolute(request["checkout"], "checkout")
+    base = absolute(request["baseDir"], "baseDir")
+    return request["gatewayUser"], request["gatewayGroup"], Path(checkout), Path(base)
+
+
+def person_plan(login, base):
+    safe = login.lower()
+    user = f"dsh-{safe}" if len(safe) <= 28 else (
+        f"dsh-{safe[:19]}-{hashlib.sha256(safe.encode()).hexdigest()[:8]}")
+    home = base / "people" / login
+    return user, home, {
+        "user": user,
+        "home": str(home),
+        "dshHome": str(home / "dsh-home"),
+    }
+
+
+def used_port(values):
+    ports = set()
+    if not isinstance(values, list):
+        raise OnboardingError("usedPorts must be a list")
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        match = re.search(r":(\d+)$", value)
+        if match is not None:
+            ports.add(int(match.group(1)))
+    for port in PORT_RANGE:
+        if port not in ports:
+            return port
+    raise OnboardingError("no deployment port is available")
+
+
+def write(path, content, mode=0o600, user=None, group=None):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(content)
+    os.chmod(temporary, mode)
+    if user is not None:
+        shutil.chown(temporary, user=user, group=group or user)
+    os.replace(temporary, path)
+
+
+def profile_patch(state_dir, port):
+    return f"""- id: webserver
+  config:
+    host: 127.0.0.1
+    port: {port}
+- id: dsh-superagent
+  config:
+    stateDir: {json.dumps(str(state_dir))}
+"""
+
+
+def env_content(profile, url, state_dir, artifacts, dsh_home):
+    return f"""DSH_HOME={dsh_home}
+DSH_SUPERAGENT_PROFILE={profile}
+DSH_SUPERAGENT_URL={url}
+DSH_SUPERAGENT_STATE_DIR={state_dir}
+DSH_SUPERAGENT_ARTIFACTS={artifacts}
+"""
+
+
+def unit_content(user, checkout, env_path, profile, url, state_dir):
+    return f"""[Unit]
+Description=DeepSeek Harness Superagent deployment for {user} {profile}
+After=network-online.target dsh-superagent-gateway.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User={user}
+Group={user}
+EnvironmentFile={env_path}
+WorkingDirectory={checkout}
+ExecStart={checkout}/scripts/dsh-superagent start --profile {profile} --url {url} --state-dir {state_dir}
+ExecStop={checkout}/scripts/dsh-superagent stop --profile {profile} --url {url} --state-dir {state_dir} --stop-timeout 300
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
+def health_unit_content(user, checkout, env_path, profile, url, state_dir, unit_name, recover_unit_name):
+    return f"""[Unit]
+Description=DeepSeek Harness Superagent health check for {unit_name}
+After={unit_name}
+OnFailure={recover_unit_name}
+
+[Service]
+Type=oneshot
+User={user}
+Group={user}
+EnvironmentFile={env_path}
+WorkingDirectory={checkout}
+ExecStart={checkout}/scripts/dsh-superagent status --profile {profile} --url {url} --state-dir {state_dir}
+"""
+
+
+def recover_unit_content(user, checkout, env_path, profile, url, state_dir):
+    return f"""[Unit]
+Description=DeepSeek Harness Superagent automatic recovery for {profile}
+
+[Service]
+Type=oneshot
+User={user}
+Group={user}
+EnvironmentFile={env_path}
+WorkingDirectory={checkout}
+ExecStart={checkout}/scripts/dsh-superagent-recover --profile {profile} --url {url} --state-dir {state_dir}
+"""
+
+
+def timer_unit_content(health_unit_name):
+    return f"""[Unit]
+Description=DeepSeek Harness Superagent health timer for {health_unit_name}
+
+[Timer]
+OnCalendar=*-*-* *:0/5
+RandomizedDelaySec=30s
+Persistent=true
+Unit={health_unit_name}
+
+[Install]
+WantedBy=timers.target
+"""
+
+
+def agent_wrapper(person_home, deployment_id, token, gh):
+    path = person_home / "bin" / f"agent-{deployment_id}"
+    return path, f"""#!/bin/sh
+exec env GH_TOKEN={shlex.quote(token)} {shlex.quote(gh)} "$@"
+"""
+
+
+def create_person(login, base, dry):
+    user, home, result = person_plan(login, base)
+    if not dry:
+        if subprocess.run(["getent", "passwd", user], capture_output=True).returncode == 0:
+            return result
+        subprocess.run(["useradd", "--system", "--user-group", "--home-dir", str(home), "--create-home",
+                        "--shell", "/usr/sbin/nologin", user], check=True)
+        for path in [home, home / "dsh-home", home / "deployments", home / "worktrees", home / "artifacts"]:
+            path.mkdir(parents=True, exist_ok=True)
+            shutil.chown(path, user=user, group=user)
+        os.chmod(home, 0o700)
+    return result
+
+
+def person(request, dry):
+    login = require(request.get("login"), LOGIN, "login")
+    _gateway_user, _gateway_group, _checkout, base = config(request)
+    return create_person(login, base, dry)
+
+
+def deployment(request, dry):
+    login = require(request.get("login"), LOGIN, "login")
+    deployment_id = require(request.get("id"), ID, "deployment id")
+    repository = require(request.get("repository"), REPOSITORY, "repository")
+    gateway_user, gateway_group, checkout, base = config(request)
+    person_user, person_home, person_result = person_plan(login, base)
+    port = used_port(request.get("usedPorts", []))
+    profile = f"superagent-{deployment_id}"
+    state_dir = person_home / "deployments" / deployment_id
+    workspace = person_home / "worktrees" / deployment_id
+    artifacts = person_home / "artifacts"
+    token_dir = base / "gateway" / "tokens" / deployment_id
+    unit_name = f"dsh-superagent-person-{login}-{deployment_id}.service"
+    health_unit_name = f"dsh-superagent-person-{login}-{deployment_id}-health.service"
+    recover_unit_name = f"dsh-superagent-person-{login}-{deployment_id}-recover.service"
+    health_timer_name = f"dsh-superagent-person-{login}-{deployment_id}-health.timer"
+    unit_path = Path("/etc/systemd/system") / unit_name
+    health_unit_path = Path("/etc/systemd/system") / health_unit_name
+    recover_unit_path = Path("/etc/systemd/system") / recover_unit_name
+    health_timer_path = Path("/etc/systemd/system") / health_timer_name
+    env_path = Path("/etc/dsh-superagent/deployments") / f"person-{login}-{deployment_id}.env"
+    patch_path = person_home / "dsh-home" / "profiles" / profile / "cordis.patch.yml"
+    url = f"http://127.0.0.1:{port}"
+    if dry:
+        return {
+            **person_result, "id": deployment_id, "profile": profile, "repository": repository, "url": url,
+            "stateDir": str(state_dir), "workspace": str(workspace), "tokenDir": str(token_dir), "unit": str(unit_path),
+        "healthUnit": str(health_unit_path), "recoverUnit": str(recover_unit_path), "healthTimer": str(health_timer_path),
+        }
+    create_person(login, base, False)
+    for path in [state_dir, workspace, artifacts]:
+        path.mkdir(parents=True, exist_ok=True)
+        shutil.chown(path, user=person_user, group=person_user)
+    subprocess.run(["runuser", "-u", person_user, "--", "env", f"DSH_HOME={person_home / 'dsh-home'}",
+                    "dsh", "plugin", "--profile", profile, "add", f"link:{checkout}"], check=True)
+    write(patch_path, profile_patch(state_dir, port), user=person_user, group=person_user)
+    write(env_path, env_content(profile, url, state_dir, artifacts, person_home / "dsh-home"))
+    write(unit_path, unit_content(person_user, checkout, env_path, profile, url, state_dir), mode=0o644)
+    write(health_unit_path,
+          health_unit_content(person_user, checkout, env_path, profile, url, state_dir, unit_name, recover_unit_name),
+          mode=0o644)
+    write(recover_unit_path, recover_unit_content(person_user, checkout, env_path, profile, url, state_dir), mode=0o644)
+    write(health_timer_path, timer_unit_content(health_unit_name), mode=0o644)
+    subprocess.run(["systemctl", "daemon-reload"], check=True)
+    subprocess.run(["systemctl", "enable", "--now", unit_name], check=True)
+    subprocess.run(["systemctl", "enable", "--now", health_timer_name], check=True)
+    token = state_dir / "native-proxy-token"
+    deadline = time.monotonic() + 120
+    while not token.exists():
+        if time.monotonic() >= deadline:
+            raise OnboardingError("deployment did not create its native token in time")
+        time.sleep(1)
+    write(token_dir / "native-proxy-token", token.read_text(), user=gateway_user, group=gateway_group)
+    return {
+        "id": deployment_id, "profile": profile, "repository": repository, "url": url,
+        "stateDir": str(state_dir), "workspace": str(workspace), "tokenDir": str(token_dir),
+    }
+
+
+def credentials(request, dry):
+    login = require(request.get("login"), LOGIN, "login")
+    deployment_id = require(request.get("id"), ID, "deployment id")
+    token = require(request.get("githubToken"), GITHUB_TOKEN, "GitHub token")
+    _gateway_user, _gateway_group, _checkout, base = config(request)
+    person_user, person_home, _person_result = person_plan(login, base)
+    path, content = agent_wrapper(person_home, deployment_id, token, shutil.which("gh") or "/usr/bin/gh")
+    if dry:
+        return {"id": deployment_id, "cli": str(path)}
+    create_person(login, base, False)
+    write(path, content, mode=0o700, user=person_user, group=person_user)
+    return {"id": deployment_id, "cli": str(path)}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dry-run", action="store_true", help="print the fixed plan without changing the server")
+    args = parser.parse_args()
+    try:
+        request = json.loads(sys.stdin.read())
+        operation = request.get("operation")
+        if operation == "person":
+            result = person(request, args.dry_run)
+        elif operation == "deployment":
+            result = deployment(request, args.dry_run)
+        elif operation == "credentials":
+            result = credentials(request, args.dry_run)
+        else:
+            raise OnboardingError("operation must be person or deployment")
+    except (json.JSONDecodeError, OnboardingError, subprocess.CalledProcessError) as error:
+        print(str(error), file=sys.stderr)
+        return 1
+    print(json.dumps(result))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -112,8 +112,8 @@ export function caller(messages: () => ApiMessages, deployment?: string): Call {
     const path = pattern.replace(/:(\w+)/g, (_match, name: string) => encodeURIComponent(String(values[name])))
     const query = Object.entries(values.query ?? {}).filter(([, value]) => value !== undefined && value !== '')
       .map(([name, value]) => `${name}=${encodeURIComponent(String(value))}`).join('&')
-    const local = method === 'GET' && path === 'fleet'
-      || method === 'POST' && (path.startsWith('fleet/') || path.startsWith('deployments/'))
+    const local = method === 'GET' && (path === 'fleet' || path === 'gateway/status')
+      || method === 'POST' && (path.startsWith('fleet/') || path.startsWith('deployments/') || path.startsWith('gateway/'))
     const target = local || !deployment ? path : `deployment/${encodeURIComponent(deployment)}/${path}`
     return api(messages(), query ? `${target}?${query}` : target, method, values.body)
   }

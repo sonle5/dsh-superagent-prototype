@@ -145,6 +145,7 @@ interface Input<K extends keyof Api> {
   params: RouteParams<K>; query: Record<string, string>; body: (maxBytes?: number) => Promise<unknown>
 }
 type GatewayRouteKey = 'GET gateway/status' | 'POST gateway/device' | 'POST gateway/session'
+  | 'POST gateway/person' | 'POST gateway/deployment' | 'POST gateway/deployment/:id/credentials'
 type FleetRouteKey = 'GET fleet' | 'POST deployments/:id/select' | 'POST fleet/:id/start' | 'POST fleet/:id/stop'
   | 'POST fleet/:id/restart'
 type ControllerRouteKey = GatewayRouteKey | FleetRouteKey
@@ -277,6 +278,19 @@ function controllerRoutes(fleet: Fleet): ControllerRoutes {
     'POST gateway/session': async ({ body }) => gateway(async () => {
       const request = z.object({ device_code: z.string().min(1) }).parse(await body())
       return fleet.completeGatewaySession(request.device_code)
+    }),
+    'POST gateway/person': () => gateway(() => fleet.createGatewayPerson()),
+    'POST gateway/deployment': async ({ body }) => gateway(async () => {
+      const request = z.object({
+        id: z.string().regex(/^[a-z0-9][a-z0-9-]*$/, 'lowercase deployment id'),
+        repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/, 'owner/repository'),
+      }).parse(await body())
+      return fleet.createGatewayDeployment(request.id, request.repository)
+    }),
+    'POST gateway/deployment/:id/credentials': async ({ params, body }) => gateway(async () => {
+      const request = z.object({ githubToken: z.string().regex(/^[A-Za-z0-9_-]{20,255}$/, 'GitHub token') })
+        .parse(await body())
+      return fleet.configureGatewayDeploymentCredentials(params.id, request.githubToken)
     }),
     'POST deployments/:id/select': ({ params }) => select(params.id),
     'POST fleet/:id/start': ({ params }) => control(params.id, 'start'),

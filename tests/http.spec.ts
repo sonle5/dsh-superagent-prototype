@@ -255,6 +255,32 @@ it('signs the Fleet controller in to a gateway and stores only the gateway sessi
       }))
       return
     }
+    if (request.url === '/gateway/api/person' && request.method === 'POST'
+      && request.headers['x-dsh-superagent-native'] === 'gateway-session') {
+      response.writeHead(201, { 'content-type': 'application/json' }).end(JSON.stringify({
+        login: 'example-user', user: 'dsh-example-user', created: true,
+      }))
+      return
+    }
+    if (request.url === '/gateway/api/deployment' && request.method === 'POST'
+      && request.headers['x-dsh-superagent-native'] === 'gateway-session' && JSON.parse(body).id === 'widgets') {
+      response.writeHead(201, { 'content-type': 'application/json' }).end(JSON.stringify({
+        login: 'example-user', created: true,
+        deployment: {
+          id: 'widgets', profile: 'superagent-widgets', repository: 'example-org/widgets',
+          url: 'http://127.0.0.1:3083', stateDir: '/var/lib/dsh-superagent/widgets',
+          workspace: '/var/lib/dsh-superagent/worktrees/widgets',
+        },
+      }))
+      return
+    }
+    if (request.url === '/gateway/api/deployment/widgets/credentials' && request.method === 'POST'
+      && request.headers['x-dsh-superagent-native'] === 'gateway-session'
+      && JSON.parse(body).githubToken === 'agent-github-token-1234') {
+      response.writeHead(200, { 'content-type': 'application/json' })
+        .end(JSON.stringify({ saved: true, revision: 8, restarting: true }))
+      return
+    }
     response.writeHead(500).end(JSON.stringify({ error: `Unexpected gateway path: ${request.url}` }))
   })
   await new Promise<void>((resolve, reject) => {
@@ -287,4 +313,19 @@ it('signs the Fleet controller in to a gateway and stores only the gateway sessi
     configured: true, url: `http://127.0.0.1:${(gateway.address() as AddressInfo).port}`,
     organization: 'example-org', login: 'example-user',
   } })
+  expect(await call('POST', 'gateway/person')).toEqual({ status: 200, body: {
+    login: 'example-user', user: 'dsh-example-user', created: true,
+  } })
+  expect(await call('POST', 'gateway/deployment', { id: 'widgets', repository: 'example-org/widgets' }))
+    .toEqual({ status: 200, body: {
+      login: 'example-user', created: true,
+      deployment: {
+        id: 'widgets', profile: 'superagent-widgets', repository: 'example-org/widgets',
+        url: 'http://127.0.0.1:3083', stateDir: '/var/lib/dsh-superagent/widgets',
+        workspace: '/var/lib/dsh-superagent/worktrees/widgets',
+      },
+    } })
+  expect(await call('POST', 'gateway/deployment/widgets/credentials', { githubToken: 'agent-github-token-1234' }))
+    .toEqual({ status: 200, body: { saved: true, revision: 8, restarting: true } })
+  expect(readFileSync(join(state, 'gateway.json'), 'utf8')).not.toContain('agent-github-token-1234')
 })

@@ -29,6 +29,28 @@ export interface Api {
     interval: number
   } }
   'POST gateway/session': { body: { device_code: string }; response: { login: string; organization: string; expiresAt: string } }
+  'POST gateway/person': { response: {
+    login: string
+    user?: string
+    created: boolean
+  } }
+  'POST gateway/deployment': { body: { id: string; repository: string }; response: {
+    login: string
+    created: boolean
+    deployment: {
+      id: string
+      profile: string
+      repository: string
+      url: string
+      stateDir: string
+      workspace: string
+    }
+  } }
+  'POST gateway/deployment/:id/credentials': { body: { githubToken: string }; response: {
+    saved: boolean
+    revision: number
+    restarting: boolean
+  } }
   'POST deployments/:id/select': { response: { selected: string } }
   'POST fleet/:id/start': { response: { id: string; action: 'start'; code: number; output: string } }
   'POST fleet/:id/stop': { response: { id: string; action: 'stop'; code: number; output: string } }
@@ -64,6 +86,9 @@ export const FLEET_ROUTES = [
   'GET gateway/status',
   'POST gateway/device',
   'POST gateway/session',
+  'POST gateway/person',
+  'POST gateway/deployment',
+  'POST gateway/deployment/:id/credentials',
   'POST deployments/:id/select',
   'POST fleet/:id/start',
   'POST fleet/:id/stop',

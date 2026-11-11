@@ -86,6 +86,28 @@ const GatewaySession = z.object({
   expiresAt: z.string().min(1),
   nativeToken: z.string().min(1),
 })
+const GatewayPerson = z.object({
+  login: z.string().min(1),
+  user: z.string().min(1).optional(),
+  created: z.boolean(),
+})
+const GatewayDeployment = z.object({
+  login: z.string().min(1),
+  created: z.boolean(),
+  deployment: z.object({
+    id: z.string().min(1),
+    profile: z.string().min(1),
+    repository: z.string().min(1),
+    url: z.string().url(),
+    stateDir: z.string().min(1),
+    workspace: z.string().min(1),
+  }),
+})
+const GatewayCredentials = z.object({
+  saved: z.boolean(),
+  revision: z.number().int().nonnegative(),
+  restarting: z.boolean(),
+})
 
 const Health = z.object({ state: z.string(), detail: z.string().default('') }).passthrough()
 const Problem = z.object({ code: z.string().optional(), detail: z.string().optional() }).passthrough()
@@ -543,6 +565,54 @@ export class Fleet {
     writeFileSync(temporary, `${JSON.stringify({ version: 1, url: loaded.value.url, token: session.nativeToken })}\n`, { mode: 0o600 })
     renameSync(temporary, this.gatewaySessionPath)
     return { login: session.login, organization: session.organization, expiresAt: session.expiresAt }
+  }
+
+  private authenticatedGatewaySession(): { url: string; token: string } {
+    const loaded = loadGatewaySession(this.gatewaySessionPath)
+    if (loaded.error) throw new FleetControlError(400, loaded.error)
+    if (!loaded.value) throw new FleetControlError(400, 'The gateway address is not configured')
+    if (loaded.value.token === undefined) throw new FleetControlError(400, 'Gateway sign-in required')
+    return { url: loaded.value.url, token: loaded.value.token }
+  }
+
+  async createGatewayPerson(): Promise<z.infer<typeof GatewayPerson>> {
+    const session = this.authenticatedGatewaySession()
+    try {
+      return await requestJson(gatewayApi(session.url, 'person'), GatewayPerson, {
+        method: 'POST',
+        headers: { accept: 'application/json', 'x-orchestrator-request': '1', 'x-dsh-superagent-native': session.token },
+      })
+    } catch (error) {
+      throw new FleetControlError(502, `Gateway onboarding failed: ${reason(error)}`)
+    }
+  }
+
+  async createGatewayDeployment(id: string, repository: string): Promise<z.infer<typeof GatewayDeployment>> {
+    const session = this.authenticatedGatewaySession()
+    try {
+      return await requestJson(gatewayApi(session.url, 'deployment'), GatewayDeployment, {
+        method: 'POST',
+        headers: { accept: 'application/json', 'content-type': 'application/json',
+          'x-orchestrator-request': '1', 'x-dsh-superagent-native': session.token },
+        body: JSON.stringify({ id, repository }),
+      })
+    } catch (error) {
+      throw new FleetControlError(502, `Gateway onboarding failed: ${reason(error)}`)
+    }
+  }
+
+  async configureGatewayDeploymentCredentials(id: string, githubToken: string): Promise<z.infer<typeof GatewayCredentials>> {
+    const session = this.authenticatedGatewaySession()
+    try {
+      return await requestJson(gatewayApi(session.url, `deployment/${id}/credentials`), GatewayCredentials, {
+        method: 'POST',
+        headers: { accept: 'application/json', 'content-type': 'application/json',
+          'x-orchestrator-request': '1', 'x-dsh-superagent-native': session.token },
+        body: JSON.stringify({ githubToken }),
+      })
+    } catch (error) {
+      throw new FleetControlError(502, `Gateway credential setup failed: ${reason(error)}`)
+    }
   }
 
   /** Select the deployment whose native DSH state and streams the Desktop controller serves. */

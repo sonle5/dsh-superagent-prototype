@@ -190,6 +190,12 @@ it('merges gateway deployments with the local fleet and routes native traffic th
     version: 1, url: gatewayUrl, token: 'gateway-session',
   }), { mode: 0o600 })
   const gateway = createServer((request, response) => {
+    if (request.url === '/gateway/api/deployment/sglang/credentials'
+      && request.headers['x-dsh-superagent-native'] === 'gateway-session') {
+      response.writeHead(200, { 'content-type': 'application/json' })
+        .end(JSON.stringify({ saved: true, revision: 8, restarting: true }))
+      return
+    }
     if (request.url === '/gateway/api/deployment/sglang/state'
       && request.headers['x-dsh-superagent-native'] === 'gateway-session') {
       response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({
@@ -226,6 +232,9 @@ it('merges gateway deployments with the local fleet and routes native traffic th
   await expect(fleet.control('sglang', 'restart')).rejects.toMatchObject({
     status: 409, message: 'Lifecycle control is unavailable for the remote deployment sglang',
   })
+  await expect(fleet.configureGatewayDeploymentCredentials('sglang', 'agent-github-token-1234'))
+    .resolves.toEqual({ saved: true, revision: 8, restarting: true })
+  expect(readFileSync(join(state, 'gateway.json'), 'utf8')).not.toContain('agent-github-token')
   await expect(fleet.select('sglang')).resolves.toEqual({ selected: 'sglang' })
   expect(await fleet.nativeTarget()).toMatchObject({
     id: 'sglang',

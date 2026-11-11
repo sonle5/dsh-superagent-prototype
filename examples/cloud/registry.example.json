@@ -2,6 +2,18 @@
   "version": 1,
   "organization": "<github-organization>",
   "githubClientId": "<github-oauth-app-client-id>",
+  "people": [],
+  "onboarding": {
+    "command": [
+      "/usr/bin/sudo",
+      "-n",
+      "/opt/dsh-superagent/scripts/dsh-superagent-onboard"
+    ],
+    "gatewayUser": "<gateway-user>",
+    "gatewayGroup": "<gateway-group>",
+    "checkout": "/opt/dsh-superagent",
+    "baseDir": "/var/lib/dsh-superagent"
+  },
   "deployments": [
     {
       "id": "<deployment-id>",
@@ -9,7 +21,8 @@
       "repository": "<owner>/<repository>",
       "url": "http://127.0.0.1:<deployment-port>",
       "stateDir": "/var/lib/dsh-superagent/deployments/<deployment-id>",
-      "workspace": "/var/lib/dsh-superagent/worktrees/<deployment-id>"
+      "workspace": "/var/lib/dsh-superagent/worktrees/<deployment-id>",
+      "ownerLogin": "<github-login>"
     }
   ]
 }

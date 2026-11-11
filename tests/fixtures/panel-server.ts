@@ -330,6 +330,18 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
   'POST gateway/session': { body: true, answer: () => ({
     login: 'fixture-user', organization: 'fixture-org', expiresAt: '2099-01-01T00:00:00Z',
   }) },
+  'POST gateway/person': { answer: () => ({ login: 'fixture-user', created: true }) },
+  'POST gateway/deployment': { body: true, answer: () => ({
+    login: 'fixture-user',
+    created: true,
+    deployment: {
+      id: 'fixture-deployment', profile: 'superagent-fixture-deployment', repository: 'fixture-org/fixture-repository',
+      url: 'http://127.0.0.1:3082', stateDir: '/tmp/fixture-deployment', workspace: '/tmp/fixture-workspace',
+    },
+  }) },
+  'POST gateway/deployment/:id/credentials': { body: true, answer: () => ({
+    saved: true, revision: 1, restarting: true,
+  }) },
   'POST deployments/:id/select': { answer: ({ params }) => {
     if (!server.fleet.deployments.some(deployment => deployment.id === params.id)) {
       return refuse(404, `Deployment not found: ${params.id}`)
