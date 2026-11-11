@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "organization": "<github-organization>",
+  "githubClientId": "<github-oauth-app-client-id>",
+  "deployments": [
+    {
+      "id": "<deployment-id>",
+      "profile": "superagent-<deployment-id>",
+      "repository": "<owner>/<repository>",
+      "url": "http://127.0.0.1:<deployment-port>",
+      "stateDir": "/var/lib/dsh-superagent/deployments/<deployment-id>",
+      "workspace": "/var/lib/dsh-superagent/worktrees/<deployment-id>"
+    }
+  ]
+}

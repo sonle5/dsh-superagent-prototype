@@ -1,0 +1,21 @@
+# Gateway profile override ($DSH_HOME/profiles/<gateway profile>/cordis.patch.yml).
+# Bind one concrete address of the server, never 0.0.0.0; the web server rejects wildcard binds.
+- id: webserver
+  config:
+    host: <server IPv4 or IPv6 literal>
+    port: 443
+    tls:
+      certFile: /etc/dsh-superagent/tls/cert.pem
+      keyFile: /etc/dsh-superagent/tls/key.pem
+- id: dsh-superagent
+  config:
+    mode: gateway
+    stateDir: /var/lib/dsh-superagent/gateway
+- id: dsh-superagent-github
+  disabled: true
+- id: dsh-superagent-feishu
+  disabled: true
+- id: dsh-superagent-worker-preset
+  disabled: true
+- id: dsh-superagent-router-preset
+  disabled: true

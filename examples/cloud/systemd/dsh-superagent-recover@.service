@@ -1,0 +1,11 @@
+[Unit]
+Description=DeepSeek Harness Superagent automatic recovery for %i
+After=dsh-superagent-health@%i.service
+
+[Service]
+Type=oneshot
+User=<fleet-user>
+Group=<fleet-group>
+EnvironmentFile=/etc/dsh-superagent/deployments/%i.env
+WorkingDirectory=/opt/dsh-superagent
+ExecStart=/opt/dsh-superagent/scripts/dsh-superagent-recover --profile ${DSH_SUPERAGENT_PROFILE} --url ${DSH_SUPERAGENT_URL} --state-dir ${DSH_SUPERAGENT_STATE_DIR}

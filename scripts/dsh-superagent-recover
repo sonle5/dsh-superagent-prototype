@@ -1,0 +1,12 @@
+#!/bin/sh
+# Restart only for the service script's recoverable status code. Codes 2 and 3 need a person.
+set -u
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+set +e
+"$SCRIPT_DIR/dsh-superagent" status "$@"
+code=$?
+set -e
+if [ "$code" -eq 1 ]; then
+  exec "$SCRIPT_DIR/dsh-superagent" restart --respect-stop "$@"
+fi
+exit "$code"

@@ -1,0 +1,17 @@
+[Unit]
+Description=DeepSeek Harness Superagent cloud gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=<fleet-user>
+Group=<fleet-group>
+EnvironmentFile=/etc/dsh-superagent/gateway.env
+WorkingDirectory=/opt/dsh-superagent
+ExecStart=/usr/local/bin/dsh --profile ${DSH_SUPERAGENT_PROFILE} --no-open
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=multi-user.target

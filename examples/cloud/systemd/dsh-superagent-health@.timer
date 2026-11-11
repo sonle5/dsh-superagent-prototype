@@ -1,0 +1,11 @@
+[Unit]
+Description=DeepSeek Harness Superagent health timer for %i
+
+[Timer]
+OnCalendar=*-*-* *:0/5
+RandomizedDelaySec=30s
+Persistent=true
+Unit=dsh-superagent-health@%i.service
+
+[Install]
+WantedBy=timers.target

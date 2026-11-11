@@ -12,6 +12,7 @@ import { afterEach, beforeEach, expect, it } from 'vitest'
 let root: string
 let server: Server | undefined
 let sleepers: ChildProcess[] = []
+const cleanupDirectories: string[] = []
 const control = (profile: string) => join(root, '.artifacts', 'control', 'profiles', profile)
 const program = (name: string, body: string) => writeFileSync(join(root, 'bin', name), `#!/bin/sh\n${body}\n`, { mode: 0o755 })
 /** Spawn a dummy process whose PID can be listed by the fake ps binary; ignoreInterrupt simulates a hung graceful stop. */
@@ -27,6 +28,7 @@ const processes = (...lines: string[]) => writeFileSync(join(root, 'ps.txt'), li
 const started = (...lines: string[]) => writeFileSync(join(root, 'ps-started.txt'), lines.map(line => `${line}\n`).join(''))
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'service script '))
+  cleanupDirectories.push(root)
   mkdirSync(join(root, 'scripts')); mkdirSync(join(root, 'bin'))
   copyFileSync(join(import.meta.dirname, '..', 'scripts', 'dsh-superagent'), join(root, 'scripts', 'dsh-superagent'))
   processes()
@@ -46,7 +48,7 @@ afterEach(() => {
   server?.close(); server = undefined
   for (const child of sleepers) child.kill()
   sleepers = []
-  rmSync(root, { recursive: true, force: true })
+  for (const directory of cleanupDirectories.splice(0)) rmSync(directory, { recursive: true, force: true })
 })
 function run(...args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise(resolve => execFile('python3', [join(root, 'scripts', 'dsh-superagent'), ...args],
@@ -252,6 +254,37 @@ it('refuses to start a service while no process runs it but something answers at
     .toMatchObject({ code: 1, stderr: expect.stringContaining('An existing orchestrator answers at this URL') })
   expect(readFileSync(join(root, 'tmux.log'),
     'utf8').split('---\n').filter(Boolean).map(call => call.split('\n')[0])).toEqual(['has-session'])
+}, 20_000)
+
+it('restarts only the launcher status code that monitoring can recover', async () => {
+  const recoverRoot = mkdtempSync(join(tmpdir(), 'dsh recover '))
+  cleanupDirectories.push(recoverRoot)
+  mkdirSync(join(recoverRoot, 'scripts'), { recursive: true })
+  copyFileSync(join(import.meta.dirname, '..', 'scripts', 'dsh-superagent-recover'),
+    join(recoverRoot, 'scripts', 'dsh-superagent-recover'))
+  const calls = join(recoverRoot, 'calls')
+  writeFileSync(join(recoverRoot, 'scripts', 'dsh-superagent'), `#!/bin/sh
+printf '%s\\n' "$*" >> '${calls}'
+if [ "$1" = restart ]; then exit 0; fi
+exit "$DSH_RECOVER_STATUS"
+`, { mode: 0o755 })
+  const runRecover = (status: number) => new Promise<{ code: number; stdout: string }>(resolve => {
+    execFile(join(recoverRoot, 'scripts', 'dsh-superagent-recover'),
+      ['--profile', 'superagent-sglang', '--url', 'http://127.0.0.1:3083', '--state-dir', '/tmp/superagent-sglang'],
+      { env: { ...process.env, DSH_RECOVER_STATUS: String(status) } },
+      (error, stdout) => resolve({ code: typeof error?.code === 'number' ? error.code : 0, stdout }))
+  })
+
+  expect(await runRecover(1)).toMatchObject({ code: 0 })
+  expect(await runRecover(2)).toMatchObject({ code: 2 })
+  expect(await runRecover(3)).toMatchObject({ code: 3 })
+  expect(readFileSync(calls, 'utf8')).toBe([
+    'status --profile superagent-sglang --url http://127.0.0.1:3083 --state-dir /tmp/superagent-sglang',
+    'restart --respect-stop --profile superagent-sglang --url http://127.0.0.1:3083 --state-dir /tmp/superagent-sglang',
+    'status --profile superagent-sglang --url http://127.0.0.1:3083 --state-dir /tmp/superagent-sglang',
+    'status --profile superagent-sglang --url http://127.0.0.1:3083 --state-dir /tmp/superagent-sglang',
+    '',
+  ].join('\n'))
 }, 20_000)
 it('starts the service in a new window of the profile\'s tmux session when the session exists', async () => {
   program('tmux', `for a in "$@"; do printf '%s\\n' "$a"; done >> '${root}/tmux.log'; echo --- >> '${root}/tmux.log'\n`
