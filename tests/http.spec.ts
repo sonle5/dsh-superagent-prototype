@@ -8,7 +8,7 @@ import { SettingsSchema } from '../src/policy.ts'
 import { SetupError } from '../src/setup.ts'
 import { tmpdir } from 'node:os'
 import { createServer, type Server } from 'node:http'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { AddressInfo } from 'node:net'
 import { nativeToken } from '../src/app/native-auth.ts'
@@ -221,4 +221,70 @@ it('keeps the controller loopback-only and serves its registry without a local r
   expect(await call('GET', 'fleet')).toMatchObject({ status: 200, body: { deployments: [] } })
   expect(await call('GET', 'state')).toEqual({ status: 404, body: { error: 'Unknown operation' } })
   expect(() => serveControl(state, '0.0.0.0')).toThrow('Fleet control requires a loopback Web server')
+})
+
+it('signs the Fleet controller in to a gateway and stores only the gateway session', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'dsh-gateway-controller-'))
+  cleanup.push(() => { rmSync(state, { recursive: true, force: true }) })
+  const gateway: Server = createServer(async (request, response) => {
+    const body = await new Promise<string>(resolve => {
+      const chunks: Buffer[] = []
+      request.on('data', chunk => chunks.push(Buffer.from(chunk)))
+      request.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
+    })
+    if (request.url === '/gateway/api/device' && request.method === 'POST') {
+      response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({
+        device_code: 'device-code', user_code: 'USER-CODE', verification_uri: 'https://github.com/login/device',
+        expires_in: 900, interval: 5,
+      }))
+      return
+    }
+    if (request.url === '/gateway/api/session' && request.method === 'POST') {
+      if (JSON.parse(body).device_code !== 'device-code') {
+        response.writeHead(202).end(JSON.stringify({ status: 'authorization_pending' }))
+        return
+      }
+      response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({
+        login: 'example-user', organization: 'example-org', expiresAt: '2099-01-01T00:00:00Z', nativeToken: 'gateway-session',
+      }))
+      return
+    }
+    if (request.url === '/gateway/api/fleet' && request.headers['x-dsh-superagent-native'] === 'gateway-session') {
+      response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({
+        organization: 'example-org', login: 'example-user', deployments: [],
+      }))
+      return
+    }
+    response.writeHead(500).end(JSON.stringify({ error: `Unexpected gateway path: ${request.url}` }))
+  })
+  await new Promise<void>((resolve, reject) => {
+    gateway.once('error', reject)
+    gateway.listen(0, '127.0.0.1', resolve)
+  })
+  cleanup.push(() => { gateway.close() })
+  writeFileSync(join(state, 'gateway.json'), JSON.stringify({
+    version: 1, url: `http://127.0.0.1:${(gateway.address() as AddressInfo).port}`, token: 'stale-session',
+  }), { mode: 0o600 })
+  const call = serveControl(state)
+
+  expect(await call('GET', 'gateway/status')).toMatchObject({ status: 200, body: {
+    configured: true, error: 'Gateway fleet is unavailable: Unexpected gateway path: /gateway/api/fleet',
+  } })
+  expect(await call('POST', 'gateway/device')).toEqual({ status: 200, body: {
+    device_code: 'device-code', user_code: 'USER-CODE', verification_uri: 'https://github.com/login/device',
+    expires_in: 900, interval: 5,
+  } })
+  expect(await call('POST', 'gateway/session', { device_code: 'wrong' })).toEqual({ status: 502, body: {
+    error: 'Gateway sign-in failed: authorization_pending',
+  } })
+  expect(await call('POST', 'gateway/session', { device_code: 'device-code' })).toEqual({ status: 200, body: {
+    login: 'example-user', organization: 'example-org', expiresAt: '2099-01-01T00:00:00Z',
+  } })
+  expect(JSON.parse(readFileSync(join(state, 'gateway.json'), 'utf8'))).toEqual({
+    version: 1, url: `http://127.0.0.1:${(gateway.address() as AddressInfo).port}`, token: 'gateway-session',
+  })
+  expect(await call('GET', 'gateway/status')).toEqual({ status: 200, body: {
+    configured: true, url: `http://127.0.0.1:${(gateway.address() as AddressInfo).port}`,
+    organization: 'example-org', login: 'example-user',
+  } })
 })

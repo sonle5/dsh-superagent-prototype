@@ -71,7 +71,9 @@ const LOCAL_TARGET_ID = 'desktop.local'
 function localTarget(ctx: Context, stateDir: string): FleetNativeTarget {
   return {
     id: LOCAL_TARGET_ID,
+    remote: false,
     url: `http://127.0.0.1:${ctx.webServer.port}/`,
+    nativeUrl: `http://127.0.0.1:${ctx.webServer.port}/`,
     repository: '',
     profile: '',
     stateDir,
@@ -1137,7 +1139,7 @@ function controllerUpgrade(ctx: Context, stateDir: string, server: WebSocketServ
         if (routes.get(streamId) === route) routes.delete(streamId)
       }
       const warn = (message: string): void => { ctx.logger.warn(redactSensitive(message)) }
-      client.on('message', data => {
+      client.on('message', async data => {
         const message = muxClientMessage(data)
         if (message === undefined) {
           client.close(1003, 'Invalid Remote mux frame')
@@ -1172,7 +1174,7 @@ function controllerUpgrade(ctx: Context, stateDir: string, server: WebSocketServ
         let fallback: FleetNativeTarget
         try {
           fallback = localTarget(ctx, stateDir)
-          targets = [fallback, ...fleet.nativeTargets()]
+          targets = [fallback, ...await fleet.nativeTargets()]
         } catch (error) {
           sendMuxError(client, message.streamId, {
             code: 'gateway/service-unavailable',
@@ -1405,7 +1407,7 @@ function controlHttp(ctx: Context, stateDir: string, state: NativeControllerStat
     let fallback: FleetNativeTarget
     try {
       fallback = localTarget(ctx, stateDir)
-      targets = [fallback, ...fleet.nativeTargets()]
+      targets = [fallback, ...await fleet.nativeTargets()]
     } catch (error) {
       response.writeHead(503, { 'content-type': 'text/plain; charset=utf-8' })
       response.end(redactSensitive(error instanceof Error ? error.message : String(error)))

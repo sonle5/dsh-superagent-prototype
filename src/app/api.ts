@@ -20,6 +20,15 @@ type Delivery = 'injected' | 'pending'
 
 export interface Api {
   'GET fleet': { response: FleetView }
+  'GET gateway/status': { response: { configured: boolean; url?: string; organization?: string; login?: string; error?: string } }
+  'POST gateway/device': { response: {
+    device_code: string
+    user_code: string
+    verification_uri: string
+    expires_in: number
+    interval: number
+  } }
+  'POST gateway/session': { body: { device_code: string }; response: { login: string; organization: string; expiresAt: string } }
   'POST deployments/:id/select': { response: { selected: string } }
   'POST fleet/:id/start': { response: { id: string; action: 'start'; code: number; output: string } }
   'POST fleet/:id/stop': { response: { id: string; action: 'stop'; code: number; output: string } }
@@ -52,6 +61,9 @@ export interface Api {
 }
 export const FLEET_ROUTES = [
   'GET fleet',
+  'GET gateway/status',
+  'POST gateway/device',
+  'POST gateway/session',
   'POST deployments/:id/select',
   'POST fleet/:id/start',
   'POST fleet/:id/stop',

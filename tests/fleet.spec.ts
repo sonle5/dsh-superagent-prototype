@@ -161,15 +161,104 @@ it('persists one validated deployment for native Session routing', async () => {
   const sglangToken = nativeToken(join(state, 'superagent-sglang'))!
 
   const fleet = new Fleet(state)
-  expect(fleet.nativeTarget()).toBeUndefined()
-  expect(fleet.select('sglang')).toEqual({ selected: 'sglang' })
-  expect(fleet.nativeTarget()).toMatchObject({ repository: 'onenexus-team/sglang', profile: 'superagent-sglang', token: sglangToken })
-  expect(fleet.nativeTargets()).toEqual(expect.arrayContaining([
+  expect(await fleet.nativeTarget()).toBeUndefined()
+  await expect(fleet.select('sglang')).resolves.toEqual({ selected: 'sglang' })
+  expect(await fleet.nativeTarget()).toMatchObject({ repository: 'onenexus-team/sglang', profile: 'superagent-sglang', token: sglangToken })
+  await expect(fleet.nativeTargets()).resolves.toEqual(expect.arrayContaining([
     expect.objectContaining({ id: 'inference-support-loop', token: inferenceToken }),
     expect.objectContaining({ id: 'sglang', token: sglangToken }),
   ]))
   rmSync(join(state, 'superagent-sglang', 'native-proxy-token'))
-  expect(() => fleet.nativeTargets()).toThrow(/native capability/)
+  await expect(fleet.nativeTargets()).rejects.toThrow(/native capability/)
   expect((await fleet.view()).selected).toBe('sglang')
-  expect(() => new Fleet(state).select('missing')).toThrow('Deployment not found: missing')
+  await expect(new Fleet(state).select('missing')).rejects.toThrow('Deployment not found: missing')
+})
+
+it('merges gateway deployments with the local fleet and routes native traffic through their gateway prefix', async () => {
+  const state = workspace()
+  const localState = join(state, 'superagent')
+  const localUrl = await listen('onenexus-team/inference-support-loop')
+  nativeToken(localState)
+  writeFileSync(join(state, 'fleet.json'), JSON.stringify({
+    version: 1, controlScript: '/usr/bin/true', logDir: join(state, '.artifacts'),
+    deployments: [{ id: 'inference-support-loop', profile: 'superagent-inference-support-loop',
+      repository: 'onenexus-team/inference-support-loop', url: localUrl, stateDir: localState,
+      workspace: '/Users/alice/src/inference-support-loop' }],
+  }))
+  const gatewayUrl = await listen('onenexus-team/sglang')
+  writeFileSync(join(state, 'gateway.json'), JSON.stringify({
+    version: 1, url: gatewayUrl, token: 'gateway-session',
+  }), { mode: 0o600 })
+  const gateway = createServer((request, response) => {
+    if (request.url === '/gateway/api/deployment/sglang/state'
+      && request.headers['x-dsh-superagent-native'] === 'gateway-session') {
+      response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({
+        setup: { problem: null, feishuProblem: null, accounts: { repository: 'onenexus-team/sglang', agent: 'agent-bot' } },
+        load: { running: 1, queued: 2, maxWorkers: 3 }, paused: false,
+        health: { runtime: { state: 'ready', detail: '' } },
+      }))
+      return
+    }
+    if (request.url === '/gateway/api/fleet' && request.headers['x-dsh-superagent-native'] === 'gateway-session') {
+      response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({
+        organization: 'example-org', login: 'example-user',
+        deployments: [{ id: 'sglang', profile: 'superagent-sglang', repository: 'onenexus-team/sglang' }],
+      }))
+      return
+    }
+    response.writeHead(500).end(JSON.stringify({ error: `Unexpected gateway path: ${request.url}` }))
+  })
+  servers.push(gateway)
+  await new Promise<void>(resolve => gateway.listen(0, '127.0.0.1', resolve))
+  // The gateway fleet address uses this server's port, so point the session at it only after it listens.
+  writeFileSync(join(state, 'gateway.json'), JSON.stringify({
+    version: 1, url: `http://127.0.0.1:${(gateway.address() as AddressInfo).port}`, token: 'gateway-session',
+  }), { mode: 0o600 })
+
+  const fleet = new Fleet(state)
+  const view = await fleet.view()
+  const gatewayAddress = `http://127.0.0.1:${(gateway.address() as AddressInfo).port}`
+  expect(view.gateway).toMatchObject({ organization: 'example-org', login: 'example-user' })
+  expect(view.deployments).toEqual([
+    expect.objectContaining({ id: 'inference-support-loop', status: 'ready', canControl: true }),
+    expect.objectContaining({ id: 'sglang', status: 'ready', canControl: false }),
+  ])
+  await expect(fleet.control('sglang', 'restart')).rejects.toMatchObject({
+    status: 409, message: 'Lifecycle control is unavailable for the remote deployment sglang',
+  })
+  await expect(fleet.select('sglang')).resolves.toEqual({ selected: 'sglang' })
+  expect(await fleet.nativeTarget()).toMatchObject({
+    id: 'sglang',
+    url: `${gatewayAddress}/gateway/api/deployment/sglang`,
+    nativeUrl: `${gatewayAddress}/gateway/native/sglang`,
+    token: 'gateway-session',
+  })
+  await expect(fleet.nativeTargets()).resolves.toEqual(expect.arrayContaining([
+    expect.objectContaining({ id: 'inference-support-loop', nativeUrl: localUrl, token: nativeToken(localState) }),
+    expect.objectContaining({ id: 'sglang', token: 'gateway-session' }),
+  ]))
+})
+
+it('keeps the local fleet available when the controller gateway session is absent or invalid', async () => {
+  const state = workspace()
+  const localState = join(state, 'superagent')
+  const localUrl = await listen('onenexus-team/inference-support-loop')
+  nativeToken(localState)
+  writeFileSync(join(state, 'fleet.json'), JSON.stringify({
+    version: 1, controlScript: '/usr/bin/true', logDir: join(state, '.artifacts'),
+    deployments: [{ id: 'inference-support-loop', profile: 'superagent-inference-support-loop',
+      repository: 'onenexus-team/inference-support-loop', url: localUrl, stateDir: localState,
+      workspace: '/Users/alice/src/inference-support-loop' }],
+  }))
+  const fleet = new Fleet(state)
+  expect((await fleet.view()).deployments).toEqual([expect.objectContaining({ id: 'inference-support-loop', status: 'ready' })])
+  await expect(fleet.nativeTargets()).resolves.toEqual([expect.objectContaining({ id: 'inference-support-loop' })])
+
+  writeFileSync(join(state, 'gateway.json'), JSON.stringify({ version: 1, url: 'https://gateway.example.invalid' }), { mode: 0o600 })
+  expect((await fleet.view()).deployments).toEqual([expect.objectContaining({ id: 'inference-support-loop', status: 'ready' })])
+  await expect(fleet.nativeTargets()).resolves.toEqual([expect.objectContaining({ id: 'inference-support-loop' })])
+
+  writeFileSync(join(state, 'gateway.json'), '{', { mode: 0o600 })
+  expect((await fleet.view()).deployments).toEqual([expect.objectContaining({ id: 'inference-support-loop', status: 'ready' })])
+  await expect(fleet.nativeTargets()).resolves.toEqual([expect.objectContaining({ id: 'inference-support-loop' })])
 })

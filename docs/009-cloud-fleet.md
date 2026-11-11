@@ -1,6 +1,6 @@
 # 009 Cloud fleet
 
-> **Status: in progress.** GitHub device sign-in, organization admission, the server-local registry, and authenticated deployment management and native Session forwarding are implemented. Self-service onboarding, server installation files, and the Fleet-controller integration remain design and are updated as they land.
+> **Status: in progress.** GitHub device sign-in, organization admission, the server-local registry, authenticated deployment management and native Session forwarding, and the Fleet-controller integration are implemented. Self-service onboarding and server installation files remain design and are updated as they land.
 
 This document describes a fleet that runs on one always-on Linux server shared by several people, with DeepSeek Harness Desktop as an optional client. It builds on [006 Deployment](006-deployment.md) and [007 Architecture](007-architecture.md).
 
@@ -35,6 +35,7 @@ Desktop stores no Superagent state for server deployments. It loads a snapshot a
 - **One Linux user per person.** It owns that person's deployments, agent GitHub login, model credentials and worktrees. Permissions and isolation in 006 Deployment still apply inside one user: workers run with `danger-full-access` as that user.
 - **Loopback is shared by every Linux user on the server.** Each deployment's management API admits the signed DSH panel session or its own native capability. The deployment creates `native-proxy-token`; the controller and service script only read it, and native Session routing uses the same credential. This closes the path where one local worker could call another person's deployment by sending only the request marker.
 - **Deployment tokens stay on the server.** Desktop holds only its gateway session.
+- **The controller's gateway state is local to the controller profile.** Before sign-in, `<control stateDir>/gateway.json` contains only the gateway URL. After sign-in it also contains the gateway's opaque session token; it never contains the GitHub access token.
 - **The gateway is unprivileged.** Creating Linux users and services belongs to a separate privileged helper that offers a fixed set of operations.
 
 ## Sign-in
@@ -42,6 +43,19 @@ Desktop stores no Superagent state for server deployments. It loads a snapshot a
 The gateway uses GitHub device sign-in and runs it itself. Desktop shows a code, the person enters it at GitHub, and the gateway receives the result directly from GitHub. It checks membership of the configured organization, then issues its own session to Desktop. No GitHub token is stored on the operator's computer.
 
 This needs one OAuth app with device flow enabled. It requests read access to organization membership and nothing else.
+
+### Controller state
+
+The Fleet controller's `<stateDir>/gateway.json` is different from the gateway's server-local registry:
+
+```json
+{
+  "version": 1,
+  "url": "https://<gateway-address>"
+}
+```
+
+`POST /orchestrator/api/gateway/device` starts the gateway's device flow. After the person finishes it at GitHub, `POST /orchestrator/api/gateway/session` stores the gateway token locally. The controller then reads `/gateway/api/fleet` and merges those deployments with its local `fleet.json`. Management requests use `<gateway>/gateway/api/deployment/<id>/<route>` and native Session requests use `<gateway>/gateway/native/<id>/…`; the deployment native tokens stay on the server.
 
 ## People and deployments
 
@@ -71,4 +85,3 @@ The fleet has one address. A server can start on its IP address with a short-liv
 
 - How the gateway reads deployment tokens that belong to other Linux users.
 - Whether the agent GitHub login and model credentials can be entered from Desktop, without a shell.
-- How a request names its deployment. The controller builds absolute paths from a deployment address in several places, so a header fits the current code better than a path prefix.

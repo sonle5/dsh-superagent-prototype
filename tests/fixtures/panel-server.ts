@@ -322,6 +322,14 @@ const SourceSave = z.object({ enabled: z.boolean(), config: z.unknown() })
 
 const ROUTES: { [K in keyof Api]: Route<K> } = {
   'GET fleet': { answer: async () => { await server.fleetLoading; return server.fleet } },
+  'GET gateway/status': { answer: () => ({ configured: false }) },
+  'POST gateway/device': { answer: () => ({
+    device_code: 'fixture-device-code', user_code: 'FIX-CODE', verification_uri: 'https://github.com/login/device',
+    expires_in: 900, interval: 5,
+  }) },
+  'POST gateway/session': { body: true, answer: () => ({
+    login: 'fixture-user', organization: 'fixture-org', expiresAt: '2099-01-01T00:00:00Z',
+  }) },
   'POST deployments/:id/select': { answer: ({ params }) => {
     if (!server.fleet.deployments.some(deployment => deployment.id === params.id)) {
       return refuse(404, `Deployment not found: ${params.id}`)

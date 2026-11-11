@@ -27,7 +27,7 @@ import { settingsView } from './views/settings.ts'
 import { sourcesStatus, type SetupState } from './views/sources.ts'
 import { decisionList, search, threadDetail, threadList } from './views/threads.ts'
 import { executorLoad, ticketDetail, ticketList } from './views/tickets.ts'
-import { Fleet, FleetControlError, redactSensitive, type FleetAction } from './fleet.ts'
+import { Fleet, FleetControlError, managementApi, redactSensitive, type FleetAction, type FleetNativeTarget } from './fleet.ts'
 import { INTERNAL_HEADER } from './native-transport.ts'
 import { matchesNativeToken } from './native-auth.ts'
 import { LIMITS } from '../limits.ts'
@@ -144,10 +144,14 @@ export type PromptsView = ReturnType<typeof promptsView>
 interface Input<K extends keyof Api> {
   params: RouteParams<K>; query: Record<string, string>; body: (maxBytes?: number) => Promise<unknown>
 }
-type Routes = { [K in keyof Api]: (input: Input<K>) => ApiResponse<K> | Promise<ApiResponse<K>> }
-type ControllerRoutes = Pick<Routes, 'GET fleet' | 'POST deployments/:id/select' | 'POST fleet/:id/start' | 'POST fleet/:id/stop'
-  | 'POST fleet/:id/restart'>
-type RouteTable = Partial<Routes>
+type GatewayRouteKey = 'GET gateway/status' | 'POST gateway/device' | 'POST gateway/session'
+type FleetRouteKey = 'GET fleet' | 'POST deployments/:id/select' | 'POST fleet/:id/start' | 'POST fleet/:id/stop'
+  | 'POST fleet/:id/restart'
+type ControllerRouteKey = GatewayRouteKey | FleetRouteKey
+type RouteHandler<K extends keyof Api> = (input: Input<K>) => ApiResponse<K> | Promise<ApiResponse<K>>
+type Routes = { [K in Exclude<keyof Api, GatewayRouteKey>]: RouteHandler<K> }
+type ControllerRoutes = { [K in ControllerRouteKey]: RouteHandler<K> }
+type RouteTable = { [K in keyof Api]?: RouteHandler<K> }
 const offset = z.coerce.number().int().nonnegative().catch(0)
 const limit = (fallback: number, max: number) => z.coerce.number().int().positive().catch(fallback).transform(value => Math.min(max, value))
 const TicketsQuery = z.object({ state: z.enum(TICKET_FILTERS).catch('open'), offset, limit: limit(20, 1000) })
@@ -172,8 +176,8 @@ function routes(runtime: HttpHost, fleet: Fleet): Routes {
       throw error
     }
   }
-  const select = (id: string): { selected: string } => {
-    try { return fleet.select(id) }
+  const select = async (id: string): Promise<{ selected: string }> => {
+    try { return await fleet.select(id) }
     catch (error) {
       if (error instanceof FleetControlError) throw new RouteError(error.status, error.message)
       throw error
@@ -181,7 +185,7 @@ function routes(runtime: HttpHost, fleet: Fleet): Routes {
   }
   return {
     'GET fleet': () => fleet.view(),
-    'POST deployments/:id/select': ({ params }) => select(params.id),
+    'POST deployments/:id/select': async ({ params }) => select(params.id),
     'POST fleet/:id/start': ({ params }) => control(params.id, 'start'),
     'POST fleet/:id/stop': ({ params }) => control(params.id, 'stop'),
     'POST fleet/:id/restart': ({ params }) => control(params.id, 'restart'),
@@ -252,8 +256,15 @@ function controllerRoutes(fleet: Fleet): ControllerRoutes {
       throw error
     }
   }
-  const select = (id: string): { selected: string } => {
-    try { return fleet.select(id) }
+  const select = async (id: string): Promise<{ selected: string }> => {
+    try { return await fleet.select(id) }
+    catch (error) {
+      if (error instanceof FleetControlError) throw new RouteError(error.status, error.message)
+      throw error
+    }
+  }
+  const gateway = async <T>(work: () => Promise<T>): Promise<T> => {
+    try { return await work() }
     catch (error) {
       if (error instanceof FleetControlError) throw new RouteError(error.status, error.message)
       throw error
@@ -261,6 +272,12 @@ function controllerRoutes(fleet: Fleet): ControllerRoutes {
   }
   return {
     'GET fleet': () => fleet.view(),
+    'GET gateway/status': () => fleet.gatewayStatus(),
+    'POST gateway/device': () => gateway(() => fleet.startGatewayDevice()),
+    'POST gateway/session': async ({ body }) => gateway(async () => {
+      const request = z.object({ device_code: z.string().min(1) }).parse(await body())
+      return fleet.completeGatewaySession(request.device_code)
+    }),
     'POST deployments/:id/select': ({ params }) => select(params.id),
     'POST fleet/:id/start': ({ params }) => control(params.id, 'start'),
     'POST fleet/:id/stop': ({ params }) => control(params.id, 'stop'),
@@ -292,8 +309,8 @@ function registerManagement(ctx: Context, stateDir: string, runtime?: HttpHost):
     const method = req.method ?? 'GET'
     // Fleet lifecycle belongs to the control plane. A deployment exposes only its own management API.
     if (!matchesRoute(DEPLOYMENT_ROUTES, method, suffix.split('/'))) throw new RouteError(404, 'Unknown operation')
-    let target: ReturnType<Fleet['managementTarget']>
-    try { target = fleet.managementTarget(id) }
+    let target: FleetNativeTarget
+    try { target = await fleet.managementTarget(id) }
     catch (error) {
       if (error instanceof FleetControlError) throw new RouteError(error.status, error.message)
       throw error
@@ -301,7 +318,7 @@ function registerManagement(ctx: Context, stateDir: string, runtime?: HttpHost):
     const raw = method === 'GET' || method === 'HEAD' ? Buffer.alloc(0)
       : await readBodyBytes(req, 4 * LIMITS.promptMaxChars.max + 4096)
     const payload = raw.toString('utf8')
-    const targetUrl = new URL(`/orchestrator/api/${suffix}`, target.url)
+    const targetUrl = new URL(managementApi(target, suffix), target.url)
     targetUrl.search = url.search
     let response: Response
     try {
