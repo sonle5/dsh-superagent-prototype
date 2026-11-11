@@ -29,6 +29,7 @@ Read the numbered documents in order; each builds only on the ones before it.
 - [006 Deployment](docs/006-deployment.md): manual setup for one repository or a Desktop-managed fleet, configuration, upgrades and troubleshooting
 - [007 Architecture](docs/007-architecture.md)
 - [008 Cookbook](docs/008-cookbook.md): adding a Source
+- [009 Cloud fleet](docs/009-cloud-fleet.md): design for an always-on fleet on a shared server; not implemented yet
 
 ## Development
 
