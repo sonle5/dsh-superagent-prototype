@@ -33,13 +33,22 @@ afterEach(async () => {
   for (const dispose of cleanup.splice(0).reverse()) await dispose()
 })
 
-async function listen(server: Server): Promise<string> {
+async function listen(server: Server, port = 0): Promise<string> {
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject)
-    server.listen(0, '127.0.0.1', () => resolve())
+    server.listen(port, '127.0.0.1', () => resolve())
   })
   cleanup.push(() => new Promise<void>(resolve => server.close(() => resolve())))
   return `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+}
+
+/** A loopback port nothing listens on yet, for a deployment that starts after the controller. */
+async function freePort(): Promise<number> {
+  const server = createServer()
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', () => resolve()))
+  const { port } = server.address() as AddressInfo
+  await new Promise<void>(resolve => server.close(() => resolve()))
+  return port
 }
 
 /** A Desktop profile with no Sessions of its own: empty baselines and a ready event stream. */
@@ -151,6 +160,7 @@ async function controllerHarness(state: string, local: LocalDesktop = {}): Promi
 
 async function peerHarness(options: {
   stateDir: string
+  port?: number
   onHttp?: (envelope: RpcEnvelope) => PeerReply | Promise<PeerReply>
   onStream?: (request: StreamRequest, send: (value: unknown) => void) => void | Promise<void>
 }): Promise<{
@@ -158,6 +168,8 @@ async function peerHarness(options: {
   calls: RpcEnvelope[]
   streamRequests: StreamRequest[]
   uplinks: unknown[]
+  /** Stop serving, as a restarting deployment does: drop its Remote streams and free its port. */
+  stop: () => Promise<void>
 }> {
   const calls: RpcEnvelope[] = []
   const streamRequests: StreamRequest[] = []
@@ -206,7 +218,16 @@ async function peerHarness(options: {
       })
     })
   })
-  return { url: await listen(server), calls, streamRequests, uplinks }
+  return {
+    url: await listen(server, options.port),
+    calls,
+    streamRequests,
+    uplinks,
+    stop: async () => {
+      for (const client of mux.clients) client.terminate()
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    },
+  }
 }
 
 function frameReader(socket: WebSocket): () => Promise<Record<string, unknown>> {
@@ -1313,6 +1334,8 @@ it('applies a later Session-control baseline as projection updates after the agg
         type: 'baseline',
         value: {
           projections: {
+            // No committed event yet: a projection frame cannot carry its seq, so it sends nothing.
+            'blank-session': { asOfSeq: -1, values: { title: 'Blank' } },
             'loop-session': { asOfSeq: 5, values: { title: 'Later baseline' } },
             'late-session': { asOfSeq: 4, values: { title: 'Late Session' } },
           },
@@ -1365,22 +1388,20 @@ it('applies a later Session-control baseline as projection updates after the agg
   const updates = [await next(), await next()]
   expect(updates).toEqual(expect.arrayContaining([
     expect.objectContaining({
-      value: expect.objectContaining({
+      value: {
         type: 'projection',
         sessionId: nativeSessionId('loop', 'loop-session'),
-        key: 'title',
-        value: 'onenexus-team/inference-support-loop · Later baseline',
         seq: 5,
-      }),
+        changes: [{ key: 'title', val: 'onenexus-team/inference-support-loop · Later baseline' }],
+      },
     }),
     expect.objectContaining({
-      value: expect.objectContaining({
+      value: {
         type: 'projection',
         sessionId: nativeSessionId('loop', 'late-session'),
-        key: 'title',
-        value: 'onenexus-team/inference-support-loop · Late Session',
         seq: 4,
-      }),
+        changes: [{ key: 'title', val: 'onenexus-team/inference-support-loop · Late Session' }],
+      },
     }),
   ]))
 })
@@ -1594,6 +1615,142 @@ it('keeps Desktop Workspace, control, and event streams open when every deployme
   socket.send(JSON.stringify({ type: 'open', streamId: 'events', endpoint: '$events', payload: { args: {} } }))
   expect(await next()).toMatchObject({ type: 'item', streamId: 'events', value: { type: 'ready' } })
   socket.send(JSON.stringify({ type: 'cancel', streamId: 'events' }))
+})
+
+it('adds a deployment that starts after the Workspace, control, and event streams opened', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'dsh-native-late-start-'))
+  cleanup.push(() => rmSync(state, { recursive: true, force: true }))
+  const port = await freePort()
+  writeFileSync(join(state, 'fleet.json'), JSON.stringify({
+    version: 1,
+    controlScript: '/usr/bin/true',
+    logDir: state,
+    deployments: [{ id: 'sglang', profile: 'superagent-sglang', repository: 'onenexus-team/sglang',
+      url: `http://127.0.0.1:${port}`, stateDir: join(state, 'sglang'), workspace: '/tmp/sglang' }],
+  }))
+  const controller = await controllerHarness(state)
+  const workspaces = await openMux(controller)
+  workspaces.socket.send(JSON.stringify({ type: 'open', streamId: 'workspaces', endpoint: 'workspace/follow', payload: { args: [] } }))
+  expect(await workspaces.next()).toMatchObject({ value: { type: 'baseline', value: { items: [] } } })
+  const control = await openMux(controller)
+  control.socket.send(JSON.stringify({ type: 'open', streamId: 'control', endpoint: 'session/control', payload: { args: [] } }))
+  expect(await control.next()).toMatchObject({ value: { type: 'baseline', value: { projections: {} } } })
+  const events = await openMux(controller)
+  events.socket.send(JSON.stringify({ type: 'open', streamId: 'events', endpoint: '$events', payload: { args: {} } }))
+  const ready = await events.next()
+  expect(ready).toMatchObject({ value: { type: 'ready' } })
+  const controllerClientId = (ready.value as { clientId: string }).clientId
+
+  // The deployment starts only now, as when the operator starts it after Desktop opened following a reboot.
+  const sglang = await peerHarness({
+    stateDir: join(state, 'sglang'),
+    port,
+    onStream(request, send) {
+      if (request.endpoint === 'workspace/follow') {
+        send({
+          type: 'baseline',
+          value: {
+            items: [{
+              workspaceId: 'sglang-workspace',
+              path: '/tmp/sglang',
+              title: 'SGLang',
+              sessionIds: ['sglang-session'],
+              createdAt: '2026-01-01T00:00:00Z',
+              updatedAt: '2026-01-01T00:00:00Z',
+            }],
+            archivedSessionIds: [],
+            pinnedSessionIds: [],
+          },
+        })
+      } else if (request.endpoint === 'session/control') {
+        send({ type: 'baseline', value: { projections: { 'sglang-session': { asOfSeq: 2, values: { title: 'SGLang' } } } } })
+      } else if (request.endpoint === '$events') {
+        send({ type: 'ready', clientId: 'sglang-event-client', host: { home: '/Users/alice' } })
+        send({ type: 'emit', event: 'api-session/status', args: ['sglang-session', true] })
+      }
+    },
+  })
+
+  expect(await workspaces.next()).toMatchObject({
+    value: {
+      type: 'replace',
+      value: {
+        items: [{
+          workspaceId: nativeWorkspaceId('sglang', 'sglang-workspace'),
+          title: 'onenexus-team/sglang · SGLang',
+          sessionIds: [nativeSessionId('sglang', 'sglang-session')],
+        }],
+      },
+    },
+  })
+  expect(await control.next()).toMatchObject({
+    value: {
+      type: 'projection',
+      sessionId: nativeSessionId('sglang', 'sglang-session'),
+      seq: 2,
+      changes: [{ key: 'title', val: 'onenexus-team/sglang · SGLang' }],
+    },
+  })
+  expect(await events.next()).toMatchObject({
+    value: { type: 'emit', event: 'api-session/status', args: [nativeSessionId('sglang', 'sglang-session'), true] },
+  })
+  await nativeCall(controller, '$events/result', {
+    args: [{ clientId: controllerClientId, eventId: nativeEventId('sglang', 'sglang-approval'), outcome: { kind: 'next' } }],
+  })
+  expect(sglang.calls.map(call => call.payload)).toEqual([{
+    args: [{ clientId: 'sglang-event-client', eventId: 'sglang-approval', outcome: { kind: 'next' } }],
+  }])
+})
+
+it('resubscribes a restarted deployment and replaces its Workspaces', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'dsh-native-restart-'))
+  cleanup.push(() => rmSync(state, { recursive: true, force: true }))
+  const workspaceStream = (id: string, title: string) => (request: StreamRequest, send: (value: unknown) => void): void => {
+    if (request.endpoint !== 'workspace/follow') return
+    send({
+      type: 'baseline',
+      value: {
+        items: [{
+          workspaceId: id,
+          path: `/tmp/${id}`,
+          title,
+          sessionIds: [`${id}-session`],
+          createdAt: '2026-01-01T00:00:00Z',
+          updatedAt: '2026-01-01T00:00:00Z',
+        }],
+        archivedSessionIds: [],
+        pinnedSessionIds: [],
+      },
+    })
+  }
+  const before = await peerHarness({ stateDir: join(state, 'sglang'), onStream: workspaceStream('before', 'Before restart') })
+  writeFileSync(join(state, 'fleet.json'), JSON.stringify({
+    version: 1,
+    controlScript: '/usr/bin/true',
+    logDir: state,
+    deployments: [{ id: 'sglang', profile: 'superagent-sglang', repository: 'onenexus-team/sglang',
+      url: before.url, stateDir: join(state, 'sglang'), workspace: '/tmp/sglang' }],
+  }))
+  const controller = await controllerHarness(state)
+  const { socket, next } = await openMux(controller)
+  socket.send(JSON.stringify({ type: 'open', streamId: 'workspaces', endpoint: 'workspace/follow', payload: { args: [] } }))
+  expect(await next()).toMatchObject({
+    value: { type: 'baseline', value: { items: [{ workspaceId: nativeWorkspaceId('sglang', 'before') }] } },
+  })
+
+  await before.stop()
+  await peerHarness({
+    stateDir: join(state, 'sglang'),
+    port: Number(new URL(before.url).port),
+    onStream: workspaceStream('after', 'After restart'),
+  })
+
+  expect(await next()).toMatchObject({
+    value: {
+      type: 'replace',
+      value: { items: [{ workspaceId: nativeWorkspaceId('sglang', 'after'), title: 'onenexus-team/sglang · After restart' }] },
+    },
+  })
 })
 
 it('routes interactive terminal streams and their uplink frames to the Session owner', async () => {

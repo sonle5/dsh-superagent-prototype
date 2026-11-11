@@ -35,6 +35,9 @@ const SESSION_SEARCH_RESULT_LIMIT = 20
 const PEER_REQUEST_TIMEOUT_MS = 10_000
 const STREAM_BASELINE_TIMEOUT_MS = 2_000
 const UPSTREAM_OPEN_TIMEOUT_MS = 10_000
+/** First delay before an aggregate stream reopens a deployment that dropped or never answered; it doubles to the maximum. */
+const PEER_RETRY_INITIAL_MS = 1_000
+const PEER_RETRY_MAX_MS = 10_000
 const HOP_HEADERS = new Set([
   'connection',
   'content-length',
@@ -641,6 +644,53 @@ function openUpstreamStream(
   }
 }
 
+interface FollowPeerOptions {
+  onItem(value: unknown): void
+  /** The peer's stream failed or ended. Called once per outage, not again for each failed reopen. */
+  onDown(error?: RemoteStreamFailure): void
+}
+
+/**
+ * Follow one deployment's Workspace, control, or event stream for as long as the aggregate stream is open.
+ * A deployment that is offline when the stream opens, or that restarts later, is reopened with backoff, so one started
+ * after Desktop joins the aggregate stream instead of staying out of it until Desktop reconnects.
+ */
+function followPeer(target: FleetNativeTarget, endpoint: string, options: FollowPeerOptions): UpstreamStream {
+  let closed = false
+  let up = true
+  let delay = PEER_RETRY_INITIAL_MS
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const open = (): UpstreamStream => openUpstreamStream(target, endpoint, { args: {} }, {
+    onItem(value) {
+      up = true
+      delay = PEER_RETRY_INITIAL_MS
+      options.onItem(value)
+    },
+    onError(error) { down(error) },
+    onEnd() { down() },
+  })
+  const down = (error?: RemoteStreamFailure): void => {
+    if (closed) return
+    if (up) {
+      up = false
+      options.onDown(error)
+    }
+    timer = setTimeout(() => { stream = open() }, delay)
+    delay = Math.min(delay * 2, PEER_RETRY_MAX_MS)
+  }
+  let stream = open()
+  return {
+    send() {},
+    end() {},
+    close() {
+      if (closed) return
+      closed = true
+      clearTimeout(timer)
+      stream.close()
+    },
+  }
+}
+
 type MuxClientMessage =
   | { type: 'open'; streamId: string; endpoint: string; payload: unknown }
   | { type: 'item'; streamId: string; value?: unknown }
@@ -790,10 +840,11 @@ function aggregateWorkspaceStream(
 
   for (const target of targets) {
     const peer = peers.get(target.id)!
-    handles.push(openUpstreamStream(target, 'workspace/follow', { args: {} }, {
+    handles.push(followPeer(target, 'workspace/follow', {
       onItem(value) {
         if (!isRecord(value) || typeof value.type !== 'string') return
         if ((value.type === 'baseline' || value.type === 'replace') && isRecord(value.value)) {
+          peer.ended = false
           applyBaseline(target, value.value)
           if (ready) run(() => sendMuxItem(client, streamId, { type: 'replace', value: baselineValue() }))
           else maybeFlush()
@@ -835,14 +886,9 @@ function aggregateWorkspaceStream(
           run(() => sendMuxItem(client, streamId, { type: 'pinned', pinnedSessionIds: pinned() }))
         }
       },
-      onError(error) {
+      onDown(error) {
         peer.ended = true
-        warn(`Workspace stream for ${peerLabel(target)} ended: ${error.message}`)
-        maybeFlush()
-        maybeEnd()
-      },
-      onEnd() {
-        peer.ended = true
+        if (error !== undefined) warn(`Workspace stream for ${peerLabel(target)} ended: ${error.message}`)
         maybeFlush()
         maybeEnd()
       },
@@ -920,26 +966,26 @@ function aggregateControlStream(
     if (!isRecord(baseline) || !isRecord(baseline.projections)) return
     for (const [sessionId, value] of Object.entries(baseline.projections)) {
       if (!isRecord(value) || !isRecord(value.values)) continue
-      for (const [key, projection] of Object.entries(value.values)) {
-        sendMuxItem(client, streamId, {
-          type: 'projection',
-          sessionId,
-          key,
-          value: projection,
-          seq: typeof value.asOfSeq === 'number' ? value.asOfSeq : 0,
-        })
-      }
+      // A projection frame carries the seq of a committed event; the client rejects any other and drops the stream.
+      if (!Number.isSafeInteger(value.asOfSeq) || (value.asOfSeq as number) < 0) continue
+      sendMuxItem(client, streamId, {
+        type: 'projection',
+        sessionId,
+        seq: value.asOfSeq,
+        changes: Object.entries(value.values).map(([key, val]) => ({ key, val })),
+      })
     }
   }
 
   for (const target of targets) {
-    handles.push(openUpstreamStream(target, 'session/control', { args: {} }, {
+    handles.push(followPeer(target, 'session/control', {
       onItem(value) {
         if (!isRecord(value)) return
         const transformed = peerSessionControlValue(value, target)
         if (!isRecord(transformed)) return
         if (transformed.type === 'baseline' && isRecord(transformed.value)) {
           const late = ready
+          ended.delete(target.id)
           baselines.set(target.id, transformed.value)
           if (late) sendLateBaseline(transformed.value)
           maybeFlush()
@@ -948,14 +994,9 @@ function aggregateControlStream(
         const operation = (): void => { sendMuxItem(client, streamId, transformed) }
         run(operation)
       },
-      onError(error) {
+      onDown(error) {
         ended.add(target.id)
-        warn(`Session control stream for ${peerLabel(target)} ended: ${error.message}`)
-        maybeFlush()
-        maybeEnd()
-      },
-      onEnd() {
-        ended.add(target.id)
+        if (error !== undefined) warn(`Session control stream for ${peerLabel(target)} ended: ${error.message}`)
         maybeFlush()
         maybeEnd()
       },
@@ -1023,10 +1064,11 @@ function aggregateEventsStream(
   }
 
   for (const target of targets) {
-    handles.push(openUpstreamStream(target, '$events', { args: {} }, {
+    handles.push(followPeer(target, '$events', {
       onItem(value) {
         if (!isRecord(value) || typeof value.type !== 'string') return
         if (value.type === 'ready') {
+          ended.delete(target.id)
           if (typeof value.clientId === 'string') {
             localClientIds.set(target.id, value.clientId)
             bindEventClient(state, target.id, controllerClientId, value.clientId)
@@ -1057,15 +1099,10 @@ function aggregateEventsStream(
           sendMuxItem(client, streamId, { ...value, eventId: nativeEventId(target.id, value.eventId) })
         }
       },
-      onError(error) {
+      onDown(error) {
         ended.add(target.id)
         unbindEventClient(state, target.id, controllerClientId)
-        warn(`Session event stream for ${peerLabel(target)} ended: ${error.message}`)
-        maybeEnd()
-      },
-      onEnd() {
-        ended.add(target.id)
-        unbindEventClient(state, target.id, controllerClientId)
+        if (error !== undefined) warn(`Session event stream for ${peerLabel(target)} ended: ${error.message}`)
         maybeEnd()
       },
     }))
