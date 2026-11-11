@@ -343,11 +343,11 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/tools/main.ts` | The main Session's tools |
 | `src/app/tools/executor.ts` | An Executor Session's tools |
 | `src/app/http.ts` | The `/orchestrator/api` routes: signed-panel or native-capability admission, the same-origin check, request limits, one status per kind of failure and validated forwarding to registered deployment APIs |
-| `src/app/gateway.ts` | The `/gateway/api` routes: GitHub device sign-in, organization membership admission, a signed gateway session, the server-local deployment registry, and deployment-id forwarding to the credential-protected management API |
+| `src/app/gateway.ts` | The `/gateway` routes: GitHub device sign-in, organization membership admission, a signed gateway session, the server-local deployment registry, deployment-id management forwarding, and authenticated native HTTP and WebSocket forwarding |
 | `src/app/fleet.ts` | The local fleet registry, aggregate reads from independent loopback deployments, native-capability reads, stopped-versus-unreachable status, recent log tails, and lifecycle actions restricted to registered DSH profiles |
 | `src/app/native-auth.ts` | The private per-deployment capability shared by the controller and repository halves of native Session routing |
 | `src/app/native-aggregate.ts` | Deployment-scoped Session, Workspace and Remote-event identities; request-owner selection; inbound and outbound identity remapping; repository-prefixed titles; and bounded Session-list and search merges |
-| `src/app/native-transport.ts` | The controller and repository halves of deployment-aware native DSH transport: one aggregate Session/Workspace/control/event view, owner-routed unary and streaming calls, per-peer timeouts and partial availability, cancellation, per-stream event correlation and operator-peer compatibility; HTTP retains a durable no-interaction peer while every mux mints its own answer peer so closing a stream cannot invalidate API requests |
+| `src/app/native-transport.ts` | The controller and repository halves of deployment-aware native DSH transport: one aggregate Session/Workspace/control/event view, owner-routed unary and streaming calls, path-preserving target bases for gateway routing, per-peer timeouts and partial availability, cancellation, per-stream event correlation and operator-peer compatibility; HTTP retains a durable no-interaction peer while every mux mints its own answer peer so closing a stream cannot invalidate API requests |
 | `src/app/api.ts` | `Api`, every route with its parameters, query, body and response, and the filters of the lists; it imports only types, so the panel bundles it |
 | `src/app/views/text.ts` | The two forms of a view's text: `preview`, plain text on one line, and `markdown` without HTML; `plain` and `readable` |
 | `src/app/views/records.ts` | The rows the views share: Triggers, Tickets, Threads, Decisions and Channel links, and `ownersOf`, the owners of follow-ups as one request reads them |
@@ -431,7 +431,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/delivery.spec.ts` | `AgentDelivery` |
 | `tests/retry-health.spec.ts`, `tests/role-models.spec.ts` | Model budget retries, and the models of the two roles |
 | `tests/runtime.spec.ts` | The whole application on a simulated DeepSeek Harness host, through tools and HTTP |
-| `tests/gateway.spec.ts` | The public gateway: GitHub device and organization sign-in, session-cookie issuance, registry reads, same-origin admission and deployment management forwarding |
+| `tests/gateway.spec.ts` | The public gateway: GitHub device and organization sign-in, session-cookie and native-token issuance, registry reads, same-origin admission, and deployment management/native HTTP/WebSocket forwarding |
 | `tests/tools.spec.ts` | The Sessions' tools: what `orchestrator_read` reads for each role, and the shapes and checks of the other main Session tools |
 | `tests/runtime-concurrency.spec.ts` | Work that overlaps: Triggers during a pass, Tickets that change during deliveries and launches |
 | `tests/http.spec.ts` | Management admission, same-origin and loopback checks, the status of each kind of failure, the body limit, path parameters, queries and the validated deployment-management proxy |

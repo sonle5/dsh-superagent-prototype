@@ -26,6 +26,7 @@ import { matchesNativeToken, nativeToken } from './native-auth.ts'
 
 const NATIVE_API = '/orchestrator/native/api'
 const NATIVE_MUX = '/orchestrator/native/remote.mux'
+const PEER_NATIVE_MUX = 'orchestrator/native/remote.mux'
 export const INTERNAL_REQUEST_HEADER = 'x-orchestrator-request'
 export const INTERNAL_HEADER = 'x-dsh-superagent-native'
 /** Marks the controller's request to its own API; its value lives only in this process. */
@@ -385,7 +386,7 @@ async function callPeer(
   envelope: ClientRpcEnvelope,
   signal: AbortSignal,
 ): Promise<ServerRpcEnvelope> {
-  const targetUrl = new URL(`/orchestrator/native${sourcePath}`, target.url)
+  const targetUrl = new URL(`orchestrator/native${sourcePath}`, target.url)
   const payload = outboundPeerPayload(target, envelope.method, envelope.payload)
   const response = await fetch(targetUrl, {
     method: 'POST',
@@ -559,7 +560,7 @@ function openUpstreamStream(
   options: OpenUpstreamOptions,
 ): UpstreamStream {
   const streamId = randomUUID()
-  const socket = new WebSocket(webSocketUrl(target.url, NATIVE_MUX), { headers: nativeHeaders(target) })
+  const socket = new WebSocket(webSocketUrl(target.url, PEER_NATIVE_MUX), { headers: nativeHeaders(target) })
   let closed = false
   let ended = false
   let opened = false

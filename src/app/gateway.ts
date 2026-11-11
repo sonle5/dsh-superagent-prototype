@@ -3,11 +3,14 @@ import type { Context } from '@deepseek-ai/cordis'
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { Duplex } from 'node:stream'
 import { isAbsolute, join } from 'node:path'
+import { Readable } from 'node:stream'
+import { WebSocket, WebSocketServer, type RawData } from 'ws'
 import { z } from 'zod'
 import { DEPLOYMENT_ROUTES, matchesRoute } from './api.ts'
 import { nativeToken } from './native-auth.ts'
-import { INTERNAL_HEADER } from './native-transport.ts'
+import { INTERNAL_HEADER, INTERNAL_REQUEST_HEADER } from './native-transport.ts'
 import { LIMITS } from '../limits.ts'
 
 const PREFIX = '/gateway/api'
@@ -16,6 +19,7 @@ const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000
 const GITHUB_DEVICE_URL = 'https://github.com/login/device/code'
 const GITHUB_TOKEN_URL = 'https://github.com/login/oauth/access_token'
 const GITHUB_USER_URL = 'https://api.github.com/user'
+const NATIVE_MAX_BODY_BYTES = 300 * 1024 * 1024
 
 const organization = z.string().trim().regex(/^[A-Za-z0-9_.-]+$/, 'GitHub organization login')
 const Deployment = z.object({
@@ -118,8 +122,9 @@ function sessionValue(stateDir: string, login: string, expiresAt: number): strin
 }
 
 function sessionLogin(stateDir: string, request: IncomingMessage): string | undefined {
-  const match = new RegExp(`(?:^|;\\s*)${COOKIE}=([^;]+)`).exec(request.headers.cookie ?? '')
-  const value = match?.[1]
+  const header = request.headers[INTERNAL_HEADER]
+  const value = typeof header === 'string' ? header
+    : new RegExp(`(?:^|;\\s*)${COOKIE}=([^;]+)`).exec(request.headers.cookie ?? '')?.[1]
   if (value === undefined) return undefined
   const parts = value.split('.')
   if (parts.length !== 3) return undefined
@@ -130,10 +135,11 @@ function sessionLogin(stateDir: string, request: IncomingMessage): string | unde
   return actual.byteLength === expected.byteLength && timingSafeEqual(actual, expected) ? login : undefined
 }
 
-function setSession(res: ServerResponse, stateDir: string, login: string, secure: boolean): string {
+function setSession(res: ServerResponse, stateDir: string, login: string, secure: boolean): { expiresAt: number; nativeToken: string } {
   const expiresAt = Date.now() + SESSION_TTL_MS
-  res.setHeader('set-cookie', `${COOKIE}=${sessionValue(stateDir, login, expiresAt)}; Path=/; HttpOnly; SameSite=Lax${secure ? '; Secure' : ''}`)
-  return String(expiresAt)
+  const nativeToken = sessionValue(stateDir, login, expiresAt)
+  res.setHeader('set-cookie', `${COOKIE}=${nativeToken}; Path=/; HttpOnly; SameSite=Lax${secure ? '; Secure' : ''}`)
+  return { expiresAt, nativeToken }
 }
 
 type FetchLike = (url: string, init?: RequestInit) => Promise<Response>
@@ -175,8 +181,9 @@ async function issueSession(
     json(res, 403, { error: `GitHub account is not a member of ${registry.organization}` })
     return
   }
+  const session = setSession(res, stateDir, user.login, secure)
   json(res, 200, { login: user.login, organization: registry.organization,
-    expiresAt: setSession(res, stateDir, user.login, secure) })
+    expiresAt: String(session.expiresAt), nativeToken: session.nativeToken })
 }
 
 async function forward(
@@ -224,10 +231,113 @@ async function forward(
   }
 }
 
+function nativeHeaders(deployment: RegistryConfig['deployments'][number]): Record<string, string> {
+  const token = nativeToken(deployment.stateDir, false)
+  if (token === undefined) throw new GatewayError(503, `Deployment native capability is missing for ${deployment.id}`)
+  return {
+    host: new URL(deployment.url).host,
+    origin: deployment.url,
+    [INTERNAL_REQUEST_HEADER]: '1',
+    [INTERNAL_HEADER]: token,
+  }
+}
+
+async function forwardNativeHttp(
+  req: IncomingMessage,
+  res: ServerResponse,
+  deployment: RegistryConfig['deployments'][number],
+): Promise<void> {
+  const source = new URL(req.url ?? '/', 'http://dsh.internal')
+  const target = new URL('/orchestrator/native/api', deployment.url)
+  target.search = source.search
+  try {
+    const body = req.method === undefined || req.method === 'GET' || req.method === 'HEAD' ? undefined
+      : Readable.toWeb(req) as ReadableStream<Uint8Array>
+    const response = await fetch(target, {
+      method: req.method ?? 'GET',
+      headers: { ...nativeHeaders(deployment), ...req.headers['content-type'] ? { 'content-type': req.headers['content-type'] } : {} },
+      ...body ? { body, duplex: 'half' } : {},
+      redirect: 'error',
+      signal: abortOnDisconnect(res).signal,
+    } as RequestInit & { duplex: 'half' })
+    res.writeHead(response.status, {
+      'content-type': response.headers.get('content-type') ?? 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+      'x-content-type-options': 'nosniff',
+    })
+    res.end(await response.text())
+  } catch (error) {
+    if (res.headersSent) {
+      res.end()
+      return
+    }
+    json(res, 502, { error: `Deployment native transport unavailable: ${error instanceof Error ? error.message : String(error)}` })
+  }
+}
+
+function abortOnDisconnect(res: ServerResponse): AbortController {
+  const abort = new AbortController()
+  res.on('close', () => {
+    if (!res.writableEnded) abort.abort()
+  })
+  return abort
+}
+
+function proxyNativeMux(
+  ctx: Context,
+  stateDir: string,
+  deployment: RegistryConfig['deployments'][number],
+): { handler: (request: IncomingMessage, socket: Duplex, head: Buffer) => Promise<void>; close: () => void } {
+  const server = new WebSocketServer({ noServer: true, perMessageDeflate: false })
+  const handler = async (request: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> => {
+    if (sessionLogin(stateDir, request) === undefined) {
+      socket.destroy()
+      return
+    }
+    const target = new URL('/orchestrator/native/remote.mux', deployment.url)
+    server.handleUpgrade(request, socket, head, client => {
+      let opened = false
+      const early: { data: RawData; binary: boolean }[] = []
+      const hold = (data: RawData, binary: boolean): void => { early.push({ data, binary }) }
+      client.on('message', hold)
+      let upstream: WebSocket
+      try {
+        upstream = new WebSocket(target.toString().replace(/^http:/, 'ws:'), { headers: nativeHeaders(deployment) })
+      } catch (error) {
+        client.close(1011, 'Deployment native transport unavailable')
+        ctx.logger.warn('Gateway native websocket failed for %s: %s', deployment.id,
+          error instanceof Error ? error.message : String(error))
+        return
+      }
+      const closeBoth = (): void => {
+        client.terminate()
+        upstream.terminate()
+      }
+      upstream.on('open', () => {
+        opened = true
+        client.off('message', hold)
+        for (const item of early.splice(0)) upstream.send(item.data, { binary: item.binary })
+      })
+      upstream.on('message', data => {
+        if (client.readyState === WebSocket.OPEN) client.send(data)
+      })
+      upstream.on('close', () => client.close())
+      upstream.on('error', () => {
+        if (!opened) client.close(1011, 'Deployment native transport unavailable')
+        else closeBoth()
+      })
+      client.on('close', () => upstream.close())
+      client.on('error', closeBoth)
+    })
+  }
+  return { handler, close: () => server.close() }
+}
+
 /** Register the gateway API on DSH's configured public Web server. */
 export function registerGateway(ctx: Context, stateDir: string, fetcher: FetchLike = fetch): () => void {
   const deploymentPath = /^\/gateway\/api\/deployment\/([a-z0-9][a-z0-9-]*)\/(.+)$/
-  return ctx.webServer.register({ kind: 'prefix', path: '/gateway', handler: async (req, res) => {
+  const nativePath = /^\/gateway\/native\/([a-z0-9][a-z0-9-]*)\/api(?:\/.*)?$/
+  const disposeHttp = ctx.webServer.register({ kind: 'prefix', path: '/gateway', handler: async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://dsh.internal')
     try {
       const registry = loadRegistry(stateDir)
@@ -255,6 +365,13 @@ export function registerGateway(ctx: Context, stateDir: string, fetcher: FetchLi
           deployments: registry.deployments.map(({ id, profile, repository }) => ({ id, profile, repository })) })
         return
       }
+      const native = nativePath.exec(url.pathname)
+      if (native) {
+        const target = registry.deployments.find(item => item.id === native[1])
+        if (!target) throw new GatewayError(404, `Deployment not found: ${native[1]}`)
+        await forwardNativeHttp(req, res, target)
+        return
+      }
       const deployment = deploymentPath.exec(url.pathname)
       if (deployment) {
         const target = registry.deployments.find(item => item.id === deployment[1])
@@ -269,4 +386,20 @@ export function registerGateway(ctx: Context, stateDir: string, fetcher: FetchLi
       json(res, status, { error: status === 500 ? 'Gateway request failed' : error instanceof Error ? error.message : String(error) })
     }
   } })
+  let registry: RegistryConfig | undefined
+  try { registry = loadRegistry(stateDir) } catch { /* The HTTP route reports the invalid registry. */ }
+  const nativeRoutes = (registry?.deployments ?? []).map(deployment => {
+    const route = proxyNativeMux(ctx, stateDir, deployment)
+    return {
+      dispose: ctx.webServer.registerUpgrade({ path: `/gateway/native/${deployment.id}/remote.mux`, handler: route.handler }),
+      close: route.close,
+    }
+  })
+  return () => {
+    for (const route of nativeRoutes.reverse()) {
+      route.dispose()
+      route.close()
+    }
+    disposeHttp()
+  }
 }

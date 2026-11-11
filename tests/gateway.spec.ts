@@ -1,9 +1,13 @@
 import { createServer, type Server } from 'node:http'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import type { AddressInfo } from 'node:net'
+import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { Duplex } from 'node:stream'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
+import WebSocket from 'ws'
+import { WebSocketServer } from 'ws'
 import { registerGateway } from '../src/app/gateway.ts'
 import { nativeToken } from '../src/app/native-auth.ts'
 
@@ -14,6 +18,7 @@ const ORG_URL = 'https://api.github.com/orgs/example-org/members/member'
 
 const cleanup: (() => void | Promise<void>)[] = []
 afterEach(async () => { for (const dispose of cleanup.splice(0).reverse()) await dispose() })
+type UpgradeHandler = (request: IncomingMessage, socket: Duplex, head: Buffer) => Promise<void>
 
 async function listen(handler: (request: import('node:http').IncomingMessage, response: import('node:http').ServerResponse) => void):
 Promise<{ server: Server; url: string }> {
@@ -34,16 +39,29 @@ function gatewayFetch(member = true) {
 }
 
 async function serveGateway(stateDir: string, fetcher: ReturnType<typeof gatewayFetch>) {
-  let handler: ((request: import('node:http').IncomingMessage, response: import('node:http').ServerResponse) => Promise<void>) | undefined
+  let handler: ((request: IncomingMessage, response: ServerResponse) => Promise<void>) | undefined
+  const upgrades = new Map<string, UpgradeHandler>()
   registerGateway({
     webServer: {
       protocol: 'http:' as const,
       register: (route: { handler: typeof handler }) => { handler = route.handler; return () => { handler = undefined } },
+      registerUpgrade: (route: { path: string; handler: UpgradeHandler }) => {
+        upgrades.set(route.path, route.handler)
+        return () => upgrades.delete(route.path)
+      },
     },
   } as never, stateDir, fetcher as never)
   const { server, url } = await listen((request, response) => {
     if (handler === undefined) throw new Error('Gateway route is not installed')
     void handler(request, response)
+  })
+  server.on('upgrade', (request, socket, head) => {
+    const upgrade = upgrades.get(new URL(request.url ?? '/', url).pathname)
+    if (upgrade === undefined) {
+      socket.destroy()
+      return
+    }
+    void upgrade(request, socket, head)
   })
   const call = async (method: string, path: string, body?: unknown, headers: Record<string, string> = {}) => {
     const response = await fetch(`${url}${path}`, { method, headers, ...body === undefined ? {} : {
@@ -100,6 +118,64 @@ it('signs in a GitHub organization member and forwards one deployment management
   expect(await gateway.call('GET', '/gateway/api/fleet', undefined, { cookie: cookie!, origin: 'https://evil.example' }))
     .toMatchObject({ status: 403, body: { error: 'Same-origin gateway request required' } })
   expect(fetcher).toHaveBeenCalledTimes(4)
+})
+
+it('forwards native API and WebSocket traffic through one deployment route', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'dsh-gateway-native-'))
+  cleanup.push(() => rmSync(state, { recursive: true, force: true }))
+  const deploymentState = join(state, 'sglang-state')
+  const deploymentToken = nativeToken(deploymentState)!
+  const seen: { path?: string; host?: string; origin?: string; native?: string }[] = []
+  const target = await listen((request, response) => {
+    const native = request.headers['x-dsh-superagent-native']
+    seen.push({ path: request.url, host: request.headers.host, origin: request.headers.origin,
+      native: typeof native === 'string' ? native : native?.[0] })
+    if (request.url !== '/orchestrator/native/api' || request.headers['x-orchestrator-request'] !== '1'
+      || request.headers['x-dsh-superagent-native'] !== deploymentToken) {
+      response.writeHead(401).end(JSON.stringify({ error: 'unauthorized' }))
+      return
+    }
+    response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ type: 'native', ok: true }))
+  })
+  const targetWss = new WebSocketServer({ noServer: true, perMessageDeflate: false })
+  cleanup.push(() => new Promise<void>(resolve => targetWss.close(() => resolve())))
+  target.server.on('upgrade', (request, socket, head) => {
+    if (request.url !== '/orchestrator/native/remote.mux' || request.headers['x-orchestrator-request'] !== '1'
+      || request.headers['x-dsh-superagent-native'] !== deploymentToken) {
+      socket.destroy()
+      return
+    }
+    targetWss.handleUpgrade(request, socket, head, client => {
+      client.on('message', data => client.send(`echo:${data.toString()}`))
+    })
+  })
+  registry(state, target.url)
+  const gateway = await serveGateway(state, gatewayFetch())
+
+  await gateway.call('POST', '/gateway/api/device')
+  const session = await gateway.call('POST', '/gateway/api/session', { device_code: 'device-code' })
+  const gatewayToken = session.body.nativeToken as string
+  expect(gatewayToken).toMatch(/^member\.\d+\./)
+  expect(await gateway.call('POST', '/gateway/native/sglang/api', { method: 'session/list' }))
+    .toMatchObject({ status: 401 })
+  const native = await gateway.call('POST', '/gateway/native/sglang/api', { method: 'session/list' }, {
+    'x-dsh-superagent-native': gatewayToken,
+  })
+  expect(native).toMatchObject({ status: 200, body: { type: 'native', ok: true } })
+  expect(seen).toEqual([{ path: '/orchestrator/native/api', host: new URL(target.url).host, origin: target.url,
+    native: deploymentToken }])
+
+  const socket = new WebSocket(`${gateway.url.replace('http:', 'ws:')}/gateway/native/sglang/remote.mux`, {
+    headers: { 'x-dsh-superagent-native': gatewayToken },
+  })
+  cleanup.push(() => socket.terminate())
+  await new Promise<void>((resolve, reject) => {
+    socket.once('open', resolve)
+    socket.once('error', reject)
+  })
+  socket.send('hello')
+  await expect(new Promise<string>(resolve => socket.once('message', data => resolve(data.toString()))))
+    .resolves.toBe('echo:hello')
 })
 
 it('refuses a GitHub account outside the configured organization without a session', async () => {
