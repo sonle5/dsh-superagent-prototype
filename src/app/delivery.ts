@@ -39,9 +39,8 @@ export class AgentDelivery {
   constructor(private readonly ctx: Context, private readonly wakeId: string) {
     // A steer can race the end of its turn and remain in next-step after the driver becomes idle.
     // Promote relays at that boundary so a queued report cannot disappear without an unrelated wake.
-    ctx.on('agent/created', ({ agent }) => { this.wakePendingRelays(agent); return undefined })
     ctx.on('agent/status', ({ agent, status }) => {
-      if (status === 'idle') this.wakePendingRelays(agent)
+      if (status === 'idle') queueMicrotask(() => this.wakePendingRelays(agent))
     })
     ctx.on('session/event', (session, event) => {
       if (event.type !== 'user/message') return
@@ -49,8 +48,10 @@ export class AgentDelivery {
       if (id) this.seen.get(session)?.ids.add(id)
     })
   }
+  /** Promotes relays left in next-step by an earlier process, after the Session has finished resuming. */
+  recover(agent: Agent): void { this.wakePendingRelays(agent) }
   private wakePendingRelays(agent: Agent): void {
-    if (agent.id !== this.wakeId) return
+    if (agent.id !== this.wakeId || agent.status !== 'idle') return
     for (const message of [...agent.inbox.nextStep]) {
       if (isRelay(message) && agent.inbox.remove(message.id)) agent.followup(message)
     }

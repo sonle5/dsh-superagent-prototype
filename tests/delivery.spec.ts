@@ -37,7 +37,7 @@ function fixture(history: UserMessage[] = []) {
     inbox.nextStep.splice(0); inbox.nextTurn.splice(0)
     ctx.emit('session/event', agent.session, event(message))
   }
-  return { agent, agents, ctx, inbox, steer, followup, injected, open, read, close, flush, send, inject, holds, consume, signal }
+  return { agent, agents, ctx, delivery, inbox, steer, followup, injected, open, read, close, flush, send, inject, holds, consume, signal }
 }
 
 it.each(['queue', 'steer'] as const)('delivers %s as an orchestrator relay, deduplicating pending and consumed messages', async mode => {
@@ -78,6 +78,7 @@ it('promotes a relay stranded by a running turn ending before its next step', as
   const message = f.inbox.nextStep[0]!
   ;(f.agent as unknown as { status: string }).status = 'idle'
   f.ctx.emit('agent/status', { agent: f.agent, status: 'idle' })
+  await Promise.resolve()
   expect(f.followup).toHaveBeenCalledOnce()
   expect(f.followup).toHaveBeenCalledWith(message)
   expect(f.inbox.nextStep).toHaveLength(0)
@@ -89,7 +90,8 @@ it('promotes a relay already stranded in restored Session input', () => {
   const message = createUserMessage({ content: [{ type: 'text', text: 'old relay' }], source: {
     kind: 'dsh-superagent', form: 'relay' } })
   f.inbox.nextStep.push(message)
-  f.ctx.emit('agent/created', { agent: f.agent, source: 'resume' })
+  ;(f.agent as unknown as { status: string }).status = 'idle'
+  f.delivery.recover(f.agent)
   expect(f.followup).toHaveBeenCalledOnce()
   expect(f.followup).toHaveBeenCalledWith(message)
   expect(f.inbox.nextStep).toHaveLength(0)

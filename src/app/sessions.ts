@@ -152,6 +152,7 @@ export class Sessions {
     await this.decorate(result.agent)
     ctx.permissionPresets.set(result.agent.session, 'danger-full-access')
     await ctx.sessionController.rename({ sessionId: id as SessionId, title })
+    this.agentDelivery.recover(result.agent)
     return result.agent
   }
   /** Retarget every managed Session for `role`, including idle workers persisted for an open Ticket. */
