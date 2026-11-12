@@ -225,7 +225,8 @@ async function runOnboarding(config: RegistryConfig['onboarding'], request: unkn
   const [command, ...args] = config.command
   return await new Promise((resolve, reject) => {
     const child = spawn(command!, args, { stdio: ['pipe', 'pipe', 'pipe'] })
-    let output = ''
+    let stdout = ''
+    let stderr = ''
     let settled = false
     const finish = (error?: unknown, value?: unknown): void => {
       if (settled) return
@@ -238,13 +239,16 @@ async function runOnboarding(config: RegistryConfig['onboarding'], request: unkn
       child.kill('SIGTERM')
       finish(new GatewayError(504, 'Self-service onboarding timed out'))
     }, ONBOARDING_TIMEOUT_MS)
-    child.stdout.on('data', chunk => { output += chunk.toString('utf8') })
-    child.stderr.on('data', chunk => { output += chunk.toString('utf8') })
+    child.stdout.on('data', chunk => { stdout += chunk.toString('utf8') })
+    child.stderr.on('data', chunk => { stderr += chunk.toString('utf8') })
     child.once('error', error => finish(new GatewayError(502, `Self-service onboarding failed: ${error.message}`)))
     child.once('close', code => {
-      if (code !== 0) finish(new GatewayError(502, `Self-service onboarding failed: ${output.trim() || `exit ${code}`}`))
+      if (code !== 0) {
+        const output = [stdout, stderr].filter(Boolean).join('').trim()
+        finish(new GatewayError(502, `Self-service onboarding failed: ${output || `exit ${code}`}`))
+      }
       else {
-        try { finish(undefined, JSON.parse(output)) }
+        try { finish(undefined, JSON.parse(stdout)) }
         catch { finish(new GatewayError(502, 'Self-service onboarding returned invalid JSON')) }
       }
     })

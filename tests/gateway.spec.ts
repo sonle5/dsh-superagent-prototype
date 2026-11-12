@@ -97,7 +97,9 @@ function onboardingHelper(state: string, deploymentUrl: string): string {
   const requestsPath = join(state, 'onboard-requests')
   writeFileSync(path, `#!/usr/bin/env python3
 import json
+import sys
 request = json.load(__file__ and open(0))
+print('pam warning', file=sys.stderr)
 with open(${JSON.stringify(requestsPath)}, 'a') as record:
     record.write(json.dumps(request) + '\\n')
 if request['operation'] == 'person':
