@@ -1679,6 +1679,38 @@ it('reconnects the aggregate carrier when a remote Session history stream restar
   expect(await closed).toEqual({ code: 1012, reason: 'Deployment Session stream lost' })
 })
 
+it('keeps carrier recovery open while a scoped deployment is temporarily unavailable', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'dsh-native-session-reconnect-'))
+  cleanup.push(() => rmSync(state, { recursive: true, force: true }))
+  writeFileSync(join(state, 'fleet.json'), JSON.stringify({ version: 1, deployments: [] }))
+  writeFileSync(join(state, 'gateway.json'), JSON.stringify({
+    version: 1,
+    url: 'http://127.0.0.1:9',
+    token: 'gateway-session',
+  }))
+  const controller = await controllerHarness(state)
+  const { socket } = await openMux(controller)
+  const closed = new Promise<{ code: number; reason: string }>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Controller carrier remained open')), 3_000)
+    socket.once('close', (code, reason) => {
+      clearTimeout(timer)
+      resolve({ code, reason: reason.toString() })
+    })
+  })
+  socket.send(JSON.stringify({
+    type: 'open',
+    streamId: 'history',
+    endpoint: 'session/follow',
+    payload: {
+      args: [{
+        address: { kind: 'session', sessionId: nativeSessionId('sglang', 'sglang-session') },
+        assistantStream: true,
+      }],
+    },
+  }))
+  expect(await closed).toEqual({ code: 1012, reason: 'Deployment is reconnecting' })
+})
+
 it('keeps Desktop Workspace, control, and event streams open when every deployment is offline', async () => {
   const state = mkdtempSync(join(tmpdir(), 'dsh-native-no-streams-'))
   cleanup.push(() => rmSync(state, { recursive: true, force: true }))

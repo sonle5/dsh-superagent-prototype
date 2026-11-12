@@ -20,6 +20,7 @@ import {
   peerRequestValue,
   peerResponseValue,
   repositoryTitle,
+  requestDeployments,
   requestOwner,
 } from './native-aggregate.ts'
 import { matchesNativeToken, nativeToken } from './native-auth.ts'
@@ -1290,13 +1291,41 @@ function controllerUpgrade(ctx: Context, stateDir: string, server: WebSocketServ
             stream: aggregateEventsStream(client, message.streamId, targets, state, warn, closed),
           }
         } else {
-          let target: FleetNativeTarget
+          let target: FleetNativeTarget | undefined
           try {
             target = requestOwner(message.payload, targets, fallback)
-          } catch (error) {
+          } catch (ownerError) {
+            const named = requestDeployments(message.payload)
+            if (named.length !== 1) {
+              sendMuxError(client, message.streamId, {
+                code: 'gateway/bad-request',
+                message: redactSensitive(ownerError instanceof Error ? ownerError.message : String(ownerError)),
+                details: {},
+              })
+              sendMuxEnd(client, message.streamId)
+              return
+            }
+            try {
+              target = await fleet.managementTarget(named[0]!)
+            } catch (lookupError) {
+              // Gateway unavailability is transient. Preserve DSH's carrier-recovery signal until the peer returns.
+              if (lookupError instanceof FleetControlError && lookupError.status === 502) {
+                client.close(1012, 'Deployment is reconnecting')
+                return
+              }
+              sendMuxError(client, message.streamId, {
+                code: 'gateway/bad-request',
+                message: redactSensitive(lookupError instanceof Error ? lookupError.message : String(lookupError)),
+                details: {},
+              })
+              sendMuxEnd(client, message.streamId)
+              return
+            }
+          }
+          if (target === undefined) {
             sendMuxError(client, message.streamId, {
-              code: 'gateway/bad-request',
-              message: redactSensitive(error instanceof Error ? error.message : String(error)),
+              code: 'gateway/service-unavailable',
+              message: 'No deployment is available for this request',
               details: {},
             })
             sendMuxEnd(client, message.streamId)
