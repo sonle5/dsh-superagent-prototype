@@ -55,7 +55,7 @@ Allow only the gateway user to run exactly that file as root:
 <gateway-user> ALL=(root) NOPASSWD: /opt/dsh-superagent/scripts/dsh-superagent-onboard
 ```
 
-The helper accepts only three JSON operations on standard input: `person`, `deployment` and `credentials`. It never accepts a shell command, profile name from the request, arbitrary path, or model credential. It creates `dsh-<github-login>`, derives a safe Linux username when GitHub’s login is long, creates that person’s directories, installs the DSH profile link, writes a root-owned environment file, enables a per-person unit, waits for the deployment native token, and copies that token into a gateway-readable directory owned by the gateway user.
+The helper accepts only three JSON operations on standard input: `person`, `deployment` and `credentials`. It never accepts a shell command, profile name from the request, arbitrary path, or model credential. It creates `dsh-<github-login>`, derives a safe Linux username when GitHub’s login is long, creates that person’s directories, initializes the deployment profile from DSH's shipped `web` template, installs the Superagent bundle, writes a root-owned environment file, enables a per-person unit, waits for the deployment native token, and copies that token into a gateway-readable directory owned by the gateway user.
 
 The generated unit name is:
 
@@ -95,6 +95,8 @@ For each repository, create a separate DSH profile, state directory, loopback po
 For each repository, create a separate DSH profile, state directory, loopback port, and clean checkout or worktree root:
 
 ```sh
+DSH_HOME=/var/lib/dsh-superagent/dsh-home \
+  dsh --profile superagent-<deployment-id> --from-default-profile web --dump-config >/dev/null
 DSH_HOME=/var/lib/dsh-superagent/dsh-home \
   dsh plugin --profile superagent-<deployment-id> add "link:/opt/dsh-superagent"
 sudo -u <fleet-user> mkdir -p \

@@ -37,6 +37,7 @@ it('plans a person and deployment with derived server paths', async () => {
   expect(deployment).toMatchObject({ code: 0 })
   expect(JSON.parse(deployment.stdout)).toMatchObject({
     id: 'widgets', profile: 'superagent-widgets', repository: 'example-org/widgets',
+    profileTemplate: 'web',
     url: 'http://127.0.0.1:3083',
     stateDir: `${baseDir}/people/alice/deployments/widgets`,
     workspace: `${baseDir}/people/alice/worktrees/widgets`,

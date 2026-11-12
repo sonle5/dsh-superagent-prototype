@@ -88,8 +88,11 @@ When this repository is already the checkout, skip the `git clone` line. DeepSee
 For each deployment, install this bundle into a new profile:
 
 ```sh
+dsh --profile superagent-<deployment> --from-default-profile web --dump-config >/dev/null
 dsh plugin --profile superagent-<deployment> add "link:$PWD"
 ```
+
+The deployment patch targets the shipped `webserver` entry, so initialize a new repository profile from the `web` template before adding the Superagent bundle.
 
 For the Desktop fleet controller, also install the bundle into the Desktop profile if it is not already present:
 

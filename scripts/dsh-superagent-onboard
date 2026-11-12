@@ -23,6 +23,8 @@ REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 NAME = re.compile(r"^[a-z_][a-z0-9-]*$")
 GITHUB_TOKEN = re.compile(r"^[A-Za-z0-9_-]{20,255}$")
 PORT_RANGE = range(3082, 4000)
+PROFILE_TEMPLATE = "web"
+WEB_APP_BUNDLE = "@deepseek-ai/dsh-web-app"
 
 
 class OnboardingError(Exception):
@@ -100,6 +102,14 @@ def profile_patch(state_dir, port):
   config:
     stateDir: {json.dumps(str(state_dir))}
 """
+
+
+def profile_has_bundle(profile_dir, bundle):
+    try:
+        manifest = json.loads((profile_dir / "package.json").read_text())
+        return bundle in manifest["dsh"]["profile"]["bundles"]
+    except (FileNotFoundError, KeyError, TypeError, json.JSONDecodeError):
+        return False
 
 
 def env_content(profile, url, state_dir, artifacts, dsh_home):
@@ -230,6 +240,7 @@ def deployment(request, dry):
     if dry:
         return {
             **person_result, "id": deployment_id, "profile": profile, "repository": repository, "url": url,
+            "profileTemplate": PROFILE_TEMPLATE,
             "stateDir": str(state_dir), "workspace": str(workspace), "tokenDir": str(token_dir), "unit": str(unit_path),
         "healthUnit": str(health_unit_path), "recoverUnit": str(recover_unit_path), "healthTimer": str(health_timer_path),
         }
@@ -237,8 +248,16 @@ def deployment(request, dry):
     for path in [state_dir, workspace, artifacts]:
         path.mkdir(parents=True, exist_ok=True)
         shutil.chown(path, user=person_user, group=person_user)
-    subprocess.run(["runuser", "-u", person_user, "--", "env", f"DSH_HOME={person_home / 'dsh-home'}",
-                    "dsh", "plugin", "--profile", profile, "add", f"link:{checkout}"], check=True)
+    profile_dir = person_home / "dsh-home" / "profiles" / profile
+    profile_command = ["runuser", "-u", person_user, "--", "env",
+                       f"HOME={person_home}", f"XDG_DATA_HOME={person_home / '.local' / 'share'}",
+                       f"DSH_HOME={person_home / 'dsh-home'}"]
+    if not profile_has_bundle(profile_dir, WEB_APP_BUNDLE):
+        subprocess.run([*profile_command, "dsh", "--profile", profile,
+                        "--from-default-profile", PROFILE_TEMPLATE, "--dump-config"],
+                       check=True, stdout=subprocess.DEVNULL)
+    subprocess.run([*profile_command, "dsh", "plugin", "--profile", profile, "add", f"link:{checkout}"],
+                   check=True, stdout=subprocess.DEVNULL)
     write(patch_path, profile_patch(state_dir, port), user=person_user, group=person_user)
     write(env_path, env_content(profile, url, state_dir, artifacts, person_home / "dsh-home"))
     write(unit_path, unit_content(person_user, checkout, env_path, profile, url, state_dir), mode=0o644)
