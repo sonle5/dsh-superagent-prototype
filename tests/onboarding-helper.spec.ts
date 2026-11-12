@@ -67,6 +67,25 @@ it('keeps the detached deployment alive when recovery finishes', () => {
   expect(unit).toContain('KillMode=process')
 })
 
+it('repairs an existing person without rerunning useradd', () => {
+  execFileSync('python3', ['-c', [
+    'import runpy, tempfile, types',
+    'from pathlib import Path',
+    `module = runpy.run_path(${JSON.stringify(script)})`,
+    'commands = []',
+    "module['subprocess'].run = lambda *args, **kwargs: types.SimpleNamespace(returncode=0)",
+    "module['run_checked'] = lambda command: commands.append(command)",
+    "module['shutil'].chown = lambda *args, **kwargs: None",
+    'modes = {}',
+    "module['os'].chmod = lambda path, mode: modes.__setitem__(str(path), mode)",
+    'with tempfile.TemporaryDirectory() as base:',
+    "    result = module['create_person']('alice', Path(base), False)",
+    '    assert commands == []',
+    "    assert modes[result['home']] == 0o700",
+    "    assert Path(result['home']).is_dir()",
+  ].join('\n')])
+})
+
 it('rejects invalid names instead of deriving unsafe paths', async () => {
   const invalid = await run({
     operation: 'deployment', login: 'alice;rm', id: 'widgets', repository: 'example-org/widgets',

@@ -203,10 +203,9 @@ exec env GH_TOKEN={shlex.quote(token)} {shlex.quote(gh)} "$@"
 def create_person(login, base, dry):
     user, home, result = person_plan(login, base)
     if not dry:
-        if subprocess.run(["getent", "passwd", user], capture_output=True).returncode == 0:
-            return result
-        run_checked(["useradd", "--system", "--user-group", "--home-dir", str(home), "--create-home",
-                     "--shell", "/usr/sbin/nologin", user])
+        if subprocess.run(["getent", "passwd", user], capture_output=True).returncode != 0:
+            run_checked(["useradd", "--system", "--user-group", "--home-dir", str(home), "--create-home",
+                         "--shell", "/usr/sbin/nologin", user])
         for path in [home, home / "dsh-home", home / "deployments", home / "worktrees", home / "artifacts"]:
             path.mkdir(parents=True, exist_ok=True)
             shutil.chown(path, user=user, group=user)

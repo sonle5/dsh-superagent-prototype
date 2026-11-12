@@ -194,8 +194,11 @@ The current single-operator fleet was accepted against commit `a2989a48bbd8769a5
 - Eval and Executor settings survived restart: `one-nexus / glm-5.3-sontinh` and `claude / claude-opus-5-5(auto)`. A real worker turn also succeeded through `nexus13 / nexus13/claude-opus-5-5(auto)` before the Executor was restored to Claude.
 - Both health timers stayed active and every health component returned `ready` with no errors.
 - A forced certificate renewal and `certbot renew --dry-run --no-random-sleep-on-renew` both succeeded.
+- A second organization identity, `hdt98`, completed device sign-in and account provisioning as `dsh-hdt98`. Its fleet was empty, access to `sonle5`'s deployment returned `404`, and the `sonle5` home directory was unreadable to it.
 
 The current verified public endpoint is `https://dsh-superagent.201-79-39-167.sslip.io`. The reserved address and canonical organization hostname remain pending because external TCP routing on the reserved address and Cloudflare access are not available yet.
+
+The `hdt98` account does not yet have a deployment: that next check requires a distinct repository and its own model credentials. The account-onboarding test also exposed a partial-provisioning recovery bug. Existing Linux users are now required to have their directories and `0700` home permission repaired before onboarding returns successfully, with regression coverage in `tests/onboarding-helper.spec.ts`.
 
 ## Migration and upgrades
 
