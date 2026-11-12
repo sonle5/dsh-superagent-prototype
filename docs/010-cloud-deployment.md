@@ -26,7 +26,25 @@ dsh --version
 
 Create a GitHub OAuth app with device flow enabled. It needs no client secret on the server. Request only the `read:org` scope.
 
-Merge [examples/cloud/gateway.cordis.patch.yml](../examples/cloud/gateway.cordis.patch.yml) into the gateway profile's `cordis.patch.yml`, then set the concrete server address, certificate paths, profile name, and gateway state directory. DSH supports TLS directly; it does not redirect HTTP and it does not renew certificates. Use a certificate valid for the address the Desktop client will use, and reload the gateway after replacing either PEM file.
+Merge [examples/cloud/gateway.cordis.patch.yml](../examples/cloud/gateway.cordis.patch.yml) into the gateway profile's `cordis.patch.yml`, then set the concrete server address, certificate paths, profile name, and gateway state directory. DSH supports TLS directly, but it does not redirect HTTP or renew certificates. Use a certificate valid for the address the Desktop client will use.
+
+For Let's Encrypt, select the certificate source in `/etc/dsh-superagent/tls.env`, then install the renewal hook so a renewed certificate is copied into the gateway’s TLS directory and the gateway restarts:
+
+```sh
+sudo install -o root -g root -m 0600 \
+  /opt/dsh-superagent/examples/cloud/letsencrypt/tls.env.example \
+  /etc/dsh-superagent/tls.env
+# Edit /etc/dsh-superagent/tls.env and replace the placeholders.
+sudo install -o root -g root -m 0755 \
+  /opt/dsh-superagent/examples/cloud/letsencrypt/reload-gateway.sh \
+  /etc/letsencrypt/renewal-hooks/deploy/dsh-superagent-gateway
+```
+
+Verify renewal, including the hook, with:
+
+```sh
+sudo certbot renew --dry-run --no-random-sleep-on-renew
+```
 
 Copy [examples/cloud/gateway.env.example](../examples/cloud/gateway.env.example) to `/etc/dsh-superagent/gateway.env`, and install the certificate and key under `/etc/dsh-superagent/tls/` so the fleet user can read them but other users cannot.
 
