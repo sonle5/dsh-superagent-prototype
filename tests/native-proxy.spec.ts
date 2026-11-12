@@ -1679,6 +1679,70 @@ it('reconnects the aggregate carrier when a remote Session history stream restar
   expect(await closed).toEqual({ code: 1012, reason: 'Deployment Session stream lost' })
 })
 
+it('reopens a remote Session history stream that loses its carrier before the first snapshot', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'dsh-native-session-initial-retry-'))
+  cleanup.push(() => rmSync(state, { recursive: true, force: true }))
+  const port = await freePort()
+  const initialOpen = Promise.withResolvers<void>()
+  const sglang = await peerHarness({
+    stateDir: join(state, 'sglang'),
+    port,
+    onStream(request) {
+      if (request.endpoint === 'session/follow') initialOpen.resolve()
+    },
+  })
+  writeFileSync(join(state, 'fleet.json'), JSON.stringify({
+    version: 1,
+    controlScript: '/usr/bin/true',
+    logDir: state,
+    deployments: [{
+      id: 'sglang',
+      profile: 'superagent-sglang',
+      repository: 'onenexus-team/sglang',
+      url: sglang.url,
+      stateDir: join(state, 'sglang'),
+      workspace: '/tmp/sglang',
+    }],
+  }))
+  const controller = await controllerHarness(state)
+  const { socket, next } = await openMux(controller)
+  socket.send(JSON.stringify({
+    type: 'open',
+    streamId: 'history',
+    endpoint: 'session/follow',
+    payload: {
+      args: [{
+        address: { kind: 'session', sessionId: nativeSessionId('sglang', 'sglang-session') },
+        assistantStream: true,
+      }],
+    },
+  }))
+  await initialOpen.promise
+  await sglang.stop()
+
+  await peerHarness({
+    stateDir: join(state, 'sglang'),
+    port,
+    onStream(request, send) {
+      if (request.endpoint !== 'session/follow') return
+      send({
+        type: 'snapshot',
+        header: { version: 1, id: 'sglang-session', createdAt: 1, isSeeded: false },
+        cursor: 1,
+        records: [],
+        hasMore: false,
+        projections: { asOfSeq: 1, values: { title: 'SGLang history' } },
+      })
+    },
+  })
+
+  expect(await next()).toMatchObject({
+    type: 'item',
+    streamId: 'history',
+    value: { type: 'snapshot', header: { id: nativeSessionId('sglang', 'sglang-session') } },
+  })
+})
+
 it('keeps carrier recovery open while a scoped deployment is temporarily unavailable', async () => {
   const state = mkdtempSync(join(tmpdir(), 'dsh-native-session-reconnect-'))
   cleanup.push(() => rmSync(state, { recursive: true, force: true }))

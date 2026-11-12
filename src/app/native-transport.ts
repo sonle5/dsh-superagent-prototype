@@ -1337,7 +1337,20 @@ function controllerUpgrade(ctx: Context, stateDir: string, server: WebSocketServ
             stream: undefined as unknown as UpstreamStream,
           }
           let received = false
+          let stopped = false
+          let retryTimer: ReturnType<typeof setTimeout> | undefined
+          let retryDelay = PEER_RETRY_INITIAL_MS
+          let upstream: UpstreamStream | undefined
+          const pendingItems: (
+            | { type: 'item'; value?: unknown }
+            | { type: 'end' }
+          )[] = []
+          const stop = (): void => {
+            stopped = true
+            clearTimeout(retryTimer)
+          }
           const fail = (error: RemoteStreamFailure): void => {
+            stop()
             sendMuxError(client, message.streamId, {
               ...error,
               message: redactSensitive(error.message),
@@ -1346,31 +1359,64 @@ function controllerUpgrade(ctx: Context, stateDir: string, server: WebSocketServ
             sendMuxEnd(client, message.streamId)
             remove(message.streamId, pending)
           }
-          pending.stream = openUpstreamStream(
-            target,
-            message.endpoint,
-            outboundPeerPayload(target, message.endpoint, message.payload),
-            {
+          const connect = (): void => {
+            if (stopped) return
+            upstream = openUpstreamStream(target, message.endpoint,
+              outboundPeerPayload(target, message.endpoint, message.payload), {
               onItem(value) {
                 received = true
+                retryDelay = PEER_RETRY_INITIAL_MS
                 sendMuxItem(client, message.streamId, responseValue(target, message.endpoint, value))
               },
               onError: fail,
               onCarrierLoss(error) {
+                upstream = undefined
+                if (target.id !== LOCAL_TARGET_ID && message.endpoint === 'session/follow' && !received) {
+                  // The peer can accept the mux connection while its deployment is still restarting. No history was
+                  // delivered yet, so reopening cannot duplicate a snapshot or resume an already-consumed stream.
+                  retryTimer = addTimeout(connect, retryDelay)
+                  retryDelay = Math.min(retryDelay * 2, PEER_RETRY_MAX_MS)
+                  return
+                }
                 // Session history has no safe mid-stream resubscribe. Drop the aggregate carrier so DSH's generation
                 // recovery opens it again and replaces the history with a fresh snapshot.
-                if (target.id !== LOCAL_TARGET_ID && message.endpoint === 'session/follow' && received) {
+                if (target.id !== LOCAL_TARGET_ID && message.endpoint === 'session/follow') {
                   client.close(1012, 'Deployment Session stream lost')
+                  stop()
                   return
                 }
                 fail(error)
               },
               onEnd() {
+                stop()
+                upstream = undefined
                 sendMuxEnd(client, message.streamId)
                 remove(message.streamId, pending)
               },
+            })
+            for (const item of pendingItems.splice(0)) {
+              if (item.type === 'end') upstream.end()
+              else upstream.send(item.value)
+            }
+          }
+          pending.stream = {
+            send(value) {
+              if (stopped) return
+              if (upstream === undefined) pendingItems.push({ type: 'item', value })
+              else upstream.send(value)
             },
-          )
+            end() {
+              if (stopped) return
+              if (upstream === undefined) pendingItems.push({ type: 'end' })
+              else upstream.end()
+            },
+            close() {
+              if (stopped) return
+              stop()
+              upstream?.close()
+            },
+          }
+          connect()
           route = pending
         }
         routes.set(message.streamId, route)
