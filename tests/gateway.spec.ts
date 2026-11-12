@@ -211,11 +211,12 @@ it('forwards native API and WebSocket traffic through one deployment route', asy
     socket.once('open', resolve)
     socket.once('error', reject)
   })
-  await expect(new Promise<string>(resolve => socket.once('message', data => resolve(data.toString()))))
-    .resolves.toBe('upstream-ready')
+  const firstFrame = (): Promise<{ data: string; binary: boolean }> => new Promise(resolve => socket.once('message', (data, binary) => {
+    resolve({ data: data.toString(), binary })
+  }))
+  await expect(firstFrame()).resolves.toEqual({ data: 'upstream-ready', binary: false })
   socket.send('hello')
-  await expect(new Promise<string>(resolve => socket.once('message', data => resolve(data.toString()))))
-    .resolves.toBe('echo:hello')
+  await expect(firstFrame()).resolves.toEqual({ data: 'echo:hello', binary: false })
 
   const otherGateway = await serveGateway(state, gatewayFetch(true, 'other-member'))
   await otherGateway.call('POST', '/gateway/api/device')
