@@ -5,6 +5,10 @@ import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { RoleModel } from '../policy.ts'
 
 interface RoleSelection { selected?: ModelSelection; initial: boolean; assembled?: ModelSelection }
+interface AgentModel {
+  select(selection: Readonly<ModelSelection>): void
+}
+type ModernAgent = Agent & { readonly model?: AgentModel }
 const selections = new WeakMap<Agent, RoleSelection>()
 
 /** Resolve a configured route through the live provider; catalog membership is not a restriction. */
@@ -20,6 +24,15 @@ const sameSelection = (left: ModelSelection, right: ModelSelection): boolean =>
 /** Apply a role model to the Session's next request, including an existing Session whose prior route is now stale. */
 export async function applyRoleModel(ctx: Context, agent: Agent, model: RoleModel | null): Promise<void> {
   const selected = model ? await resolveRoleModel(ctx, model) : inheritedModel(ctx)
+  // DSH 0.2.2 moved model selection onto the Agent and freezes the step route before
+  // the agent/request waterfall. Appending only the event leaves that route at the
+  // deployment default, and trying to replace it later is rejected.
+  const modern = (agent as ModernAgent).model
+  if (modern) {
+    modern.select(selected)
+    await ctx.sessionPersistence.flush()
+    return
+  }
   const state = selectionState(ctx, agent)
   if (state.selected && sameSelection(state.selected, selected)) return
   state.selected = selected

@@ -279,16 +279,16 @@ printf '%s\\n' "$*" >> '${calls}'
 if [ "$1" = restart ]; then exit 0; fi
 exit "$DSH_RECOVER_STATUS"
 `, { mode: 0o755 })
-  const runRecover = (status: number) => new Promise<{ code: number; stdout: string }>(resolve => {
+  const runRecover = (status: number) => new Promise<{ code: number; stdout: string; stderr: string }>(resolve => {
     execFile(join(recoverRoot, 'scripts', 'dsh-superagent-recover'),
       ['--profile', 'superagent-sglang', '--url', 'http://127.0.0.1:3083', '--state-dir', '/tmp/superagent-sglang'],
       { env: { ...process.env, DSH_RECOVER_STATUS: String(status) } },
-      (error, stdout) => resolve({ code: typeof error?.code === 'number' ? error.code : 0, stdout }))
+      (error, stdout, stderr) => resolve({ code: typeof error?.code === 'number' ? error.code : 0, stdout, stderr }))
   })
 
   expect(await runRecover(1)).toMatchObject({ code: 0 })
-  expect(await runRecover(2)).toMatchObject({ code: 2 })
-  expect(await runRecover(3)).toMatchObject({ code: 3 })
+  expect(await runRecover(2)).toMatchObject({ code: 0, stderr: expect.stringContaining('needs operator action') })
+  expect(await runRecover(3)).toMatchObject({ code: 0, stderr: expect.stringContaining('needs operator action') })
   expect(readFileSync(calls, 'utf8')).toBe([
     'status --profile superagent-sglang --url http://127.0.0.1:3083 --state-dir /tmp/superagent-sglang',
     'restart --respect-stop --profile superagent-sglang --url http://127.0.0.1:3083 --state-dir /tmp/superagent-sglang',

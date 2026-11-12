@@ -91,3 +91,17 @@ it('inherits the host when unset and fails unavailable routes before recording a
   await expect(applyRoleModel(ctx, agent, { provider: 'unknown', model: 'x' })).rejects.toThrow('unknown provider')
   expect(agent.session.snapshotEvents().filter(event => event.type === 'model/selection')).toHaveLength(before)
 })
+
+it('uses the Agent model selector required by DSH 0.2.2 before step preparation', async () => {
+  const ctx = new Context(); contexts.push(ctx)
+  const resolve = vi.fn(async value => value)
+  const flush = vi.fn(async () => {})
+  ctx.reflect.provide('llm', { resolveCallConfig: resolve })
+  ctx.reflect.provide('sessionPersistence', { flush })
+  const select = vi.fn()
+  const agent = { ctx, session: {}, model: { select } } as unknown as Agent
+  await applyRoleModel(ctx, agent, { provider: 'worker', model: 'new' })
+  expect(resolve).toHaveBeenCalledWith({ provider: 'worker', model: 'new' })
+  expect(select).toHaveBeenCalledWith({ provider: 'worker', model: 'new' })
+  expect(flush).toHaveBeenCalledOnce()
+})

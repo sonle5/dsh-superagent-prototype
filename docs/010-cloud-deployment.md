@@ -122,7 +122,7 @@ sudo systemctl enable --now dsh-superagent@<deployment-id>.service
 sudo systemctl enable --now dsh-superagent-health@<deployment-id>.timer
 ```
 
-The deployment unit starts the existing `scripts/dsh-superagent` launcher, which starts `dsh --profile ... --no-open` in tmux and records the process. The health timer runs every five minutes. `scripts/dsh-superagent-recover` calls the launcher again only when status exits 1; intentional stops and setup/component errors are not restarted automatically.
+The deployment unit starts the existing `scripts/dsh-superagent` launcher, which starts `dsh --profile ... --no-open` in tmux and records the process. The health timer runs every five minutes. `scripts/dsh-superagent-recover` calls the launcher again only when status exits 1; intentional stops and setup/component errors are not restarted automatically. The health unit records those operator-action failures, while the recovery unit exits successfully because declining an unsafe restart is its expected outcome.
 
 Self-service deployments use the helper-generated per-person unit and health units, not `dsh-superagent@`.
 
