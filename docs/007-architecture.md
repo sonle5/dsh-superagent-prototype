@@ -438,6 +438,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/fleet.spec.ts` | Fleet registry validation, aggregation from independent deployments, gateway sign-in and onboarding proxies, native-capability forwarding, stopped-versus-unreachable status, log tails, managed-target lookup and fixed-profile lifecycle invocation |
 | `tests/onboarding-helper.spec.ts` | The fixed privileged helper’s dry-run plans: derived person users and paths, per-person deployment units and health/recovery timers, token directories, agent CLI wrappers and invalid input rejection |
 | `tests/native-aggregate.spec.ts` | Aggregate identity round trips and validation, request-tree remapping, owner detection, title projection prefixing and bounded Session-search merging |
+| `tests/native-routing.spec.ts` | Deployment-aware native API and Remote-mux URL construction, Desktop-baseline gating, and remote-state path ownership |
 | `tests/native-proxy.spec.ts` | End-to-end aggregate HTTP and WebSocket routing across deployments: Session/search and Workspace/control/event aggregation, owner routing, partial availability and timeouts, title normalization, interactive uplinks and cancellation, per-stream event correlation, capability and origin rejection, operator-peer authentication and teardown |
 | `tests/native-transport.spec.ts` | Desktop Remote-mux URL routing and constructor restoration |
 | `tests/settings.spec.ts` | Settings saves that race a model or account check, a Policy sync that a save outran, and the refusals of the pause, a sync and a block |

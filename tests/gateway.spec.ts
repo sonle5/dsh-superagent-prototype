@@ -165,7 +165,7 @@ it('forwards native API and WebSocket traffic through one deployment route', asy
     const native = request.headers['x-dsh-superagent-native']
     seen.push({ path: request.url, host: request.headers.host, origin: request.headers.origin,
       native: typeof native === 'string' ? native : native?.[0] })
-    if (request.url !== '/orchestrator/native/api' || request.headers['x-orchestrator-request'] !== '1'
+    if (request.url !== '/orchestrator/native/api/session/list?limit=20' || request.headers['x-orchestrator-request'] !== '1'
       || request.headers['x-dsh-superagent-native'] !== deploymentToken) {
       response.writeHead(401).end(JSON.stringify({ error: 'unauthorized' }))
       return
@@ -191,13 +191,13 @@ it('forwards native API and WebSocket traffic through one deployment route', asy
   const session = await gateway.call('POST', '/gateway/api/session', { device_code: 'device-code' })
   const gatewayToken = session.body.nativeToken as string
   expect(gatewayToken).toMatch(/^member\.\d+\./)
-  expect(await gateway.call('POST', '/gateway/native/sglang/api', { method: 'session/list' }))
+  expect(await gateway.call('POST', '/gateway/native/sglang/api/session/list?limit=20', { method: 'session/list' }))
     .toMatchObject({ status: 401 })
-  const native = await gateway.call('POST', '/gateway/native/sglang/api', { method: 'session/list' }, {
+  const native = await gateway.call('POST', '/gateway/native/sglang/api/session/list?limit=20', { method: 'session/list' }, {
     'x-dsh-superagent-native': gatewayToken,
   })
   expect(native).toMatchObject({ status: 200, body: { type: 'native', ok: true } })
-  expect(seen).toEqual([{ path: '/orchestrator/native/api', host: new URL(target.url).host, origin: target.url,
+  expect(seen).toEqual([{ path: '/orchestrator/native/api/session/list?limit=20', host: new URL(target.url).host, origin: target.url,
     native: deploymentToken }])
 
   const socket = new WebSocket(`${gateway.url.replace('http:', 'ws:')}/gateway/native/sglang/remote.mux`, {

@@ -91,9 +91,11 @@ function peerLabel(target: FleetNativeTarget): string {
  * Whether a Desktop-profile Session or Workspace path lies under a deployment's state directory.
  * The deployment's own store is authoritative for such work; older Desktop-profile copies are hidden from the catalog.
  */
-function deploymentOwnedPath(target: FleetNativeTarget, path: unknown, targets: readonly FleetNativeTarget[]): boolean {
+export function deploymentOwnedPath(target: FleetNativeTarget, path: unknown, targets: readonly FleetNativeTarget[]): boolean {
   if (target.id !== LOCAL_TARGET_ID || typeof path !== 'string') return false
-  return targets.some(peer => peer.id !== LOCAL_TARGET_ID && (path === peer.stateDir || path.startsWith(`${peer.stateDir}/`)))
+  return targets.some(peer => peer.id !== LOCAL_TARGET_ID
+    && peer.stateDir !== ''
+    && (path === peer.stateDir || path.startsWith(`${peer.stateDir}/`)))
 }
 
 function withoutDeploymentSessions(target: FleetNativeTarget, value: unknown, targets: readonly FleetNativeTarget[]): unknown {
@@ -234,6 +236,37 @@ function webSocketUrl(base: string, path: string): string {
   const url = new URL(path, base)
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
   return url.href
+}
+
+/**
+ * Resolve the Remote mux endpoint for a local peer or a deployment behind the cloud gateway.
+ * @param target - Authenticated native peer.
+ * @returns WebSocket URL that reaches the peer's own Remote mux.
+ */
+export function nativePeerMuxUrl(target: FleetNativeTarget): string {
+  if (!target.remote) return webSocketUrl(target.url, PEER_NATIVE_MUX)
+  const url = new URL(`${target.nativeUrl.replace(/\/$/, '')}/remote.mux`)
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+  return url.href
+}
+
+/**
+ * Resolve an HTTP RPC endpoint for a local peer or a deployment behind the cloud gateway.
+ * @param target - Authenticated native peer.
+ * @param sourcePath - Native API path beginning with `/api`.
+ * @returns URL that reaches the peer's own native API.
+ */
+export function nativePeerApiUrl(target: FleetNativeTarget, sourcePath: string): URL {
+  if (!target.remote) return new URL(`orchestrator/native${sourcePath}`, target.url)
+  return new URL(`${target.nativeUrl.replace(/\/$/, '')}${sourcePath}`)
+}
+
+/**
+ * Whether the aggregate has the controller's own authoritative Workspace/Session baseline.
+ * A remote peer may answer first; publishing only that peer would temporarily hide every Desktop Session.
+ */
+export function hasDesktopWorkspaceBaseline(targets: readonly FleetNativeTarget[], baselines: ReadonlySet<string>): boolean {
+  return targets.some(target => target.id === LOCAL_TARGET_ID && baselines.has(target.id))
 }
 
 interface ClientRpcEnvelope {
@@ -388,7 +421,7 @@ async function callPeer(
   envelope: ClientRpcEnvelope,
   signal: AbortSignal,
 ): Promise<ServerRpcEnvelope> {
-  const targetUrl = new URL(`orchestrator/native${sourcePath}`, target.url)
+  const targetUrl = nativePeerApiUrl(target, sourcePath)
   const payload = outboundPeerPayload(target, envelope.method, envelope.payload)
   const response = await fetch(targetUrl, {
     method: 'POST',
@@ -562,7 +595,7 @@ function openUpstreamStream(
   options: OpenUpstreamOptions,
 ): UpstreamStream {
   const streamId = randomUUID()
-  const socket = new WebSocket(webSocketUrl(target.url, PEER_NATIVE_MUX), { headers: nativeHeaders(target) })
+  const socket = new WebSocket(nativePeerMuxUrl(target), { headers: nativeHeaders(target) })
   let closed = false
   let ended = false
   let opened = false
@@ -774,7 +807,11 @@ function aggregateWorkspaceStream(
   const handles: UpstreamStream[] = []
   let ready = false
   let closed = false
-  const timer = addTimeout(() => { flush() }, STREAM_BASELINE_TIMEOUT_MS)
+  let baselineDeadlineReached = false
+  const timer = addTimeout(() => {
+    baselineDeadlineReached = true
+    maybeFlush()
+  }, STREAM_BASELINE_TIMEOUT_MS)
   const unique = (values: readonly unknown[]): unknown[] => [...new Set(values)]
   const items = (): unknown[] => targets.flatMap(target => {
     const peer = peers.get(target.id)!
@@ -816,8 +853,11 @@ function aggregateWorkspaceStream(
   }
   const flush = (): void => {
     if (ready || closed) return
-    const available = targets.some(target => peers.get(target.id)?.baseline === true)
-    if (!available) {
+    const baselines = new Set(targets
+      .filter(target => peers.get(target.id)?.baseline === true)
+      .map(target => target.id))
+    if (!hasDesktopWorkspaceBaseline(targets, baselines)) {
+      if (!targets.every(target => peers.get(target.id)?.ended === true)) return
       sendMuxError(client, streamId, {
         code: 'gateway/service-unavailable',
         message: 'No deployment is available for Workspace state',
@@ -832,7 +872,11 @@ function aggregateWorkspaceStream(
     sendMuxItem(client, streamId, { type: 'baseline', value: baselineValue() })
   }
   const maybeFlush = (): void => {
-    if (targets.every(target => peers.get(target.id)?.baseline || peers.get(target.id)?.ended)) flush()
+    const baselines = new Set(targets
+      .filter(target => peers.get(target.id)?.baseline === true)
+      .map(target => target.id))
+    if (targets.every(target => peers.get(target.id)?.baseline || peers.get(target.id)?.ended)
+      || baselineDeadlineReached && hasDesktopWorkspaceBaseline(targets, baselines)) flush()
   }
   const maybeEnd = (): void => {
     if (!closed && ready && targets.every(target => peers.get(target.id)?.ended)) {
@@ -934,14 +978,19 @@ function aggregateControlStream(
   const handles: UpstreamStream[] = []
   let ready = false
   let closed = false
-  const timer = addTimeout(() => { flush() }, STREAM_BASELINE_TIMEOUT_MS)
+  let baselineDeadlineReached = false
+  const timer = addTimeout(() => {
+    baselineDeadlineReached = true
+    maybeFlush()
+  }, STREAM_BASELINE_TIMEOUT_MS)
   const run = (operation: () => void): void => {
     if (!ready) pending.push(operation)
     else if (!closed) operation()
   }
   const flush = (): void => {
     if (ready || closed) return
-    if (baselines.size === 0) {
+    if (!hasDesktopWorkspaceBaseline(targets, new Set(baselines.keys()))) {
+      if (!targets.every(target => ended.has(target.id))) return
       sendMuxError(client, streamId, {
         code: 'gateway/service-unavailable',
         message: 'No deployment is available for Session control state',
@@ -957,7 +1006,8 @@ function aggregateControlStream(
     for (const operation of pending.splice(0)) operation()
   }
   const maybeFlush = (): void => {
-    if (targets.every(target => baselines.has(target.id) || ended.has(target.id))) flush()
+    if (targets.every(target => baselines.has(target.id) || ended.has(target.id))
+      || baselineDeadlineReached && hasDesktopWorkspaceBaseline(targets, new Set(baselines.keys()))) flush()
   }
   const maybeEnd = (): void => {
     if (!closed && ready && targets.every(target => ended.has(target.id))) {

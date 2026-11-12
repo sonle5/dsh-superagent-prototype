@@ -381,7 +381,8 @@ async function forwardNativeHttp(
   deployment: RegistryConfig['deployments'][number],
 ): Promise<void> {
   const source = new URL(req.url ?? '/', 'http://dsh.internal')
-  const target = new URL('/orchestrator/native/api', deployment.url)
+  const suffix = /^\/gateway\/native\/[a-z0-9][a-z0-9-]*\/api(\/.*)?$/.exec(source.pathname)?.[1] ?? ''
+  const target = new URL(`/orchestrator/native/api${suffix}`, deployment.url)
   target.search = source.search
   try {
     const body = req.method === undefined || req.method === 'GET' || req.method === 'HEAD' ? undefined
