@@ -8,6 +8,7 @@ and 3 when it runs and waits for setup. A restart fixes neither 2 nor 3: they ne
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -32,6 +33,11 @@ def control(profile):
     directory = CONTROL / 'profiles' / profile
     directory.mkdir(parents=True, exist_ok=True)
     return directory
+
+
+def tmux_socket(profile):
+    """Return a short, stable tmux server socket name private to `profile`."""
+    return 'dsh-superagent-' + hashlib.sha256(profile.encode()).hexdigest()[:16]
 
 
 def private_state_overlay(profile):
@@ -195,6 +201,7 @@ def prune_logs(profile):
 
 def start(args):
     session = 'dsh-' + args.profile
+    tmux = ['tmux', '-L', tmux_socket(args.profile)]
     pids = processes(args.profile)
     if len(pids) > 1:
         raise RuntimeError('Multiple dsh-superagent processes found; refusing to start another.')
@@ -202,7 +209,7 @@ def start(args):
         dsh = shutil.which('dsh')
         if not dsh or not shutil.which('tmux'):
             raise RuntimeError('Both dsh and tmux must be on PATH.')
-        exists = subprocess.run(['tmux', 'has-session', '-t', '=' + session],
+        exists = subprocess.run([*tmux, 'has-session', '-t', '=' + session],
                                 capture_output=True).returncode == 0
         if state(args.url, args.state_dir) is not None:
             raise RuntimeError('An existing orchestrator answers at this URL; refusing duplicate startup.')
@@ -217,7 +224,7 @@ def start(args):
         # Reuse an existing tmux session without disturbing other windows.
         target = ['new-window', '-t', '=' + session + ':'] if exists else ['new-session', '-s', session]
         # Service accounts use nologin as their login shell; tmux still needs an explicit shell for this compound command.
-        pane = subprocess.run(['tmux', *target, '-d', '-P', '-F', '#{pane_pid}', '-n', 'server', '-c', str(ROOT),
+        pane = subprocess.run([*tmux, *target, '-d', '-P', '-F', '#{pane_pid}', '-n', 'server', '-c', str(ROOT),
                                '/bin/sh', '-c', command],
                               check=True, capture_output=True, text=True).stdout.strip()
         if pane.isdigit():

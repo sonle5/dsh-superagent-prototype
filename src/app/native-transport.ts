@@ -1359,6 +1359,10 @@ function controllerUpgrade(ctx: Context, stateDir: string, server: WebSocketServ
             sendMuxEnd(client, message.streamId)
             remove(message.streamId, pending)
           }
+          const retryPreSnapshot = (): void => {
+            retryTimer = addTimeout(connect, retryDelay)
+            retryDelay = Math.min(retryDelay * 2, PEER_RETRY_MAX_MS)
+          }
           const connect = (): void => {
             if (stopped) return
             upstream = openUpstreamStream(target, message.endpoint,
@@ -1368,14 +1372,26 @@ function controllerUpgrade(ctx: Context, stateDir: string, server: WebSocketServ
                 retryDelay = PEER_RETRY_INITIAL_MS
                 sendMuxItem(client, message.streamId, responseValue(target, message.endpoint, value))
               },
-              onError: fail,
+              onError(error) {
+                upstream = undefined
+                if (target.id !== LOCAL_TARGET_ID
+                  && message.endpoint === 'session/follow'
+                  && !received
+                  && error.code === 'gateway/service-unavailable') {
+                  // The deployment can reject an otherwise healthy mux connection while it is still restarting.
+                  // Retry only service-unavailable failures before any snapshot; protocol and authorization errors remain
+                  // terminal so a malformed request cannot be retried indefinitely.
+                  retryPreSnapshot()
+                  return
+                }
+                fail(error)
+              },
               onCarrierLoss(error) {
                 upstream = undefined
                 if (target.id !== LOCAL_TARGET_ID && message.endpoint === 'session/follow' && !received) {
                   // The peer can accept the mux connection while its deployment is still restarting. No history was
                   // delivered yet, so reopening cannot duplicate a snapshot or resume an already-consumed stream.
-                  retryTimer = addTimeout(connect, retryDelay)
-                  retryDelay = Math.min(retryDelay * 2, PEER_RETRY_MAX_MS)
+                  retryPreSnapshot()
                   return
                 }
                 // Session history has no safe mid-stream resubscribe. Drop the aggregate carrier so DSH's generation

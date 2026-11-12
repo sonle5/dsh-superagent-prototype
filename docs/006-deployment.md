@@ -122,7 +122,7 @@ scripts/dsh-superagent --profile <profile> --url <url> --state-dir <stateDir> st
 scripts/dsh-superagent --profile <profile> --url <url> --state-dir <stateDir> status
 ```
 
-`start` runs `dsh --profile <profile>` in tmux session `dsh-<profile>`. It waits up to one minute for the runtime to become ready or report a setup requirement. On a first run it prints the missing setup information. It refuses duplicate instances, including ones started outside this script. Pass both `--profile` and `--url` for every managed deployment; the profile name does not imply its port.
+`start` runs `dsh --profile <profile>` in tmux session `dsh-<profile>` on a tmux server socket derived from the profile name. Each profile therefore has an independent tmux server and systemd cgroup, even when several deployments share a machine. It waits up to one minute for the runtime to become ready or report a setup requirement. On a first run it prints the missing setup information. It refuses duplicate instances, including ones started outside this script. Pass both `--profile` and `--url` for every managed deployment; the profile name does not imply its port.
 
 `stop` and `restart` request graceful shutdown and wait up to five minutes for Executors from the script, or one minute when invoked by Fleet. They never force-kill the process or touch other tmux sessions.
 
