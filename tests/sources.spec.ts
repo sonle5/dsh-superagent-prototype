@@ -864,6 +864,15 @@ describe('github source', () => {
     expect(reads.filter(path => path.includes('/comments'))).toEqual([`issues/12/comments?per_page=100&since=${since}`])
     h.store.close()
   })
+  it('takes in a new Issue when its notification arrives after the cursor passed its creation time', async () => {
+    const h = host()
+    const created = '2026-09-09T00:00:00.000Z'
+    notify(h, [issue(12, { created_at: created, body: '@agent-bot inspect this' })], {}, '2026-09-09T00:00:10.000Z')
+    await pollRound(h)
+    expect(h.receive.mock.calls.map(([trigger]) => trigger)).toEqual([
+      expect.objectContaining({ id: key('github-issue', '12'), at: created, addressed: 'mention' })])
+    h.store.close()
+  })
   it('takes in the exact mentioned comment from a delayed notification after the thread cursor moved past it', async () => {
     const h = host()
     const url = 'https://github.com/acme/widgets/issues/12'
