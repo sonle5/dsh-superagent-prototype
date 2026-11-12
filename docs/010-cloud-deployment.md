@@ -184,7 +184,7 @@ The status output must report `runtime`, `relay`, `github`, `models`, `evals`, `
 
 ### Acceptance record
 
-The current single-operator fleet was accepted against commit `a2989a48bbd8769a51aa50ad0a7e7a1545ed4179` on 2026-11-12:
+The current single-operator fleet was accepted against commit `3721da1f7ffa0b863dfc5fe6c271dc9011ffc2b1` on 2026-11-12:
 
 - Both repository deployments ran while the Mac-local deployment was stopped.
 - A GitHub Issue trigger published exactly one acknowledgement and one final reply.
@@ -194,11 +194,15 @@ The current single-operator fleet was accepted against commit `a2989a48bbd8769a5
 - Eval and Executor settings survived restart: `one-nexus / glm-5.3-sontinh` and `claude / claude-opus-5-5(auto)`. A real worker turn also succeeded through `nexus13 / nexus13/claude-opus-5-5(auto)` before the Executor was restored to Claude.
 - Both health timers stayed active and every health component returned `ready` with no errors.
 - A forced certificate renewal and `certbot renew --dry-run --no-random-sleep-on-renew` both succeeded.
-- A second organization identity, `hdt98`, completed device sign-in and account provisioning as `dsh-hdt98`. Its fleet was empty, access to `sonle5`'s deployment returned `404`, and the `sonle5` home directory was unreadable to it.
+- A second organization identity, `hdt98`, completed normal device sign-in and account provisioning as `dsh-hdt98`. Desktop showed only its deployment, access to `sonle5`'s deployments returned `404`, and the `sonle5` home directory was unreadable to it.
+- The `hdt98` deployment used a clean detached worktree, became ready with repository polling, and completed a mid-Ticket Droplet-reboot test with exactly one acknowledgement and one final reply.
+- The `hdt98` persisted Session selected Eval `openai / gpt-6.1-terra` and Executor `openai / gpt-6.1-sol`, and the same values remained after reboot.
+- `sonle5` now uses separate repository-scoped fine-grained PATs for `inference-support-loop` and `sglang`. Each wrapper authenticates as `sonle5`, can read only its configured repository, and receives `404` for the other repository. All three deployment wrapper hashes are distinct.
+- All three deployments report every health component as `ready`, with no component errors, and the public gateway rejects unauthenticated fleet requests with HTTP `401`.
 
 The current verified public endpoint is `https://dsh-superagent.201-79-39-167.sslip.io`. The reserved address and canonical organization hostname remain pending because external TCP routing on the reserved address and Cloudflare access are not available yet.
 
-The `hdt98` account now has its own private `hdt98/dsh-superagent-onboarding-smoke` deployment, fine-grained repository PAT, and OpenAI provider. Its remaining worktree, polling, reboot, model-attestation, Desktop-history, and blast-radius checks are in progress. The account-onboarding test also exposed a partial-provisioning recovery bug. Existing Linux users are now required to have their directories and `0700` home permission repaired before onboarding returns successfully, with regression coverage in `tests/onboarding-helper.spec.ts`.
+The `hdt98` account now has its own private `hdt98/dsh-superagent-onboarding-smoke` deployment, fine-grained repository PAT, and OpenAI provider. Its prepared-worktree, polling, reboot, model-attestation, normal sign-in, Session-history, and blast-radius checks have passed. The account-onboarding test also exposed a partial-provisioning recovery bug. Existing Linux users are now required to have their directories and `0700` home permission repaired before onboarding returns successfully, with regression coverage in `tests/onboarding-helper.spec.ts`.
 
 ## Migration and upgrades
 
