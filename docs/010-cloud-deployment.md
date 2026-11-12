@@ -7,6 +7,7 @@ This guide installs a self-service cloud fleet on a Linux server. The gateway us
 Use a General Purpose Droplet with at least 2 dedicated vCPUs and 8 GB RAM. Attach a 50 GB volume for `/var/lib/dsh-superagent`, enable weekly backups, and reserve a public IP. The examples assume Ubuntu or another Linux distribution with systemd.
 
 SSH in, add a non-root gateway user, and install Node.js 22.19+ or 24, pnpm, Python 3.8+, tmux, git, `gh`, `sudo`, and the `dsh` command.
+Install `gh` from GitHub's official package repository and verify `gh --version` reports 2.48 or later; the version packaged by older Ubuntu releases cannot read paginated API responses as DSH requires.
 
 ```sh
 sudo mkdir -p /opt/dsh-superagent /etc/dsh-superagent /var/lib/dsh-superagent/gateway
