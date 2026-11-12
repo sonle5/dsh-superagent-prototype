@@ -139,6 +139,7 @@ EnvironmentFile={env_path}
 WorkingDirectory={checkout}
 ExecStart={checkout}/scripts/dsh-superagent start --profile {profile} --url {url} --state-dir {state_dir}
 ExecStop={checkout}/scripts/dsh-superagent stop --profile {profile} --url {url} --state-dir {state_dir} --stop-timeout 300
+SuccessExitStatus=2 3
 RemainAfterExit=yes
 
 [Install]

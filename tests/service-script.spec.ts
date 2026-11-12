@@ -98,6 +98,11 @@ it('recognizes a Node DSH process whose operating-system command name is not nod
   processes(`${pid} MainThread node /usr/bin/dsh --profile superagent --no-open`)
   expect(await status('superagent')).toMatchObject({ pids: [pid] })
 })
+it('does not take a debugger wrapper for the DSH service process', async () => {
+  const pid = sleeper()
+  processes(`${pid} strace /usr/bin/strace -ff -o /tmp/trace /usr/bin/dsh --profile superagent --no-open`)
+  expect(await status('superagent')).toMatchObject({ pids: [] })
+})
 it('records the service PID at start, and still refuses a second instance the scan finds', async () => {
   const url = await answering()
   const pid = sleeper()

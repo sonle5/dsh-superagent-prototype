@@ -64,6 +64,7 @@ dsh-superagent-person-<github-login>-<deployment-id>.service
 ```
 
 The helper starts and enables it directly. Do not enable a generic `dsh-superagent@` unit for a self-service deployment.
+The generated unit treats launcher statuses 2 and 3 as successful startup because the process is running and waiting for operator action; those component/setup states remain visible through health checks.
 
 ## 4. Onboard from Desktop
 
