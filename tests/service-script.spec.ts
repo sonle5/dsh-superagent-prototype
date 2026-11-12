@@ -116,7 +116,8 @@ it('records the service PID at start, and still refuses a second instance the sc
   const checkout = realpathSync(root)
   expect(tmux).toEqual(expect.arrayContaining(['-P', '-F', '#{pane_pid}', '-c', checkout]))
   const log = new RegExp(`>> '${checkout}/\\.artifacts/dsh-superagent-superagent-\\d{8}-\\d{6}-\\d+\\.log' 2>&1$`)
-  expect(tmux.find(word => word.startsWith('umask 077; exec '))).toMatch(log)
+  expect(tmux[tmux.indexOf('/bin/sh') + 2]).toMatch(log)
+  expect(tmux.slice(tmux.indexOf('/bin/sh'), tmux.indexOf('/bin/sh') + 2)).toEqual(['/bin/sh', '-c'])
   const second = sleeper()
   started(service(pid), `${second} node node /opt/dsh --profile superagent`)
   const again = await run('start', '--url', url, '--timeout', '10')
@@ -145,7 +146,7 @@ it('starts a profile with private Session and workspace storage', async () => {
   expect(statSync(overlay).mode & 0o777).toBe(0o600)
   const tmux = readFileSync(join(root, 'tmux.log'), 'utf8').split('---\n').find(call => call.startsWith('new-session'))!.split('\n')
   const launchedOverlay = join(realpathSync(root), '.artifacts', 'control', 'profiles', 'superagent-sglang', 'dsh-home.yml')
-  expect(tmux.find(word => word.startsWith('umask 077; exec '))).toContain(`--patch '${launchedOverlay}'`)
+  expect(tmux[tmux.indexOf('/bin/sh') + 2]).toContain(`--patch '${launchedOverlay}'`)
 }, 20_000)
 
 it('authenticates health checks with the deployment native capability', async () => {

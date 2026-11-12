@@ -216,7 +216,9 @@ def start(args):
                    + ' >> ' + shlex.quote(str(log)) + ' 2>&1')
         # Reuse an existing tmux session without disturbing other windows.
         target = ['new-window', '-t', '=' + session + ':'] if exists else ['new-session', '-s', session]
-        pane = subprocess.run(['tmux', *target, '-d', '-P', '-F', '#{pane_pid}', '-n', 'server', '-c', str(ROOT), command],
+        # Service accounts use nologin as their login shell; tmux still needs an explicit shell for this compound command.
+        pane = subprocess.run(['tmux', *target, '-d', '-P', '-F', '#{pane_pid}', '-n', 'server', '-c', str(ROOT),
+                               '/bin/sh', '-c', command],
                               check=True, capture_output=True, text=True).stdout.strip()
         if pane.isdigit():
             (control(args.profile) / 'service.pid').write_text(pane + '\n')
