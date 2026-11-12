@@ -12,7 +12,7 @@ function fixture(history: UserMessage[] = []) {
   const followup = vi.fn((message: UserMessage) => { inbox.nextTurn.push(message) })
   const injected = vi.fn((_message: UserMessage) => {})
   // Only the delivery-facing Agent methods participate in this fixture.
-  const agent = { id: SessionId('delivery-test'), session: {}, inbox, steer, followup, inject: injected } as unknown as Agent
+  const agent = { id: SessionId('delivery-test'), status: 'running', session: {}, inbox, steer, followup, inject: injected } as unknown as Agent
   const event = (message: UserMessage): SessionEvent => ({ type: 'user/message', seq: SessionSeq(0), time: 0, surfaceOp: 'append', data: message })
   const read = vi.fn(async (offset: number, length: number) => ({ events: history.slice(offset, offset + length).map(event) }))
   const close = vi.fn(async () => {})
@@ -52,6 +52,16 @@ it.each(['queue', 'steer'] as const)('delivers %s as an orchestrator relay, dedu
   await restored.send('request', mode)
   expect(restored.steer).not.toHaveBeenCalled()
   expect(restored.followup).not.toHaveBeenCalled()
+})
+
+it('wakes an idle Session instead of leaving a steering relay in its next-step inbox', async () => {
+  const f = fixture()
+  ;(f.agent as unknown as { status: string }).status = 'idle'
+  await f.send('request', 'steer')
+  expect(f.steer).not.toHaveBeenCalled()
+  expect(f.followup).toHaveBeenCalledOnce()
+  expect(f.inbox.nextTurn).toHaveLength(1)
+  expect(f.inbox.nextStep).toHaveLength(0)
 })
 
 it.each(['pending', 'consumed', 'live'] as const)('recognizes legacy plugin identity in %s input without rewriting it', async location => {

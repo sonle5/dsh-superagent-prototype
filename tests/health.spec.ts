@@ -16,8 +16,8 @@ async function at(ms: number) {
 async function failThrice() { await at(2000); await at(6000) }
 
 it('reports a relay in error once it failed three times, clears it once the relay reached the main Session, and leaves the runtime ready', async () => {
-  const steer = h.agents.get(h.runtime.masterId)!.steer
-  for (let count = 0; count < 3; count++) steer.mockImplementationOnce(() => { throw new Error('session busy') })
+  const followup = h.agents.get(h.runtime.masterId)!.followup
+  for (let count = 0; count < 3; count++) followup.mockImplementationOnce(() => { throw new Error('session busy') })
   h.runtime.sessions.relay('r1', JSON.stringify({ kind: 'note' }))
   await h.runtime.idle()
   expect(h.runtime.health.relay).toMatchObject({ state: 'ready', detail: expect.stringContaining('1 waiting') })
@@ -31,7 +31,7 @@ it('keeps a failing relay\'s error while replies recover, and a failing reply\'s
   const master = h.agents.get(h.runtime.masterId)!
   const lark = vi.mocked(Commands.prototype.lark)
   const reply = (id: string) => { h.runtime.outbox.send({ id, channel: feishu('9', 'x').channel!, text: '已合并。', kind: 'notice' }) }
-  master.steer.mockImplementation(() => { throw new Error('master gone') })
+  master.followup.mockImplementation(() => { throw new Error('master gone') })
   h.runtime.sessions.relay('r2', JSON.stringify({ kind: 'note' }))
   lark.mockRejectedValue(new Error('internal error (2200)'))
   reply('stuck')
@@ -43,7 +43,7 @@ it('keeps a failing relay\'s error while replies recover, and a failing reply\'s
   expect(h.runtime.health).toMatchObject({ relay: { state: 'error' }, reply: { state: 'ready' } })
   lark.mockRejectedValue(new Error('internal error (2200)'))
   reply('stuck-2')
-  master.steer.mockImplementation(() => {})
+  master.followup.mockImplementation(() => {})
   await h.runtime.idle(); await at(50_000); await at(70_000)
   expect(h.runtime.health).toMatchObject({ relay: { state: 'ready' }, reply: { state: 'error' }, runtime: { state: 'ready' } })
 })

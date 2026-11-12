@@ -77,7 +77,9 @@ export class AgentDelivery {
         : { kind: 'dsh-superagent' as const, form: 'relay' as const }
       const message = freezeMessage({ id, role: 'user' as const, content: [{ type: 'text' as const, text }], source })
       if (typeof mode === 'object') { agent.inject(message); seen.ids.add(id) }
-      else if (mode === 'steer') agent.steer(message)
+      else if (mode === 'steer' && agent.status === 'running') agent.steer(message)
+      // Steering cannot start an idle turn, so a relay queued after the main Session finishes must wake it.
+      else if (mode === 'steer') agent.followup(message)
       else agent.followup(message)
     }
     accepted?.()
