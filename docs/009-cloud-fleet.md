@@ -1,6 +1,6 @@
 # 009 Cloud fleet
 
-> **Status: implemented, pending Linux acceptance.** GitHub device sign-in, organization admission, the per-person server registry, self-service onboarding, credential setup, authenticated deployment management and native Session forwarding, server installation files, and the Fleet-controller integration are implemented. No production Droplet has run the full acceptance test yet.
+> **Status: implemented and accepted for the current single-operator fleet.** GitHub device sign-in, organization admission, the per-person server registry, self-service onboarding, credential setup, authenticated deployment management and native Session forwarding, server installation files, and the Fleet-controller integration are implemented. The two current repository deployments have passed Mac-off execution, full-Droplet recovery, open-history recovery, and mid-Ticket reboot tests. A second-person onboarding test, a canonical DNS cutover, a durable operator-alert channel, and per-repository token separation remain deployment work.
 
 This document describes a fleet that runs on one always-on Linux server shared by several people, with DeepSeek Harness Desktop as an optional client. It builds on [006 Deployment](006-deployment.md) and [007 Architecture](007-architecture.md).
 
@@ -10,6 +10,19 @@ This document describes a fleet that runs on one always-on Linux server shared b
 - Desktop stays the single operator interface and shows local Sessions and server deployments together.
 - A person or a deployment is added from Desktop, without shell access to the server.
 - One HTTPS address serves the whole fleet, however many deployments it holds.
+
+## Current acceptance record
+
+The `onenexus-team/inference-support-loop` and `onenexus-team/sglang` deployments run as separate DSH profiles on one Ubuntu 24.04 Droplet. On 2026-11-12 they passed:
+
+- A real GitHub Issue run with Desktop and the Mac-local deployment stopped; the worker published one acknowledgement and one final reply.
+- A Droplet reboot during an active Ticket, followed by the final reply once after recovery.
+- A Droplet reboot with Session history open, followed by reconnection without the stale red load failure and with Inbox grouping preserved.
+- Independent tmux servers and systemd cgroups, so restarting or stopping one deployment does not move or stop the other.
+- Eval `one-nexus / glm-5.3-sontinh` and Executor `claude / claude-opus-5-5(auto)` on both deployments, including an actual worker turn through the configured `nexus13 / nexus13/claude-opus-5-5(auto)` route during route-acceptance testing.
+- Certificate renewal, gateway recovery, both health timers, and every health component returning `ready` with no errors after reboot.
+
+The verified external endpoint is currently `https://dsh-superagent.201-79-39-167.sslip.io`; it is intentionally temporary until the canonical hostname is available. The reserved IPv4 remains assigned in DigitalOcean, but the current provider/network path does not complete an external TCP connection on that address. Use the verified `sslip.io` endpoint until the canonical DNS and provider routing check are complete.
 
 ## What runs
 

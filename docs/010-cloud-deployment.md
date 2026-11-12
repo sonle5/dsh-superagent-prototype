@@ -170,6 +170,33 @@ The acceptance test is:
 3. Wait for a new Ticket, worker Session, or GitHub reply from the server.
 4. Reboot the Droplet, then confirm the deployment unit, health timer, and gateway return to service.
 
+Also repeat the Droplet reboot while a Ticket is mid-turn and while its Session history is open in Desktop. The turn must finish and publish once, the history must reconnect without a red load failure, the Session must remain grouped under its repository, and the configured Eval and Executor models must remain unchanged.
+
+Check each deployment’s management health directly from the server:
+
+```sh
+sudo systemctl start dsh-superagent-<deployment-health-unit>.service
+sudo journalctl -u dsh-superagent-<deployment-health-unit>.service -n 80 --no-pager
+sudo systemctl is-active dsh-superagent-<deployment-health-timer>.timer
+```
+
+The status output must report `runtime`, `relay`, `github`, `models`, `evals`, `delivery`, and `reply` as `ready`, with an empty `errors` object. The timer must be `active`.
+
+### Acceptance record
+
+The current single-operator fleet was accepted against commit `a2989a48bbd8769a51aa50ad0a7e7a1545ed4179` on 2026-11-12:
+
+- Both repository deployments ran while the Mac-local deployment was stopped.
+- A GitHub Issue trigger published exactly one acknowledgement and one final reply.
+- A reboot during an active Ticket recovered the turn and published the final reply once.
+- A reboot with Session history open restored the stream without a red load error and preserved repository grouping.
+- Each deployment had a distinct systemd cgroup and tmux server (`dsh-superagent-0f7069013d78a64a` and `dsh-superagent-6f95e55831dcd2ba`).
+- Eval and Executor settings survived restart: `one-nexus / glm-5.3-sontinh` and `claude / claude-opus-5-5(auto)`. A real worker turn also succeeded through `nexus13 / nexus13/claude-opus-5-5(auto)` before the Executor was restored to Claude.
+- Both health timers stayed active and every health component returned `ready` with no errors.
+- A forced certificate renewal and `certbot renew --dry-run --no-random-sleep-on-renew` both succeeded.
+
+The current verified public endpoint is `https://dsh-superagent.201-79-39-167.sslip.io`. The reserved address and canonical organization hostname remain pending because external TCP routing on the reserved address and Cloudflare access are not available yet.
+
 ## Migration and upgrades
 
 - Stop the Mac-local deployment before starting its server copy; two running deployments polling one GitHub account duplicate work.
