@@ -93,6 +93,10 @@ def write(path, content, mode=0o600, user=None, group=None):
     os.replace(temporary, path)
 
 
+def run_checked(command):
+    subprocess.run(command, check=True, stdout=subprocess.DEVNULL)
+
+
 def profile_patch(state_dir, port):
     return f"""- id: webserver
   config:
@@ -199,8 +203,8 @@ def create_person(login, base, dry):
     if not dry:
         if subprocess.run(["getent", "passwd", user], capture_output=True).returncode == 0:
             return result
-        subprocess.run(["useradd", "--system", "--user-group", "--home-dir", str(home), "--create-home",
-                        "--shell", "/usr/sbin/nologin", user], check=True)
+        run_checked(["useradd", "--system", "--user-group", "--home-dir", str(home), "--create-home",
+                     "--shell", "/usr/sbin/nologin", user])
         for path in [home, home / "dsh-home", home / "deployments", home / "worktrees", home / "artifacts"]:
             path.mkdir(parents=True, exist_ok=True)
             shutil.chown(path, user=user, group=user)
@@ -253,11 +257,9 @@ def deployment(request, dry):
                        f"HOME={person_home}", f"XDG_DATA_HOME={person_home / '.local' / 'share'}",
                        f"DSH_HOME={person_home / 'dsh-home'}"]
     if not profile_has_bundle(profile_dir, WEB_APP_BUNDLE):
-        subprocess.run([*profile_command, "dsh", "--profile", profile,
-                        "--from-default-profile", PROFILE_TEMPLATE, "--dump-config"],
-                       check=True, stdout=subprocess.DEVNULL)
-    subprocess.run([*profile_command, "dsh", "plugin", "--profile", profile, "add", f"link:{checkout}"],
-                   check=True, stdout=subprocess.DEVNULL)
+        run_checked([*profile_command, "dsh", "--profile", profile,
+                     "--from-default-profile", PROFILE_TEMPLATE, "--dump-config"])
+    run_checked([*profile_command, "dsh", "plugin", "--profile", profile, "add", f"link:{checkout}"])
     write(patch_path, profile_patch(state_dir, port), user=person_user, group=person_user)
     write(env_path, env_content(profile, url, state_dir, artifacts, person_home / "dsh-home"))
     write(unit_path, unit_content(person_user, checkout, env_path, profile, url, state_dir), mode=0o644)
@@ -266,9 +268,9 @@ def deployment(request, dry):
           mode=0o644)
     write(recover_unit_path, recover_unit_content(person_user, checkout, env_path, profile, url, state_dir), mode=0o644)
     write(health_timer_path, timer_unit_content(health_unit_name), mode=0o644)
-    subprocess.run(["systemctl", "daemon-reload"], check=True)
-    subprocess.run(["systemctl", "enable", "--now", unit_name], check=True)
-    subprocess.run(["systemctl", "enable", "--now", health_timer_name], check=True)
+    run_checked(["systemctl", "daemon-reload"])
+    run_checked(["systemctl", "enable", "--now", unit_name])
+    run_checked(["systemctl", "enable", "--now", health_timer_name])
     token = state_dir / "native-proxy-token"
     deadline = time.monotonic() + 120
     while not token.exists():

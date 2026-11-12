@@ -93,6 +93,11 @@ it('recognizes the desktop application as the service process', async () => {
   processes(`${pid} /Applications/De /Applications/DeepSeek Harness.app/Contents/Resources/app.asar/dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js --profile superagent --no-open`)
   expect(await status('superagent')).toMatchObject({ pids: [pid] })
 })
+it('recognizes a Node DSH process whose operating-system command name is not node', async () => {
+  const pid = sleeper()
+  processes(`${pid} MainThread node /usr/bin/dsh --profile superagent --no-open`)
+  expect(await status('superagent')).toMatchObject({ pids: [pid] })
+})
 it('records the service PID at start, and still refuses a second instance the scan finds', async () => {
   const url = await answering()
   const pid = sleeper()

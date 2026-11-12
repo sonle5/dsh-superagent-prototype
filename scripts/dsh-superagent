@@ -84,7 +84,8 @@ def ps(*options, check=False):
 
 def is_dsh(name, args):
     """Return whether `ps` found a DSH command, including its desktop-host process."""
-    return name in ('node', 'dsh') or any('dsh-desktop-host/' in word for word in args)
+    return (name in ('node', 'dsh') or any(Path(word).name == 'dsh' for word in args)
+            or any('dsh-desktop-host/' in word for word in args))
 
 
 def running(pid, profile):
