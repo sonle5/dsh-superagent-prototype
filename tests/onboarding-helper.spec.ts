@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -55,6 +55,16 @@ it('plans a person and deployment with derived server paths', async () => {
   expect(JSON.parse(credentials.stdout)).toEqual({
     id: 'widgets', cli: `${baseDir}/people/alice/bin/agent-widgets`,
   })
+})
+
+it('keeps the detached deployment alive when recovery finishes', () => {
+  const unit = execFileSync('python3', ['-c', [
+    'import runpy, sys',
+    `module = runpy.run_path(${JSON.stringify(script)})`,
+    "sys.stdout.write(module['recover_unit_content']('dsh-alice', '/opt/dsh-superagent', '/etc/example.env', "
+      + "'superagent-widgets', 'http://127.0.0.1:3083', '/var/lib/widgets'))",
+  ].join('\n')], { encoding: 'utf8' })
+  expect(unit).toContain('KillMode=process')
 })
 
 it('rejects invalid names instead of deriving unsafe paths', async () => {

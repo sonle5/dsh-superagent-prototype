@@ -4,6 +4,7 @@ After=dsh-superagent-health@%i.service
 
 [Service]
 Type=oneshot
+KillMode=process
 User=<fleet-user>
 Group=<fleet-group>
 EnvironmentFile=/etc/dsh-superagent/deployments/%i.env

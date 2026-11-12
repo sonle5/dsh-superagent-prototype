@@ -15,3 +15,9 @@ it('gives the unprivileged gateway only the capability needed to bind TLS port 4
   expect(unit).toContain('AmbientCapabilities=CAP_NET_BIND_SERVICE')
   expect(unit).toContain('CapabilityBoundingSet=CAP_NET_BIND_SERVICE')
 })
+
+it('does not tear down a recovered deployment when the recovery oneshot exits', () => {
+  const unit = readFileSync(join(import.meta.dirname, '..', 'examples', 'cloud', 'systemd',
+    'dsh-superagent-recover@.service'), 'utf8')
+  expect(unit).toContain('KillMode=process')
+})

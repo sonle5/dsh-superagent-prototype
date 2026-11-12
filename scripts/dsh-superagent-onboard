@@ -169,6 +169,7 @@ Description=DeepSeek Harness Superagent automatic recovery for {profile}
 
 [Service]
 Type=oneshot
+KillMode=process
 User={user}
 Group={user}
 EnvironmentFile={env_path}
