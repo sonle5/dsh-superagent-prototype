@@ -181,6 +181,7 @@ it('forwards native API and WebSocket traffic through one deployment route', asy
       return
     }
     targetWss.handleUpgrade(request, socket, head, client => {
+      client.send('upstream-ready')
       client.on('message', data => client.send(`echo:${data.toString()}`))
     })
   })
@@ -208,6 +209,8 @@ it('forwards native API and WebSocket traffic through one deployment route', asy
     socket.once('open', resolve)
     socket.once('error', reject)
   })
+  await expect(new Promise<string>(resolve => socket.once('message', data => resolve(data.toString()))))
+    .resolves.toBe('upstream-ready')
   socket.send('hello')
   await expect(new Promise<string>(resolve => socket.once('message', data => resolve(data.toString()))))
     .resolves.toBe('echo:hello')

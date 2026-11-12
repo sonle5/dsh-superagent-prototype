@@ -462,6 +462,9 @@ function proxyNativeMux(
       upstream.on('open', () => {
         opened = true
         client.off('message', hold)
+        client.on('message', (data, binary) => {
+          if (upstream.readyState === WebSocket.OPEN) upstream.send(data, { binary })
+        })
         for (const item of early.splice(0)) upstream.send(item.data, { binary: item.binary })
       })
       upstream.on('message', data => {
