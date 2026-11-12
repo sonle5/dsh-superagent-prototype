@@ -10,6 +10,8 @@ Group=<fleet-group>
 EnvironmentFile=/etc/dsh-superagent/gateway.env
 WorkingDirectory=/opt/dsh-superagent
 ExecStart=/usr/local/bin/dsh --profile ${DSH_SUPERAGENT_PROFILE} --no-open
+StandardOutput=null
+StandardError=journal
 Restart=on-failure
 RestartSec=10s
 

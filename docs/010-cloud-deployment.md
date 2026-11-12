@@ -113,6 +113,7 @@ Put that deployment in the gateway registry’s `deployments` list and set `owne
 ## 6. Install systemd supervision for the gateway and a migrated deployment
 
 Copy the four unit files from `examples/cloud/systemd/` to `/etc/systemd/system/`, replacing `<fleet-user>` and `<fleet-group>` in each file.
+Keep the gateway unit's `StandardOutput=null` and `StandardError=journal`: DSH prints its one-time web login URL to standard output, so journaling standard output would expose the login token to every user who can read the journal.
 
 ```sh
 sudo systemctl daemon-reload

@@ -461,6 +461,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/panel-settings.spec.tsx`, `panel-prompts.spec.tsx`, `panel-deployment.spec.tsx`, `panel-panel.spec.tsx` | The settings groups, drafts and history, the prompts, the Deployment page, and the panel's search, glossary and route memory |
 | `tests/panel-providers.spec.tsx` | Provider and model onboarding, redacted credentials, write-only key replacement, revision refusal, reset and deployment isolation |
 | `tests/provider-control.spec.ts` | DSH provider and credential adapter reads, writes, secret redaction, conflict mapping and user-layer reset |
+| `tests/cloud-systemd.spec.ts` | The cloud gateway unit keeps DSH's one-time web login stdout token out of the shared journal |
 | `tests/draft.spec.ts`, `tests/prompt-config.spec.ts`, `tests/markdown.spec.ts`, `tests/marks.spec.ts` | Draft states, merges and the save bar's line; the prompt configuration by section and the line diff; the Markdown subset and its links; the mark of every state the views classify |
 | `tests/locales.spec.ts`, `tests/styles.spec.ts` | The copy in both languages, the stylesheet |
 | `tests/class-docs.spec.ts` | Every class in `src` has a JSDoc block before it |
