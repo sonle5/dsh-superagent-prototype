@@ -611,6 +611,8 @@ interface RemoteStreamFailure {
 interface OpenUpstreamOptions {
   onItem(value: unknown): void
   onError(error: RemoteStreamFailure): void
+  /** Physical loss of the upstream carrier, as distinct from a protocol error or an orderly end. */
+  onCarrierLoss?(error: RemoteStreamFailure): void
   onEnd(): void
   onReady?(): void
 }
@@ -645,6 +647,12 @@ function openUpstreamStream(
     if (ended) return
     ended = true
     options.onError(error)
+  }
+  const carrierLoss = (error: RemoteStreamFailure): void => {
+    if (ended) return
+    ended = true
+    if (options.onCarrierLoss) options.onCarrierLoss(error)
+    else options.onError(error)
   }
   const openTimer = setTimeout(() => {
     failure({ code: 'gateway/service-unavailable', message: `${peerLabel(target)} Remote stream did not open`, details: {} })
@@ -684,11 +692,11 @@ function openUpstreamStream(
   })
   socket.on('error', () => {
     clearTimeout(openTimer)
-    if (!closed) failure({ code: 'gateway/internal', message: `${peerLabel(target)} Remote stream failed`, details: {} })
+    if (!closed) carrierLoss({ code: 'gateway/internal', message: `${peerLabel(target)} Remote stream failed`, details: {} })
   })
   socket.on('close', () => {
     clearTimeout(openTimer)
-    if (!closed) failure({ code: 'gateway/internal', message: `${peerLabel(target)} Remote stream closed`, details: {} })
+    if (!closed) carrierLoss({ code: 'gateway/internal', message: `${peerLabel(target)} Remote stream closed`, details: {} })
   })
   return {
     send(value) {
@@ -1299,20 +1307,34 @@ function controllerUpgrade(ctx: Context, stateDir: string, server: WebSocketServ
             target,
             stream: undefined as unknown as UpstreamStream,
           }
+          let received = false
+          const fail = (error: RemoteStreamFailure): void => {
+            sendMuxError(client, message.streamId, {
+              ...error,
+              message: redactSensitive(error.message),
+              details: peerResponseValue(error.details, target.id) as Record<string, unknown>,
+            })
+            sendMuxEnd(client, message.streamId)
+            remove(message.streamId, pending)
+          }
           pending.stream = openUpstreamStream(
             target,
             message.endpoint,
             outboundPeerPayload(target, message.endpoint, message.payload),
             {
-              onItem(value) { sendMuxItem(client, message.streamId, responseValue(target, message.endpoint, value)) },
-              onError(error) {
-                sendMuxError(client, message.streamId, {
-                  ...error,
-                  message: redactSensitive(error.message),
-                  details: peerResponseValue(error.details, target.id) as Record<string, unknown>,
-                })
-                sendMuxEnd(client, message.streamId)
-                remove(message.streamId, pending)
+              onItem(value) {
+                received = true
+                sendMuxItem(client, message.streamId, responseValue(target, message.endpoint, value))
+              },
+              onError: fail,
+              onCarrierLoss(error) {
+                // Session history has no safe mid-stream resubscribe. Drop the aggregate carrier so DSH's generation
+                // recovery opens it again and replaces the history with a fresh snapshot.
+                if (target.id !== LOCAL_TARGET_ID && message.endpoint === 'session/follow' && received) {
+                  client.close(1012, 'Deployment Session stream lost')
+                  return
+                }
+                fail(error)
               },
               onEnd() {
                 sendMuxEnd(client, message.streamId)

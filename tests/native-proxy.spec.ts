@@ -1619,6 +1619,66 @@ it('merges Session events, takes global events only from the Desktop profile, an
   })
 })
 
+it('reconnects the aggregate carrier when a remote Session history stream restarts', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'dsh-native-session-restart-'))
+  cleanup.push(() => rmSync(state, { recursive: true, force: true }))
+  const sglang = await peerHarness({
+    stateDir: join(state, 'sglang'),
+    onStream(request, send) {
+      if (request.endpoint !== 'session/follow') return
+      send({
+        type: 'snapshot',
+        header: { version: 1, id: 'sglang-session', createdAt: 1, isSeeded: false },
+        cursor: 1,
+        records: [],
+        hasMore: false,
+        projections: { asOfSeq: 1, values: { title: 'SGLang history' } },
+      })
+    },
+  })
+  writeFileSync(join(state, 'fleet.json'), JSON.stringify({
+    version: 1,
+    controlScript: '/usr/bin/true',
+    logDir: state,
+    deployments: [{
+      id: 'sglang',
+      profile: 'superagent-sglang',
+      repository: 'onenexus-team/sglang',
+      url: sglang.url,
+      stateDir: join(state, 'sglang'),
+      workspace: '/tmp/sglang',
+    }],
+  }))
+  const controller = await controllerHarness(state)
+  const { socket, next } = await openMux(controller)
+  socket.send(JSON.stringify({
+    type: 'open',
+    streamId: 'history',
+    endpoint: 'session/follow',
+    payload: {
+      args: [{
+        address: { kind: 'session', sessionId: nativeSessionId('sglang', 'sglang-session') },
+        assistantStream: true,
+      }],
+    },
+  }))
+  expect(await next()).toMatchObject({
+    type: 'item',
+    streamId: 'history',
+    value: { type: 'snapshot', header: { id: nativeSessionId('sglang', 'sglang-session') } },
+  })
+
+  const closed = new Promise<{ code: number; reason: string }>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Controller carrier remained open')), 3_000)
+    socket.once('close', (code, reason) => {
+      clearTimeout(timer)
+      resolve({ code, reason: reason.toString() })
+    })
+  })
+  await sglang.stop()
+  expect(await closed).toEqual({ code: 1012, reason: 'Deployment Session stream lost' })
+})
+
 it('keeps Desktop Workspace, control, and event streams open when every deployment is offline', async () => {
   const state = mkdtempSync(join(tmpdir(), 'dsh-native-no-streams-'))
   cleanup.push(() => rmSync(state, { recursive: true, force: true }))
