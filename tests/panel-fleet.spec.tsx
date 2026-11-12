@@ -49,6 +49,24 @@ it('renders the fleet in English', async () => {
   expect(all('.dt-fleet-grid .dt-tag').map(tag => tag.textContent)).toEqual(['Ready', 'Stopped'])
 })
 
+it('removes account creation after the signed-in person account exists', async () => {
+  server.gatewayStatus = {
+    configured: true,
+    url: 'https://superagent.example',
+    organization: 'example-org',
+    login: 'fixture-user',
+    person: false,
+  }
+  await mount()
+  await click(tab(zh['tab.fleet']))
+  expect(text()).toContain(zh.gatewayCreatePerson)
+  await click(zh.gatewayCreatePerson)
+  expect(server.gatewayStatus.person).toBe(true)
+  expect(text()).not.toContain(zh.gatewayCreatePerson)
+  expect(text()).toContain(zh.gatewayPersonReady)
+  expect(server.requests).toContainEqual({ path: 'gateway/person', method: 'POST' })
+})
+
 it('switches every management view to the selected deployment and remembers the selection', async () => {
   await mount()
   const selector = field<HTMLSelectElement>(zh.deploymentContext)

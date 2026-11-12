@@ -143,7 +143,7 @@ it('signs in a GitHub organization member and forwards one deployment management
 
   expect(await gateway.call('GET', '/gateway/api/fleet')).toMatchObject({ status: 401, body: { error: 'Gateway sign-in required' } })
   expect(await gateway.call('GET', '/gateway/api/fleet', undefined, { cookie: cookie! })).toMatchObject({ status: 200, body: {
-    login: 'member', organization: 'example-org',
+    login: 'member', organization: 'example-org', person: false,
     deployments: [{ id: 'sglang', profile: 'superagent-sglang', repository: 'example-org/sglang' }],
   } })
   expect(await gateway.call('GET', '/gateway/api/deployment/sglang/state', undefined, { cookie: cookie! }))
@@ -295,7 +295,7 @@ it('onboards a person and deployment without exposing another person’s registr
   const cookie = session.setCookie?.split(';', 1)[0]
 
   expect(await gateway.call('GET', '/gateway/api/fleet', undefined, { cookie: cookie! })).toMatchObject({
-    status: 200, body: { login: 'member', deployments: [] },
+    status: 200, body: { login: 'member', person: false, deployments: [] },
   })
   expect(await gateway.call('GET', '/gateway/api/deployment/legacy/state', undefined, { cookie: cookie! }))
     .toMatchObject({ status: 404, body: { error: 'Deployment not found: legacy' } })
@@ -320,7 +320,7 @@ it('onboards a person and deployment without exposing another person’s registr
   expect(saved.people[0]?.deployments[0]).toMatchObject({ id: 'widgets', tokenDir })
 
   expect(await gateway.call('GET', '/gateway/api/fleet', undefined, { cookie: cookie! })).toMatchObject({
-    status: 200, body: { login: 'member', deployments: [
+    status: 200, body: { login: 'member', person: true, deployments: [
       { id: 'widgets', profile: 'superagent-widgets', repository: 'example-org/widgets' },
     ] },
   })

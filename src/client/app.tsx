@@ -21,6 +21,7 @@ import { When } from './widgets.tsx'
 
 export interface AppProps {
   t: T
+  openSession?: (id: string) => void
 }
 
 function Glossary({ open, onClose }: { open: boolean; onClose: () => void }) {
@@ -177,7 +178,7 @@ function Pages({ route, openTab }: { route: Route; openTab: (tab: Tab) => void }
 }
 
 /** Root panel component managing route history and shared panel state. */
-export function App({ t }: AppProps) {
+export function App({ t, openSession }: AppProps) {
   const [location, setLocation] = useState(initialLocation)
   useEffect(() => { remember(location) }, [location])
   // Preserve the last opened settings group across navigation so the Settings tab reopens at it.
@@ -189,7 +190,8 @@ export function App({ t }: AppProps) {
   const back = useCallback(() => move(current => ({ route: current.stack.at(-1) ?? HOME, stack: current.stack.slice(0, -1) })), [move])
   const openTab = useCallback((tab: Tab) => move(current => ({ stack: [], route: tab === 'settings'
     ? settingsRoute(lastSettingsGroup(current)) : { page: tab, id: undefined } })), [move])
-  return <PanelProvider t={t} navigate={navigate} back={back} backLabel={routeLabel(t, location.stack.at(-1) ?? HOME)}>
+  return <PanelProvider t={t} navigate={navigate} back={back} backLabel={routeLabel(t, location.stack.at(-1) ?? HOME)}
+    openSession={openSession}>
     <Pages route={location.route} openTab={openTab} />
   </PanelProvider>
 }

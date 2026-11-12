@@ -35,6 +35,7 @@ export function actor(source: string, id: string, human = true): Actor {
   return { source, id, name: name ? { zh: name, en: name } : human ? unnamed!.person : unnamed!.bot }
 }
 type TicketFields = Omit<TicketRow, 'stage' | 'action'>
+type ProviderControlView = ApiResponse<'GET fleet/:id/providers'>
 const TICKET = {
   id: 't1', title: '修复回归', state: 'open', actions: { retry: false, stop: true }, strength: 'explicit', ended: undefined,
   attention: undefined, assignments: 1, inputs: 2, undelivered: 0, deliveryError: undefined, sessionId: 'worker-t1', directory: '/w/t1',
@@ -111,6 +112,9 @@ export interface PanelServer {
   dropped: DroppedReply[]
   failing: Extract<Problem, { kind: 'outgoing' }>['outgoing'][]
   fleet: FleetView
+  gatewayStatus: ApiResponse<'GET gateway/status'>
+  /** Redacted provider-control views keyed by deployment id. */
+  providerControls: Record<string, ProviderControlView>
   /** Hold the initial Fleet response while a test exercises panel startup. */
   fleetLoading?: Promise<void>
   /** Reject repository-scoped routes that omit their deployment prefix, as the controller does before selection. */
@@ -253,6 +257,37 @@ function initial(): PanelServer {
   const reply = { source: 'feishu', url: 'https://applink.feishu.cn/client/chat/open?openChatId=oc_1', label: { zh: '飞书消息',
     en: 'Feishu message' } }
   const defaults = { revision: 0, previousRevision: null, savedAt: '', source: 'defaults' }
+  const modelCatalog = {
+    default: { provider: 'one-nexus', model: 'glm-5.3-sontinh', reasoningEffort: 'max' },
+    routableProviders: ['one-nexus', 'claude'],
+    failures: [],
+    groups: [{
+      id: 'one-nexus', name: 'One Nexus', models: [{ id: 'glm-5.3-sontinh', name: 'GLM 5.3',
+        reasoning: { efforts: [{ id: 'high', name: 'High' }, { id: 'max', name: 'Max' }], defaultEffort: 'max' } },
+      { id: 'dsv41f-thuytinh', name: 'DeepSeek V4.1 Flash', reasoning: { efforts: [{ id: 'high', name: 'High' }] } }],
+    }, {
+      id: 'claude', name: 'Claude', models: [{ id: 'claude-opus-5-5(auto)', name: 'Opus 5.5',
+        reasoning: { efforts: [{ id: 'high', name: 'High' }, { id: 'max', name: 'Max' }], defaultEffort: 'max' } }],
+    }],
+  }
+  const providerControl = (): ProviderControlView => ({
+    writable: true,
+    revision: 7,
+    providers: [{
+      id: 'one-nexus', displayName: 'One Nexus', api: 'openai-completions', baseURL: 'https://onenexus.test/v1',
+      credentialRef: 'ONENEXUS_API_KEY', credential: { configured: true, source: 'user', writable: true },
+      models: [{ id: 'glm-5.3-sontinh', name: 'GLM 5.3', contextWindow: 330000, maxTokens: 65000, reasoning: true, image: false },
+        { id: 'dsv41f-thuytinh', name: 'DeepSeek V4.1 Flash', reasoning: true, image: false }],
+      active: true, configured: true, removable: true,
+    }, {
+      id: 'claude', displayName: 'Claude', api: 'anthropic-messages', baseURL: 'http://127.0.0.1:8317',
+      credentialRef: 'CLAUDE_API_KEY', credential: { configured: true, source: 'user', writable: true },
+      models: [{ id: 'claude-opus-5-5(auto)', name: 'Claude Opus 5.5', contextWindow: 200000, maxTokens: 65000,
+        reasoning: true, image: true }],
+      active: true, configured: true, removable: false,
+    }],
+    catalog: modelCatalog,
+  })
   return {
     health: {}, down: false, pending: 0, opened: [], requests: [], misuse: [], queued: new Set(), dropped: [], failing: [],
     fleet: {
@@ -278,6 +313,8 @@ function initial(): PanelServer {
         triggers: { pending: 0, evaluating: 0, recent: [] }, canControl: true,
       }],
     },
+    providerControls: { 'inference-support-loop': providerControl(), sglang: providerControl() },
+    gatewayStatus: { configured: false },
     setup: { machine: MACHINE, problem: null, feishuProblem: null,
       accounts: { repository: 'acme/widgets', agent: 'agent-bot', feishu: { appId: 'cli_bot', brand: 'feishu', botId: 'ou_bot',
         name: 'Widgets Bot' } } },
@@ -319,10 +356,15 @@ const page = <T>(items: T[]) => ({ items, total: items.length, next_offset: null
 const ticketOf = (id: string) =>
   [...server.tickets.open, ...server.person, ...server.tickets.ended].find(ticket => ticket.id === id) ?? server.ticketDetails[id]
 const SourceSave = z.object({ enabled: z.boolean(), config: z.unknown() })
+const controlOf = (id: string) => server.providerControls[id]
+const providerControl = (id: string) => {
+  const control = controlOf(id)
+  return control ? structuredClone(control) : undefined
+}
 
 const ROUTES: { [K in keyof Api]: Route<K> } = {
   'GET fleet': { answer: async () => { await server.fleetLoading; return server.fleet } },
-  'GET gateway/status': { answer: () => ({ configured: false }) },
+  'GET gateway/status': { answer: () => server.gatewayStatus },
   'POST gateway/device': { answer: () => ({
     device_code: 'fixture-device-code', user_code: 'FIX-CODE', verification_uri: 'https://github.com/login/device',
     expires_in: 900, interval: 5,
@@ -330,7 +372,11 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
   'POST gateway/session': { body: true, answer: () => ({
     login: 'fixture-user', organization: 'fixture-org', expiresAt: '2099-01-01T00:00:00Z',
   }) },
-  'POST gateway/person': { answer: () => ({ login: 'fixture-user', created: true }) },
+  'POST gateway/person': { answer: () => {
+    const created = server.gatewayStatus.person !== true
+    server.gatewayStatus = { ...server.gatewayStatus, person: true }
+    return { login: 'fixture-user', created }
+  } },
   'POST gateway/deployment': { body: true, answer: () => ({
     login: 'fixture-user',
     created: true,
@@ -366,6 +412,68 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
     if (!item) return refuse(404, `Deployment not found: ${params.id}`)
     item.status = 'starting'; item.detail = 'Starting'
     return { id: params.id, action: 'restart', code: 0, output: 'Restarted' }
+  } },
+  'GET fleet/:id/providers': { answer: ({ params }) => providerControl(params.id)
+    ?? refuse(404, `Deployment not found: ${params.id}`) },
+  'PUT fleet/:id/providers/:provider': { body: true, answer: ({ params, body }) => {
+    const control = controlOf(params.id)
+    if (!control) return refuse(404, `Deployment not found: ${params.id}`)
+    if (!/^[a-z][a-z0-9-]*$/.test(params.provider)) return refuse(400, 'Invalid provider id')
+    if (body.revision !== control.revision) return refuse(409, 'Settings changed. Reload before saving.')
+    const previous = control.providers.find(provider => provider.id === params.provider)
+    const credential = body.apiKey !== undefined
+      ? { configured: true, source: 'user', writable: true }
+      : previous?.credentialRef === body.credentialRef ? previous.credential : { configured: false, writable: true }
+    const providers = control.providers.filter(provider => provider.id !== params.provider)
+    providers.push({
+      id: params.provider, displayName: body.displayName, api: body.api, baseURL: body.baseURL,
+      credentialRef: body.credentialRef, ...credential ? { credential } : {},
+      models: body.models.map(model => ({ ...model })),
+      active: true, configured: true, removable: true,
+    })
+    providers.sort((left, right) => left.displayName.localeCompare(right.displayName))
+    const group = {
+      id: params.provider,
+      name: body.displayName,
+      models: body.models.map(model => ({
+        id: model.id,
+        name: model.name,
+        reasoning: model.reasoning ? { efforts: [{ id: 'high', name: 'High' }, { id: 'max', name: 'Max' }] } : undefined,
+      })),
+    }
+    server.providerControls[params.id] = {
+      ...control,
+      revision: control.revision + 1,
+      providers,
+      catalog: { ...control.catalog, groups: [...control.catalog.groups.filter(item => item.id !== params.provider), group] },
+    }
+    return providerControl(params.id)!
+  } },
+  'POST fleet/:id/providers/:provider/credential': { body: true, answer: ({ params, body }) => {
+    const control = controlOf(params.id)
+    if (!control) return refuse(404, `Deployment not found: ${params.id}`)
+    const provider = control.providers.find(item => item.id === params.provider)
+    if (!provider) return refuse(404, `Provider not found: ${params.provider}`)
+    if (!provider.credentialRef) return refuse(400, `Provider ${params.provider} has no credential reference`)
+    if (!body.value) return refuse(400, 'Credential value is required')
+    provider.credential = { configured: true, source: 'user', writable: true }
+    control.revision++
+    return providerControl(params.id)!
+  } },
+  'DELETE fleet/:id/providers/:provider': { body: true, answer: ({ params, body }) => {
+    const control = controlOf(params.id)
+    if (!control) return refuse(404, `Deployment not found: ${params.id}`)
+    const provider = control.providers.find(item => item.id === params.provider)
+    if (!provider) return refuse(404, `Provider not found: ${params.provider}`)
+    if (!provider.removable) return refuse(409, `Provider ${params.provider} has no user-layer override to reset`)
+    if (body.revision !== control.revision) return refuse(409, 'Settings changed. Reload before saving.')
+    server.providerControls[params.id] = {
+      ...control,
+      revision: control.revision + 1,
+      providers: control.providers.filter(item => item.id !== params.provider),
+      catalog: { ...control.catalog, groups: control.catalog.groups.filter(group => group.id !== params.provider) },
+    }
+    return providerControl(params.id)!
   } },
   'GET state': { answer: stateView },
   'GET overview': { answer: overviewView },
@@ -528,7 +636,7 @@ export function usePanelServer(cleanup: () => void) {
       if (deployment && server.downDeployment === decodeURIComponent(deployment)) return new Response(null, { status: 404 })
       const prefixed = /^deployment\/[a-z0-9][a-z0-9-]*\/(.+)$/.exec(path)?.[1]
       const local = method === 'GET' && path === 'fleet'
-        || method === 'POST' && (path.startsWith('fleet/') || path.startsWith('deployments/'))
+        || method !== 'GET' && (path.startsWith('fleet/') || path.startsWith('deployments/') || path.startsWith('gateway/'))
       if (server.requiresDeploymentPrefix && !local && prefixed === undefined) {
         return new Reply({ error: 'No operation' }, 404)
       }

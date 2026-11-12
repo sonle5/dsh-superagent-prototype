@@ -226,6 +226,7 @@ it('keeps the controller loopback-only and serves its registry without a local r
 it('signs the Fleet controller in to a gateway and stores only the gateway session', async () => {
   const state = mkdtempSync(join(tmpdir(), 'dsh-gateway-controller-'))
   cleanup.push(() => { rmSync(state, { recursive: true, force: true }) })
+  let personCreated = false
   const gateway: Server = createServer(async (request, response) => {
     const body = await new Promise<string>(resolve => {
       const chunks: Buffer[] = []
@@ -251,7 +252,7 @@ it('signs the Fleet controller in to a gateway and stores only the gateway sessi
     }
     if (request.url === '/gateway/api/fleet' && request.headers['x-dsh-superagent-native'] === 'gateway-session') {
       response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({
-        organization: 'example-org', login: 'example-user', deployments: [],
+        organization: 'example-org', login: 'example-user', person: personCreated, deployments: [],
       }))
       return
     }
@@ -260,6 +261,7 @@ it('signs the Fleet controller in to a gateway and stores only the gateway sessi
       response.writeHead(201, { 'content-type': 'application/json' }).end(JSON.stringify({
         login: 'example-user', user: 'dsh-example-user', created: true,
       }))
+      personCreated = true
       return
     }
     if (request.url === '/gateway/api/deployment' && request.method === 'POST'
@@ -311,10 +313,14 @@ it('signs the Fleet controller in to a gateway and stores only the gateway sessi
   })
   expect(await call('GET', 'gateway/status')).toEqual({ status: 200, body: {
     configured: true, url: `http://127.0.0.1:${(gateway.address() as AddressInfo).port}`,
-    organization: 'example-org', login: 'example-user',
+    organization: 'example-org', login: 'example-user', person: false,
   } })
   expect(await call('POST', 'gateway/person')).toEqual({ status: 200, body: {
     login: 'example-user', user: 'dsh-example-user', created: true,
+  } })
+  expect(await call('GET', 'gateway/status')).toEqual({ status: 200, body: {
+    configured: true, url: `http://127.0.0.1:${(gateway.address() as AddressInfo).port}`,
+    organization: 'example-org', login: 'example-user', person: true,
   } })
   expect(await call('POST', 'gateway/deployment', { id: 'widgets', repository: 'example-org/widgets' }))
     .toEqual({ status: 200, body: {

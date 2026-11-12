@@ -1,9 +1,10 @@
 /** Ticket detail page: stage and actions, Mandate details, undelivered/delivered Inputs, subscribed Threads, and Assignments. */
 import { useState, type ReactNode } from 'react'
 import { ApiError, usePoll, type TicketPageView } from './api.ts'
-import { DisclosureRow, Dot, Icon, Tag, type IconName } from './controls.tsx'
+import { Button, DisclosureRow, Dot, Icon, Tag, type IconName } from './controls.tsx'
 import { decisionMark, reportDot, ticketMark } from './marks.ts'
-import { usePanel } from './provider.tsx'
+import { nativeSessionId } from './native-id.ts'
+import { usePanel, usePanelData } from './provider.tsx'
 import { settingsRoute } from './route.ts'
 import { Earlier, ThreadLine, automatedRuns } from './rows.tsx'
 import { actorName, failureText, localized, readableMarkers, reasonLabel, valueLabel, when } from './text.ts'
@@ -104,7 +105,8 @@ function MandateDetails({ ticket, actor }: { ticket: TicketPageView; actor: stri
 }
 
 export function TicketPage({ id }: { id: string }) {
-  const { t, call } = usePanel()
+  const { t, call, deployment, openSession } = usePanel()
+  const { state } = usePanelData()
   const { data, error, reload } = usePoll(() => call('GET tickets/:id', { id }), [id])
   const after = async (request: Promise<unknown>) => { await request; await reload() }
   if (!data) return <><PageHead
@@ -124,8 +126,17 @@ export function TicketPage({ id }: { id: string }) {
     return reason ? t('endedAt', { time, outcome, reason }) : t('endedAtShort', { time, outcome })
   })()
   const channel = data.channels[0]
+  const open = (sessionId: string | undefined) => {
+    if (deployment && sessionId) openSession(nativeSessionId(deployment.id, sessionId))
+  }
   return <>
     <PageHead title={data.title}>
+      {state?.masterId && <Button variant="outline" icon={<Icon name="session" />} onClick={() => open(state.masterId)}>
+        {t('openMaster')}
+      </Button>}
+      {data.sessionId && <Button variant="outline" icon={<Icon name="session" />} onClick={() => open(data.sessionId)}>
+        {t('openWorker')}
+      </Button>}
       {opening?.url && <ActionLink href={opening.url}>{t('openThread', { source: valueLabel(t, 'source', opening.source) })}</ActionLink>}
       {data.actions.retry && <ConfirmButton variant="outline" icon="refresh" label={t('retry')} title={t('retryTitle')}
         message={t('retryConfirm', { title: data.title })}

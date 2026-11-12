@@ -9,6 +9,7 @@ import type { SourceStatusView } from './views/sources.ts'
 import type { DecisionListView, SearchView, ThreadDetailView, ThreadListView } from './views/threads.ts'
 import type { TicketListView } from './views/tickets.ts'
 import type { FleetView } from './fleet.ts'
+import type { ProviderControlView } from './providers.ts'
 
 export const TICKET_FILTERS = ['open', 'person', 'working', 'idle', 'ended'] as const
 export const THREAD_FILTERS = ['subscribed', 'evaluating', 'recent', 'all'] as const
@@ -20,7 +21,14 @@ type Delivery = 'injected' | 'pending'
 
 export interface Api {
   'GET fleet': { response: FleetView }
-  'GET gateway/status': { response: { configured: boolean; url?: string; organization?: string; login?: string; error?: string } }
+  'GET gateway/status': { response: {
+    configured: boolean
+    url?: string
+    organization?: string
+    login?: string
+    person?: boolean
+    error?: string
+  } }
   'POST gateway/device': { response: {
     device_code: string
     user_code: string
@@ -55,6 +63,25 @@ export interface Api {
   'POST fleet/:id/start': { response: { id: string; action: 'start'; code: number; output: string } }
   'POST fleet/:id/stop': { response: { id: string; action: 'stop'; code: number; output: string } }
   'POST fleet/:id/restart': { response: { id: string; action: 'restart'; code: number; output: string } }
+  'GET fleet/:id/providers': { response: ProviderControlView }
+  'PUT fleet/:id/providers/:provider': { body: {
+    displayName: string
+    api: 'openai-completions' | 'anthropic-messages' | 'openai-responses'
+    baseURL: string
+    credentialRef: string
+    apiKey?: string
+    models: {
+      id: string
+      name: string
+      contextWindow?: number
+      maxTokens?: number
+      reasoning: boolean
+      image: boolean
+    }[]
+    revision: number
+  }; response: ProviderControlView }
+  'POST fleet/:id/providers/:provider/credential': { body: { value: string }; response: ProviderControlView }
+  'DELETE fleet/:id/providers/:provider': { body: { revision: number }; response: ProviderControlView }
   'GET state': { response: StateView }
   'GET overview': { response: OverviewView }
   'GET search': { query: { q: string }; response: SearchView }
@@ -93,6 +120,10 @@ export const FLEET_ROUTES = [
   'POST fleet/:id/start',
   'POST fleet/:id/stop',
   'POST fleet/:id/restart',
+  'GET fleet/:id/providers',
+  'PUT fleet/:id/providers/:provider',
+  'POST fleet/:id/providers/:provider/credential',
+  'DELETE fleet/:id/providers/:provider',
 ] as const satisfies readonly (keyof Api)[]
 export const DEPLOYMENT_ROUTES = [
   'GET state',

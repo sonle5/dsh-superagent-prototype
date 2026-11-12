@@ -94,8 +94,6 @@ The generic units and this section are for one-time migration of an existing Mac
 
 For each repository, create a separate DSH profile, state directory, loopback port, and clean checkout or worktree root:
 
-For each repository, create a separate DSH profile, state directory, loopback port, and clean checkout or worktree root:
-
 ```sh
 DSH_HOME=/var/lib/dsh-superagent/dsh-home \
   dsh --profile superagent-<deployment-id> --from-default-profile web --dump-config >/dev/null

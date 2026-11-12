@@ -619,6 +619,7 @@ export function registerGateway(ctx: Context, stateDir: string, fetcher: FetchLi
       }
       if (url.pathname === `${PREFIX}/fleet` && req.method === 'GET') {
         json(res, 200, { organization: registry.organization, login,
+          person: registry.people.some(person => person.login === login),
           deployments: personDeployments(registry, login).map(({ id, profile, repository }) => ({ id, profile, repository })) })
         return
       }

@@ -284,6 +284,11 @@ interface ServerRpcEnvelope {
     | { ok: false; error: { code: string; message: string; details: object } }
 }
 
+/** A deployment's native RPC refusal, preserving its wire code for management adapters. */
+export class NativePeerRpcError extends Error {
+  constructor(readonly code: string, message: string, readonly details: object) { super(message) }
+}
+
 interface NativeControllerState {
   /** Controller event-stream client ids mapped to each peer's local generation. */
   readonly eventClients: Map<string, Map<string, string>>
@@ -437,6 +442,34 @@ async function callPeer(
   const parsed = serverEnvelope(await response.json() as unknown, envelope.rpcId)
   if (parsed === undefined) throw new Error(`Invalid native response from ${peerLabel(target)}`)
   return parsed
+}
+
+/**
+ * Invoke one unary deployment-owned DSH Remote method.
+ * @param target - Authenticated native peer.
+ * @param method - DSH Remote method such as `settings/describe`.
+ * @param args - Wire argument object for that method.
+ * @param signal - Caller cancellation, combined with the peer request timeout.
+ * @returns The method's successful value.
+ * @throws NativePeerRpcError when the deployment refuses the method.
+ */
+export async function nativePeerRpc(
+  target: FleetNativeTarget,
+  method: string,
+  args: Record<string, unknown>,
+  signal = new AbortController().signal,
+): Promise<unknown> {
+  const rpcId = randomUUID()
+  const response = await callPeer(target, `/api/${method}`, {
+    type: 'client-request',
+    rpcId,
+    method,
+    payload: { args },
+  }, signal)
+  if (!response.result.ok) {
+    throw new NativePeerRpcError(response.result.error.code, response.result.error.message, response.result.error.details)
+  }
+  return response.result.value
 }
 
 function aggregateFailure(rpcId: string, message: string, code = 'gateway/internal'): ServerRpcEnvelope {

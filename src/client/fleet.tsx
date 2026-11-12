@@ -113,12 +113,13 @@ function CloudGateway({ reload, deployments, selected }: {
         </div>
       </section>
     </div>}
+    {status?.login && status.person === false && <div className="dt-field">
+      <span className="dt-field-head">{t('gatewayPerson')}</span>
+      <Button variant="outline" size="sm" disabled={person.busy}
+        onClick={() => { void person.run() }}>{t('gatewayCreatePerson')}</Button>
+    </div>}
+    {status?.login && status.person && <Hint>{t('gatewayPersonReady')}</Hint>}
     {status?.login && <form className="dt-form dt-block" onSubmit={event => { void deployment.run(event) }}>
-      <div className="dt-field">
-        <span className="dt-field-head">{t('gatewayPerson')}</span>
-        <Button variant="outline" size="sm" disabled={person.busy}
-          onClick={() => { void person.run() }}>{t('gatewayCreatePerson')}</Button>
-      </div>
       <div className="dt-field">
         <span className="dt-field-head">{t('gatewayDeploymentId')}</span>
         <span className="dt-input"><input value={id} onChange={event => setId(event.target.value)} required /></span>

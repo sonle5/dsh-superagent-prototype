@@ -18,6 +18,7 @@ export interface PanelContext {
   back: () => void
   backLabel: string
   notify: (text: string) => void
+  openSession: (id: string) => void
   restart: () => void
 }
 export interface DeploymentChoice {
@@ -89,9 +90,10 @@ function rememberDeployment(id: string | undefined): void {
     else sessionStorage.setItem(DEPLOYMENT_KEY, id)
   } catch (failure) { void failure /* Selection memory is a convenience. */ }
 }
-export function PanelProvider({ t, interval = 5000, navigate = stay, back = stay, backLabel = '', children }: {
+export function PanelProvider({ t, interval = 5000, navigate = stay, back = stay, backLabel = '', openSession = stay, children }: {
   t: T; interval?: number; navigate?: PanelContext['navigate']; back?: () => void
   backLabel?: string
+  openSession?: PanelContext['openSession']
   children: ReactNode
 }) {
   // Read the current translator via ref so locale changes do not recreate `call` and restart polling.
@@ -163,8 +165,8 @@ export function PanelProvider({ t, interval = 5000, navigate = stay, back = stay
     return () => clearTimeout(timer)
   }, [restarting])
   const context = useMemo(() => ({ t, call, deployment, deployments, fleetReady: fleet !== undefined, fleetError,
-    selectDeployment, navigate, back, backLabel, notify, restart }),
-  [t, call, deployment, deployments, fleet, fleetError, selectDeployment, navigate, back, backLabel, notify, restart])
+    selectDeployment, navigate, back, backLabel, notify, openSession, restart }),
+  [t, call, deployment, deployments, fleet, fleetError, selectDeployment, navigate, back, backLabel, notify, openSession, restart])
   const data = useMemo(() => ({ state, error, reload, setup: state?.setup, running: state?.load.running ?? 0, restarts }), [state, error,
     reload, restarts])
   return <Panel.Provider value={context}><PanelState.Provider value={data}>

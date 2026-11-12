@@ -30,6 +30,7 @@ import { executorLoad, ticketDetail, ticketList } from './views/tickets.ts'
 import { Fleet, FleetControlError, managementApi, redactSensitive, type FleetAction, type FleetNativeTarget } from './fleet.ts'
 import { INTERNAL_HEADER } from './native-transport.ts'
 import { matchesNativeToken } from './native-auth.ts'
+import { ProviderControlError, providerControl, resetProvider, saveProvider, setProviderCredential } from './providers.ts'
 import { LIMITS } from '../limits.ts'
 
 export interface HttpHost {
@@ -97,6 +98,7 @@ function failure(error: unknown): [number, Record<string, unknown>] {
   if (error instanceof RouteError) return [error.status, { error: error.message }]
   if (error instanceof UserError) return [error.missing ? 404 : 400, { error: error.message, code: error.code, values: error.values }]
   if (error instanceof SettingsConflict || error instanceof PromptConflict) return [409, { error: error.message }]
+  if (error instanceof ProviderControlError) return [error.status, { error: error.message }]
   return [500, { error: error instanceof Error ? error.message : String(error) }]
 }
 
@@ -149,9 +151,11 @@ type GatewayRouteKey = 'GET gateway/status' | 'POST gateway/device' | 'POST gate
 type FleetRouteKey = 'GET fleet' | 'POST deployments/:id/select' | 'POST fleet/:id/start' | 'POST fleet/:id/stop'
   | 'POST fleet/:id/restart'
 type ControllerRouteKey = GatewayRouteKey | FleetRouteKey
+type ProviderRouteKey = 'GET fleet/:id/providers' | 'PUT fleet/:id/providers/:provider'
+  | 'POST fleet/:id/providers/:provider/credential' | 'DELETE fleet/:id/providers/:provider'
 type RouteHandler<K extends keyof Api> = (input: Input<K>) => ApiResponse<K> | Promise<ApiResponse<K>>
-type Routes = { [K in Exclude<keyof Api, GatewayRouteKey>]: RouteHandler<K> }
-type ControllerRoutes = { [K in ControllerRouteKey]: RouteHandler<K> }
+type Routes = { [K in Exclude<keyof Api, GatewayRouteKey | ProviderRouteKey>]: RouteHandler<K> }
+type ControllerRoutes = { [K in ControllerRouteKey | ProviderRouteKey]: RouteHandler<K> }
 type RouteTable = { [K in keyof Api]?: RouteHandler<K> }
 const offset = z.coerce.number().int().nonnegative().catch(0)
 const limit = (fallback: number, max: number) => z.coerce.number().int().positive().catch(fallback).transform(value => Math.min(max, value))
@@ -296,6 +300,13 @@ function controllerRoutes(fleet: Fleet): ControllerRoutes {
     'POST fleet/:id/start': ({ params }) => control(params.id, 'start'),
     'POST fleet/:id/stop': ({ params }) => control(params.id, 'stop'),
     'POST fleet/:id/restart': ({ params }) => control(params.id, 'restart'),
+    'GET fleet/:id/providers': ({ params }) => providerControl(fleet, params.id),
+    'PUT fleet/:id/providers/:provider': async ({ params, body }) =>
+      saveProvider(fleet, params.id, params.provider, await body()),
+    'POST fleet/:id/providers/:provider/credential': async ({ params, body }) =>
+      setProviderCredential(fleet, params.id, params.provider, await body()),
+    'DELETE fleet/:id/providers/:provider': async ({ params, body }) =>
+      resetProvider(fleet, params.id, params.provider, await body()),
   }
 }
 function decoded(segment: string): string {

@@ -343,6 +343,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/tools/main.ts` | The main Session's tools |
 | `src/app/tools/executor.ts` | An Executor Session's tools |
 | `src/app/http.ts` | The `/orchestrator/api` routes: signed-panel or native-capability admission, the same-origin check, request limits, one status per kind of failure and validated forwarding to registered deployment APIs; in control mode, the gateway sign-in, person/deployment onboarding and credential proxy routes |
+| `src/app/providers.ts` | Deployment-scoped provider and model management over DSH's native settings, provider catalog and credential APIs; reads redact secret material, and writes store API keys only through DSH credentials |
 | `src/app/gateway.ts` | The `/gateway` routes: GitHub device sign-in, organization membership admission, a signed gateway session, the per-person server registry, self-service person/deployment onboarding, one fixed agent-credential provisioning path, deployment-id management forwarding, and authenticated native HTTP and WebSocket forwarding |
 | `src/app/fleet.ts` | The local fleet registry; controller gateway sign-in state; aggregate reads from local and gateway deployments; native-capability and gateway-session credentials; person/deployment onboarding and credential proxies; stopped-versus-unreachable status; recent log tails; and lifecycle actions restricted to registered local DSH profiles |
 | `src/app/native-auth.ts` | The private per-deployment capability shared by the controller and repository halves of native Session routing |
@@ -383,6 +384,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/client/app.tsx` | The panel: header, search, glossary, tabs and the page of the current route |
 | `src/client/provider.tsx` | What every page reads from its host: copy, management deployment context, calls, navigation, notices, the state poll, and `restart`, which reads the state quickly while dsh-superagent restarts; deployment changes persist only the management/unscoped-selection context and never reload Desktop or replace the aggregate native Session tree |
 | `src/client/native-transport.ts` | Desktop-only replacement of the Gateway Remote WebSocket URL with the controller-owned aggregate native transport |
+| `src/client/native-id.ts` | Browser-safe encoding of deployment-scoped aggregate Session ids used by links to a Ticket's main and worker Sessions |
 | `src/client/api.ts` | Calls and polls of the management API, typed by `src/app/api.ts`, and the Decision filters of the Eval status |
 | `src/client/route.ts` | The tabs, the settings groups, the typed routes that `parseRoute` reads, and the route memory with the settings group opened last |
 | `src/client/overview.tsx` | The overview |
@@ -390,6 +392,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/client/source.tsx`, `trigger.tsx`, `eval.tsx`, `execution.tsx` | One file per stage: its status, and its settings where it has some |
 | `src/client/thread.tsx`, `ticket.tsx` | The record pages: a Thread with its timeline, and a Ticket with its authorization, Inputs and Assignments |
 | `src/client/settings.tsx` | The Settings tab: the group navigation and the group on screen |
+| `src/client/providers.tsx` | The deployment-scoped Providers & models settings: redacted credential status, model capabilities, provider presets, write-only keys and inherited-override reset |
 | `src/client/settings-kit.tsx` | The building blocks of settings blocks: the settings the stage groups share, `useBlockDraft`, the fields, among them a Source kind's, and the history of saves |
 | `src/client/prompts.tsx` | The Prompts settings: the page owns the view it read and its editor the draft, and the Edit, Full prompt and History tabs render from them; a built-in part's editor shows a changed default and keeps or drops the override |
 | `src/client/prompt-config.ts` | The prompt configuration by section, by the team sections, skill names, built-in parts (`part/<key>`, with `withOverride`) and part headings the prompt views give, and the line diff of the full prompt, as pure functions |
@@ -456,6 +459,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/panel-overview.spec.tsx`, `panel-source.spec.tsx`, `panel-trigger.spec.tsx`, `panel-eval.spec.tsx`, `panel-execution.spec.tsx` | Each page of the panel, against a fake management API answered by route |
 | `tests/panel-fleet.spec.tsx` | The native fleet page, its deployment details, lifecycle actions and management-context switching, against a fake management API |
 | `tests/panel-settings.spec.tsx`, `panel-prompts.spec.tsx`, `panel-deployment.spec.tsx`, `panel-panel.spec.tsx` | The settings groups, drafts and history, the prompts, the Deployment page, and the panel's search, glossary and route memory |
+| `tests/panel-providers.spec.tsx` | Provider and model onboarding, redacted credentials, write-only key replacement, revision refusal, reset and deployment isolation |
+| `tests/provider-control.spec.ts` | DSH provider and credential adapter reads, writes, secret redaction, conflict mapping and user-layer reset |
 | `tests/draft.spec.ts`, `tests/prompt-config.spec.ts`, `tests/markdown.spec.ts`, `tests/marks.spec.ts` | Draft states, merges and the save bar's line; the prompt configuration by section and the line diff; the Markdown subset and its links; the mark of every state the views classify |
 | `tests/locales.spec.ts`, `tests/styles.spec.ts` | The copy in both languages, the stylesheet |
 | `tests/class-docs.spec.ts` | Every class in `src` has a JSDoc block before it |

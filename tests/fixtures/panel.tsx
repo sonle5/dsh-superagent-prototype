@@ -15,7 +15,7 @@ export const translator = (dictionary: Record<string, string>): T => ((key: stri
   return params ? template.replace(/\{(\w+)\}/g, (match, name: string) => name in params ? String(params[name]) : match) : template
 }) as T
 function Panel({ t }: { t: T }) {
-  return <App t={t} />
+  return <App t={t} openSession={id => server.opened.push(id)} />
 }
 let root: Root | undefined
 let container: HTMLElement | undefined

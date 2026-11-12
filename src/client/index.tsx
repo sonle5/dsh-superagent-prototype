@@ -25,9 +25,11 @@ function HammerIcon({ size }: SidebarPanelIconOwnerProps) {
   </svg>
 }
 
-function Mounted({ t }: { ctx: ClientContext; t: T }) { return <App t={t} /> }
+function Mounted({ ctx, t }: { ctx: ClientContext; t: T }) {
+  return <App t={t} openSession={id => ctx.uiWorkspace.openSession(id as never)} />
+}
 
-export const inject = ['slots', 'locale', 'connection']
+export const inject = ['slots', 'locale', 'connection', 'uiWorkspace']
 /** Registers the panel, sidebar icon, and Plugin Manager config view; `configForms` is optional (without it, machine settings are read-only). */
 export function apply(ctx: ClientContext): void {
   if (isDesktopShell()) {

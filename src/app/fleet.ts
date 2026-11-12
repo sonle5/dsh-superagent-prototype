@@ -67,6 +67,9 @@ type AuthenticatedGatewaySession = { url: string; token: string }
 const GatewayFleet = z.object({
   organization: z.string().min(1),
   login: z.string().min(1),
+  // Older gateways predate the account-readiness flag. Treat an omitted flag as not-yet-created so
+  // a Desktop upgrade can still read the fleet during a rolling gateway deployment.
+  person: z.boolean().default(false),
   deployments: z.array(z.object({
     id: z.string().regex(/^[a-z0-9][a-z0-9-]*$/, 'lowercase deployment id'),
     profile,
@@ -171,6 +174,7 @@ export interface FleetView {
     url: string
     organization?: string
     login?: string
+    person?: boolean
     error?: string
   }
   error?: string
@@ -457,7 +461,7 @@ export class Fleet {
       configured: loaded.configured,
       ...session ? { gateway: {
         url: session.url,
-        ...remote.value ? { organization: remote.value.organization, login: remote.value.login } : {},
+        ...remote.value ? { organization: remote.value.organization, login: remote.value.login, person: remote.value.person } : {},
         ...gatewayError ? { error: gatewayError } : {},
       } } : remote.configured && gatewayError ? { gateway: { url: '', error: gatewayError } } : {},
       ...selected !== undefined && deployments.some(deployment => deployment.id === selected)
@@ -519,7 +523,7 @@ export class Fleet {
     throw new FleetControlError(404, `Deployment not found: ${id}`)
   }
 
-  async gatewayStatus(): Promise<{ configured: boolean; url?: string; organization?: string; login?: string; error?: string }> {
+  async gatewayStatus(): Promise<{ configured: boolean; url?: string; organization?: string; login?: string; person?: boolean; error?: string }> {
     const loaded = loadGatewaySession(this.gatewaySessionPath)
     if (!loaded.value) return { configured: loaded.configured, ...loaded.error ? { error: loaded.error } : {} }
     if (loaded.value.token === undefined) return { configured: true, url: loaded.value.url }
@@ -527,7 +531,7 @@ export class Fleet {
     return {
       configured: true,
       url: loaded.value.url,
-      ...remote.value ? { organization: remote.value.organization, login: remote.value.login } : {},
+      ...remote.value ? { organization: remote.value.organization, login: remote.value.login, person: remote.value.person } : {},
       ...remote.error ? { error: remote.error } : {},
     }
   }
