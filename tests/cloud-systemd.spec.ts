@@ -16,7 +16,7 @@ it('lets the unprivileged gateway bind TLS and run its fixed sudo helper', () =>
     'dsh-superagent-gateway.service'), 'utf8')
   expect(unit).toContain('AmbientCapabilities=CAP_NET_BIND_SERVICE')
   expect(unit).toContain(
-    'CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_CHOWN CAP_DAC_OVERRIDE')
+    'CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE')
 })
 
 it('does not tear down a recovered deployment when the recovery oneshot exits', () => {

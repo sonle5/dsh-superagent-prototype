@@ -1,6 +1,6 @@
 # 009 Cloud fleet
 
-> **Status: implemented and accepted for the current fleet.** GitHub device sign-in, organization admission, the per-person server registry, self-service onboarding, credential setup, authenticated deployment management and native Session forwarding, server installation files, and the Fleet-controller integration are implemented. The two current repository deployments have passed Mac-off execution, full-Droplet recovery, open-history recovery, and mid-Ticket reboot tests. A second organization identity has passed account admission and isolation checks; its first repository deployment still requires a distinct target repository and model credentials. A canonical DNS cutover, a durable operator-alert channel, and per-repository token separation remain deployment work.
+> **Status: implemented; acceptance is in progress for the second identity.** GitHub device sign-in, organization admission, the per-person server registry, self-service onboarding, credential setup, authenticated deployment management and native Session forwarding, server installation files, and the Fleet-controller integration are implemented. The two current repository deployments have passed Mac-off execution, full-Droplet recovery, open-history recovery, and mid-Ticket reboot tests. A second organization identity has passed account admission and isolation checks and now has a private repository-scoped deployment; its remaining acceptance gates are worktree preparation, fine-grained-token polling, reboot recovery, and full Desktop/history verification. A canonical DNS cutover, a durable operator-alert channel, and per-repository token separation remain deployment work.
 
 This document describes a fleet that runs on one always-on Linux server shared by several people, with DeepSeek Harness Desktop as an optional client. It builds on [006 Deployment](006-deployment.md) and [007 Architecture](007-architecture.md).
 
@@ -25,7 +25,7 @@ The `onenexus-team/inference-support-loop` and `onenexus-team/sglang` deployment
 
 The verified external endpoint is currently `https://dsh-superagent.201-79-39-167.sslip.io`; it is intentionally temporary until the canonical hostname is available. The reserved IPv4 remains assigned in DigitalOcean, but the current provider/network path does not complete an external TCP connection on that address. Use the verified `sslip.io` endpoint until the canonical DNS and provider routing check are complete.
 
-`hdt98` is a second organization identity controlled by the same operator. This validates multi-account admission and isolation, but not independent teammate adoption. The account has no deployment yet because every deployment requires a distinct repository and that person's model credentials.
+`hdt98` is a second organization identity controlled by the same operator. This validates multi-account admission, repository-scoped credentials, and deployment isolation, but not independent teammate adoption. Its private `hdt98/dsh-superagent-onboarding-smoke` deployment is configured with its own fine-grained PAT and OpenAI provider; the remaining acceptance checks are in progress.
 
 ## What runs
 
@@ -90,6 +90,8 @@ Each person brings an agent GitHub account and model credentials.
 1. Create a fine-grained agent GitHub PAT with only the repository access that deployment needs.
 2. In Desktop, sign in to Cloud Fleet, create the cloud account and deployment, then paste the PAT into **Configure agent credentials**. The helper writes a per-deployment `gh` wrapper and saves that wrapper in the GitHub Source; it never stores the PAT in the gateway registry.
 3. Configure model providers through the connected deployment's normal DSH provider settings. Those credentials belong to that person's Linux user and profile, not to the gateway.
+
+Grant the PAT Contents, Issues and Pull requests read/write plus Metadata read. GitHub does not expose the account notification inbox to fine-grained PATs, so set the GitHub Source's **Read the account notification inbox** off and enable **Receive new Issues** and **Receive comments**. Repository polling then uses only the least-privilege repository permissions; do not replace the PAT with an over-broad classic token merely to make notification polling succeed.
 
 Token-based agent credentials are still reachable by that person's worker because the worker runs as that Linux user. That is the intended agent-account boundary, not an isolation boundary against prompt injection; use a dedicated agent GitHub account with least-privilege access.
 

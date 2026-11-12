@@ -92,7 +92,7 @@ Start Desktop with the controller profile, then use the Cloud Fleet card:
 1. Sign in with GitHub device flow.
 2. Select **Create my cloud account**. This creates the person entry and Linux user.
 3. Enter a lowercase deployment id and `owner/repository`, then create the deployment. The gateway calls the fixed helper and returns only non-secret metadata.
-4. Paste that deployment agent GitHub account’s PAT into **Configure agent credentials**. The helper writes a `0700` `gh` wrapper owned by that person and saves it in the GitHub Source. The PAT is not written to the gateway registry or returned by the API.
+4. Paste that deployment agent GitHub account’s PAT into **Configure agent credentials**. The helper writes a `0700` `gh` wrapper owned by that person and saves it in the GitHub Source. The PAT is not written to the gateway registry or returned by the API. Grant Contents, Issues and Pull requests read/write plus Metadata read, turn off **Read the account notification inbox**, and enable repository Issue/comment polling; fine-grained PATs cannot read the notification inbox.
 5. Configure model credentials through the connected deployment’s normal DSH provider settings. They stay under that person’s Linux user and profile.
 
 The self-service deployment’s state paths are:
@@ -198,7 +198,7 @@ The current single-operator fleet was accepted against commit `a2989a48bbd8769a5
 
 The current verified public endpoint is `https://dsh-superagent.201-79-39-167.sslip.io`. The reserved address and canonical organization hostname remain pending because external TCP routing on the reserved address and Cloudflare access are not available yet.
 
-The `hdt98` account does not yet have a deployment: that next check requires a distinct repository and its own model credentials. The account-onboarding test also exposed a partial-provisioning recovery bug. Existing Linux users are now required to have their directories and `0700` home permission repaired before onboarding returns successfully, with regression coverage in `tests/onboarding-helper.spec.ts`.
+The `hdt98` account now has its own private `hdt98/dsh-superagent-onboarding-smoke` deployment, fine-grained repository PAT, and OpenAI provider. Its remaining worktree, polling, reboot, model-attestation, Desktop-history, and blast-radius checks are in progress. The account-onboarding test also exposed a partial-provisioning recovery bug. Existing Linux users are now required to have their directories and `0700` home permission repaired before onboarding returns successfully, with regression coverage in `tests/onboarding-helper.spec.ts`.
 
 ## Migration and upgrades
 

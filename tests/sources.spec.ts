@@ -656,6 +656,32 @@ describe('github source', () => {
     expect(h.health.github).toMatchObject({ state: 'ready', detail: '2 notifications; next poll ≥ 120s' })
     h.store.close()
   })
+  it('supports repository polling without the notification inbox used by fine-grained tokens', async () => {
+    const h = host()
+    h.store.saveSettings({ ...h.store.settings(), sources: { ...h.store.settings().sources, github: { enabled: true, config: {
+      repository: 'acme/widgets',
+      cli: '/usr/bin/gh',
+      notifications: false,
+      observeIssues: true,
+      observeComments: true,
+      observePulls: false,
+      observeCi: false,
+    } } } })
+    const started = new Date(Date.now() - 3_600_000).toISOString()
+    h.store.set('github-stream:issues', {
+      since: started,
+      started: { issues: started },
+    })
+    expect(h.config('github')).toMatchObject({ notifications: false })
+    const reads = github(h, { issues: [issue(12, { body: '@agent-bot inspect this', created_at: started, updated_at: started })],
+      'issues/comments': [] })
+    expect(await pollRound(h)).toBe(60)
+    expect(bare(reads)).not.toContain('notifications')
+    expect(bare(reads)).toEqual(expect.arrayContaining(['issues', 'issues/comments']))
+    expect(h.receive).toHaveBeenCalledWith(expect.objectContaining({ meta: expect.objectContaining({ number: 12, kind: 'issue' }) }))
+    expect(h.health.github).toMatchObject({ state: 'ready', detail: 'Repository polling; next poll ≥ 60s' })
+    h.store.close()
+  })
   it('drops a notified Issue whose reads fail for a day, so the Source leaves the error, and keeps its read position', async () => {
     const h = host()
     h.store.set('github-since', '2026-09-08T00:00:00.000Z')
@@ -1104,7 +1130,7 @@ it('reports GitHub as failing only after the configured number of consecutive fa
   expect(pollFailure(1, 3, eof)).toBeUndefined()
   expect(pollFailure(2, 3, eof)).toBeUndefined()
   expect(pollFailure(3, 3, eof)).toEqual({ state: 'error', detail: '3 consecutive failed polls; last: Error: Get "https://api.github.com/x": EOF', code: 'pollFailures', values: { count: '3', error: 'Error: Get "https://api.github.com/x": EOF' } })
-  expect(githubKind.schema.parse({})).toEqual({ repository: '', cli: '', pollSeconds: 60, failuresBeforeError: 3, observeIssues: false,
+  expect(githubKind.schema.parse({})).toEqual({ repository: '', cli: '', pollSeconds: 60, failuresBeforeError: 3, notifications: true, observeIssues: false,
     observePulls: false, observeComments: false, observeCi: false })
 })
 describe('feishu event consumer', () => {

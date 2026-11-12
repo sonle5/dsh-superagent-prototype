@@ -35,7 +35,7 @@ Below, `$DSH_HOME` means `${DSH_HOME:-$HOME/.dsh}`.
 
 ### Agent GitHub account
 
-1. Create a GitHub user account for the agent and give it write access to each repository. A GitHub App cannot be the agent, because dsh-superagent reads the account's notifications. A shared account exposes their union of access to every worker that can use it.
+1. Create a GitHub user account for the agent and give it write access to each repository. A GitHub App cannot be the agent, because dsh-superagent acts through the account's authenticated GitHub CLI. A shared account exposes their union of access to every worker that can use it.
 2. Give it a GitHub CLI that uses only its own credentials:
 
    ```sh
@@ -50,6 +50,8 @@ Below, `$DSH_HOME` means `${DSH_HOME:-$HOME/.dsh}`.
    ```
 
    Sign in as the agent account; the last command prints its login. dsh-superagent reads the login the same way.
+
+   A fine-grained PAT needs repository access limited to the deployment repository, with Contents, Issues and Pull requests read/write and Metadata read. GitHub does not let a fine-grained PAT read the account notification inbox. Turn off **Read the account notification inbox** under the GitHub Source's advanced settings, then enable the repository observation streams needed by that deployment, normally both **Receive new Issues** and **Receive comments**. A classic token is not required for notification processing.
 
 ### Feishu bot (optional)
 
@@ -276,7 +278,7 @@ A refusal has a status and `error`, its English text:
 
 The blocks:
 
-- `source:github`, `source:feishu`: `{"enabled": true, "config": {…}}`. GitHub's config has `repository` and `cli`, and the switches `observeIssues`, `observePulls`, `observeComments` and `observeCi`, off by default, which receive every new Issue, new pull request and comment in the repository and the default branch's CI; Feishu's has `cli`, `chats` as `[{"chatId": "oc_…", "name": "…", "listen": "mentions"}]` (or `"all"`), `directMessages`, and `otherChats` as `"none"` or `"mentions"`.
+- `source:github`, `source:feishu`: `{"enabled": true, "config": {…}}`. GitHub's config has `repository` and `cli`; `notifications`, which reads the account notification inbox and defaults to `true`; and the switches `observeIssues`, `observePulls`, `observeComments` and `observeCi`, off by default, which receive every new Issue, new pull request and comment in the repository and the default branch's CI. Set `notifications` to `false` for a fine-grained PAT and enable the repository streams needed by that deployment. Feishu's config has `cli`, `chats` as `[{"chatId": "oc_…", "name": "…", "listen": "mentions"}]` (or `"all"`), `directMessages`, and `otherChats` as `"none"` or `"mentions"`.
 - `policy`: `{"rules": […], "sources": {"github": {"allowed": [{"id": "<login>"}], "bots": [{"id": "dependabot[bot]"}]}, "feishu": {"allowed": [{"id": "ou_…", "name": "…"}], "syncChat": "oc_…", "admission": {"oc_…": {"unlistedAddressed": "explicit"}}}}}`. `bots` lists the bots whose messages may become inferred candidates. An `admission` row is keyed by chat id, `other` or `direct` for Feishu, and by `issues`, `pulls`, `comments` or `ci` for GitHub; an unset cell takes its default (see [002 Authorization](002-authorization.md)).
 - `eval`: `mode`, `timeoutSeconds` and `model`.
 - `executor`: `model`, `maxWorkers`, `directory`, `prepare` and `blockedCommands`. The processing pause is a setting of its own, `paused`, which `POST executor/pause` sets.
@@ -337,6 +339,7 @@ Setup problems appear on the overview with a link to the fix, in the panel's lan
 | `The agent GitHub CLI cannot read its account` | Sign the wrapper in with `auth login` |
 | `@… cannot read …` or `@… cannot push to …` | Give the agent account write access to the repository |
 | `The GitHub Source names no repository.` | Set the repository, `owner/name`, on the GitHub card |
+| `Resource not accessible by personal access token` on GitHub notifications | Turn off **Read the account notification inbox**, enable **Receive new Issues** and **Receive comments**, then retry; fine-grained PATs cannot read the notification inbox |
 | A Ticket fails with `The prepare command failed: …` | The output names the cause, such as a wrong clone path; fix the command, then retry the Ticket |
 | `git does not read the github.com credential configuration dsh-superagent writes` | Install git 2.32 or later |
 | A Ticket fails with `The git configuration of the repository in … sets …` | Remove the named credential or `http.*.extraheader` settings from the clone's `.git/config` |

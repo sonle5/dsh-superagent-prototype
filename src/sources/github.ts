@@ -25,6 +25,7 @@ const NotificationSchema = z.looseObject({
 
 const GithubConfigSchema = GithubAccountsSchema.extend({ pollSeconds: z.number().int().min(60).max(3600).default(60),
   failuresBeforeError: z.number().int().min(1).max(20).default(3),
+  notifications: z.boolean().default(true),
   observeIssues: z.boolean().default(false), observePulls: z.boolean().default(false), observeComments: z.boolean().default(false),
   observeCi: z.boolean().default(false) }).strict()
 export type GithubConfig = z.infer<typeof GithubConfigSchema>
@@ -48,6 +49,8 @@ export const githubKind: SourceKind<GithubConfig> = {
       hint: { zh: '命令名或绝对路径，通常是用 GH_CONFIG_DIR 登录智能体账号的 gh 包装脚本。智能体以它登录的账号行事，执行器以 gh 调用它。保存时检查它登录的账号能否推送到仓库，然后重启 dsh-superagent。', en: 'A command name or absolute path, usually a gh wrapper signed in to the agent account through GH_CONFIG_DIR. The agent acts as the account it is signed in to, and the Executor calls it as gh. Saving checks that this account can push to the repository, then restarts dsh-superagent.' } },
     { key: 'pollSeconds', type: 'number', advanced: true, min: 60, max: 3600, label: { zh: '轮询间隔 / 秒', en: 'Polling interval / seconds' }, hint: { zh: 'GitHub 要求更长间隔时以 GitHub 为准。', en: 'A longer interval requested by GitHub wins.' } },
     { key: 'failuresBeforeError', type: 'number', advanced: true, min: 1, max: 20, label: { zh: '连续失败几次后报告异常', en: 'Failed polls before reporting an error' }, hint: { zh: '单次网络中断会在下一次轮询时自动重试，不必报告。', en: 'A single network interruption is retried on the next poll and need not be reported.' } },
+    { key: 'notifications', type: 'switch', advanced: true, label: { zh: '读取账号通知', en: 'Read the account notification inbox' },
+      hint: { zh: '回流账号的通知会带来较早的提及和订阅事件。细粒度令牌不支持此接口；关闭时请同时打开仓库级 Issue、PR 和评论轮询。', en: 'The account notification inbox supplies earlier mention and subscription events. Fine-grained tokens do not support this endpoint; when it is off, enable repository Issue, pull request and comment polling.' } },
     { key: 'observeIssues', type: 'switch', label: { zh: '接收仓库里的新 Issue', en: 'Receive new Issues in the repository' },
       hint: { zh: '打开后，没有 @ 智能体的新 Issue 也会收到，由策略的接收表决定是否成为候选。从打开的时候开始，不读以前的。', en: 'New Issues that do not mention the agent are received too, and the Policy\'s admission table decides whether they become candidates. Starts when switched on; earlier ones are not read.' } },
     { key: 'observePulls', type: 'switch', label: { zh: '接收仓库里的新 PR', en: 'Receive new pull requests in the repository' },
@@ -283,7 +286,10 @@ async function pollBranchCi(ctx: SourceContext, round: Round): Promise<void> {
  */
 export async function pollRound(ctx: SourceContext, signal?: AbortSignal): Promise<number> {
   const round = newRound(signal)
-  const notified = await pollNotifications(ctx, round).then(value => ({ value }), (error: unknown) => ({ error }))
+  const config = ctx.config<GithubConfig>(SOURCE)
+  const notified = config?.notifications === false
+    ? { value: { count: 0, interval: Math.max(60, config.pollSeconds) } }
+    : await pollNotifications(ctx, round).then(value => ({ value }), (error: unknown) => ({ error }))
   await pollRepository(ctx, round)
   await pollTicketPulls(ctx, signal, round)
   await pollThreads(ctx, signal, round)
@@ -295,7 +301,9 @@ export async function pollRound(ctx: SourceContext, signal?: AbortSignal): Promi
   const dropped = (round.dropped.length ? `; deleted on GitHub: ${named(round.dropped)}` : '')
     + (round.abandoned.length ? `; dropped after their reads kept failing: ${named(round.abandoned)}` : '')
     + (round.tally.skipped ? `; ${round.tally.skipped} unreadable items skipped` : '')
-  ctx.report('github', { state: 'ready', detail: `${count} notifications; next poll ≥ ${interval}s${dropped}`, at: round.started })
+  ctx.report('github', { state: 'ready',
+    detail: `${config?.notifications === false ? 'Repository polling' : `${count} notifications`}; next poll ≥ ${interval}s${dropped}`,
+    at: round.started })
   return interval
 }
 /** Reads notifications since the cursor and each Issue or PR they name, advancing the cursor atomically with the retry map for failed reads; deleted (410) Issues are dropped once their error is recorded. */
