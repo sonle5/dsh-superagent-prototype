@@ -280,7 +280,7 @@ interface ServerRpcEnvelope {
   type: 'server-response'
   rpcId: string
   result:
-    | { ok: true; value: unknown }
+    | { ok: true; value?: unknown }
     | { ok: false; error: { code: string; message: string; details: object } }
 }
 
@@ -349,7 +349,7 @@ function clientEnvelope(value: unknown): ClientRpcEnvelope | undefined {
 function serverEnvelope(value: unknown, rpcId: string): ServerRpcEnvelope | undefined {
   if (!isRecord(value) || value.type !== 'server-response' || value.rpcId !== rpcId || !isRecord(value.result)) return undefined
   const result = value.result
-  if (result.ok === true && Object.hasOwn(result, 'value')) {
+  if (result.ok === true) {
     return value as unknown as ServerRpcEnvelope
   }
   if (result.ok === false

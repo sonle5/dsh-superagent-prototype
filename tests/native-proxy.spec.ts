@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { gzipSync } from 'node:zlib'
 import { afterEach, expect, it, vi } from 'vitest'
 import WebSocket, { WebSocketServer } from 'ws'
-import { registerNativeTransport } from '../src/app/native-transport.ts'
+import { nativePeerRpc, registerNativeTransport } from '../src/app/native-transport.ts'
 import { nativeEventId, nativeSessionId, nativeWorkspaceId } from '../src/app/native-aggregate.ts'
 import { nativeToken } from '../src/app/native-auth.ts'
 
@@ -19,7 +19,7 @@ type RpcEnvelope = {
   payload: unknown
 }
 type PeerReply =
-  | { ok: true; value: unknown }
+  | { ok: true; value?: unknown }
   | { ok: false; error: { code: string; message: string; details: object } }
 type StreamRequest = {
   type: 'open'
@@ -278,6 +278,31 @@ async function nativeCall(url: string, method: string, payload: unknown, rpcId =
   expect(response.status).toBe(200)
   return await response.json() as Record<string, unknown>
 }
+
+it('accepts a successful unary RPC that has no value', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'dsh-native-rpc-void-'))
+  cleanup.push(() => rmSync(state, { recursive: true, force: true }))
+  const peer = await peerHarness({
+    stateDir: state,
+    onHttp: () => ({ ok: true }),
+  })
+  const target = {
+    id: 'sglang',
+    remote: false,
+    repository: 'onenexus-team/sglang',
+    url: peer.url,
+    nativeUrl: peer.url,
+    profile: 'superagent-sglang',
+    stateDir: state,
+    workspace: '/tmp/sglang',
+    token: nativeToken(state)!,
+  }
+
+  await expect(nativePeerRpc(target, 'credentials/set', {
+    ref: 'EXAMPLE_API_KEY',
+    value: 'not-returned',
+  })).resolves.toBeUndefined()
+})
 
 function socketOpen(socket: WebSocket): Promise<void> {
   return new Promise((resolve, reject) => {
