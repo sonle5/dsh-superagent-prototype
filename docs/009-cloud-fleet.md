@@ -1,6 +1,6 @@
 # 009 Cloud fleet
 
-> **Status: implemented and accepted for the current single-operator fleet.** GitHub device sign-in, organization admission, the per-person server registry, self-service onboarding, repository-scoped credential setup, authenticated deployment management, native Session forwarding, server installation files, and the Fleet-controller integration are implemented. The current repository deployments, the second identity, credential separation, Desktop/history recovery, and mid-Ticket reboot recovery have all passed their acceptance gates. Canonical DNS, durable operator alerts, and kernel-enforced read-only worker execution remain deployment limitations rather than unverified implementation work.
+> **Status: implemented and accepted for the current single-operator fleet.** GitHub device sign-in, organization admission, the per-person server registry, self-service onboarding, repository-scoped credential setup, authenticated deployment management, native Session forwarding, remote lifecycle/log controls, server installation files, and the Fleet-controller integration are implemented. The current repository deployments, the second identity, credential separation, Desktop/history recovery, and mid-Ticket reboot recovery have all passed their acceptance gates. Canonical DNS, durable operator alerts, and kernel-enforced read-only worker execution remain deployment limitations rather than unverified implementation work.
 
 This document describes a fleet that runs on one always-on Linux server shared by several people, with DeepSeek Harness Desktop as an optional client. It builds on [006 Deployment](006-deployment.md) and [007 Architecture](007-architecture.md).
 
@@ -38,8 +38,9 @@ Operator's computer (optional)        Server: one HTTPS address
 Desktop                               Gateway (always on)
  ├─ local Sessions                     ├─ sign-in
  └─ Fleet controller ── HTTPS ──────▶  ├─ each person's deployment list
-    signs in; no fleet file            └─ forwards by deployment id ─▶ deployments ─▶ GitHub
-                                      privileged helper: Linux users, units, token copies
+    signs in; no fleet file            ├─ forwards by deployment id ─▶ deployments ─▶ GitHub
+                                       └─ deployment-scoped control/log routes
+                                      privileged helper: Linux users, units, token copies, service control
                                       one Linux user per person: deployments, credentials, worktrees
                                       systemd: start at boot, restart on failure, health check
 ```
@@ -47,7 +48,7 @@ Desktop                               Gateway (always on)
 - **Deployment.** Unchanged in shape: one `mode: repository` profile per repository, bound to loopback.
 - **Gateway.** New. It is the only listener reachable from outside the server. It signs people in, keeps each person's deployment list, and forwards management and native Session requests to the deployment they name.
 - **Fleet controller.** The existing `mode: control` plugin in Desktop. It signs in to one gateway address and reads its fleet from the gateway. A local `fleet.json` keeps working for deployments on the operator's own computer.
-- **Onboarding helper.** New. The unprivileged gateway calls one fixed root helper through `sudo`. It creates one Linux user for each person and one DSH profile, environment file, systemd unit, state directory, worktree root and token directory for each deployment.
+- **Privileged helper.** New. The unprivileged gateway calls one fixed root helper through `sudo`. It creates one Linux user for each person and one DSH profile, environment file, systemd unit, state directory, worktree root and token directory for each deployment. The same helper exposes only derived-unit `status`, `start`, `stop`, `restart`, and bounded journal reads; callers cannot supply a unit name or command.
 - **systemd.** Starts the gateway and every deployment at boot and restarts them on failure. A timer runs the `status` check of `scripts/dsh-superagent` and restarts a deployment that exits 1.
 
 Desktop stores no Superagent state for server deployments. It loads a snapshot and then follows events while it is open, as it does for local deployments.
@@ -59,6 +60,8 @@ Desktop stores no Superagent state for server deployments. It loads a snapshot a
 - **Deployment tokens stay on the server.** Desktop holds only its gateway session.
 - **The controller's gateway state is local to the controller profile.** Before sign-in, `<control stateDir>/gateway.json` contains only the gateway URL. After sign-in it also contains the gateway's opaque session token; it never contains the GitHub access token.
 - **The gateway is unprivileged.** Creating Linux users and services belongs to a separate privileged helper that offers a fixed set of operations.
+- **Remote controls are deployment-scoped.** The gateway derives the systemd unit from the authenticated GitHub login and deployment id, serializes lifecycle actions per deployment, and writes attempt/result records to a `0600` audit log. It does not grant Desktop root or generic `systemctl` access.
+- **Remote logs are bounded.** Log responses contain at most 80 journal lines and 64 KiB, and both the gateway and controller redact token-like values and authorization headers.
 - **Legacy shared deployments are owner-scoped.** An entry in `deployments` is visible only to the `ownerLogin` named on it. New self-service deployments live under `people` and are visible only to that person.
 - **Self-service GitHub credentials use one fixed operation.** Desktop sends the agent GitHub PAT to the gateway once. The gateway passes it to the helper, which writes a `0700` wrapper owned by that person’s Linux user and updates the deployment’s GitHub Source. The token is not stored in the registry, returned by the API or committed.
 
@@ -103,6 +106,16 @@ Token-based agent credentials are still reachable by that person's worker becaus
 
 The fleet has one address. A server can start on its IP address with a short-lived certificate and move to a hostname later. That move changes configuration only: the gateway's address on the server and in Desktop.
 
+## Lifecycle and logs
+
+Generated per-person deployments advertise `lifecycle` and `logs` capabilities in the gateway fleet response. Desktop shows Start, Stop, Restart, and journal-tail controls only for deployments that advertise the relevant capability. Legacy shared deployments remain visible but do not claim control paths that their generic systemd units do not implement.
+
+- Start and restart first use the deployment management API. If it is unavailable, the controller asks the gateway for the derived systemd state, so an intentionally stopped deployment appears as `stopped` rather than `unreachable`.
+- Stop runs `systemctl stop` through the fixed helper. The generated unit retains its 300-second `ExecStop` timeout for graceful task teardown and Session persistence.
+- Requests for the same deployment are rejected with HTTP `409` while another lifecycle action is running. Actions on different deployments remain independent.
+- Lifecycle authorization is checked against the signed-in person before the helper runs. Another person's deployment returns HTTP `404`.
+- The gateway appends one attempt and one result record to `<gateway stateDir>/audit.jsonl` with mode `0600`. The log never contains provider credentials, tokens, or command environments.
+
 ## Moving a local fleet
 
 - Stop the local deployments first. Two running copies would both poll GitHub as the same account.
@@ -111,7 +124,6 @@ The fleet has one address. A server can start on its IP address with a short-liv
 
 ## Not in this version
 
-- Start, Stop, Restart and the log tail for server deployments. Pausing processing still works from Desktop.
 - Alerts when a deployment needs a person.
 - Changes to DeepSeek Harness or Desktop themselves.
 - Isolated workers per Ticket.

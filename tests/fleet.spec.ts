@@ -190,6 +190,26 @@ it('merges gateway deployments with the local fleet and routes native traffic th
     version: 1, url: gatewayUrl, token: 'gateway-session',
   }), { mode: 0o600 })
   const gateway = createServer((request, response) => {
+    if (request.url === '/gateway/api/deployment/sglang/lifecycle'
+      && request.method === 'POST'
+      && request.headers['x-dsh-superagent-native'] === 'gateway-session') {
+      response.writeHead(200, { 'content-type': 'application/json' })
+        .end(JSON.stringify({ id: 'sglang', action: 'restart', state: 'active', output: 'Remote restarted' }))
+      return
+    }
+    if (request.url === '/gateway/api/deployment/sglang/logs?lines=80'
+      && request.headers['x-dsh-superagent-native'] === 'gateway-session') {
+      response.writeHead(200, { 'content-type': 'application/json' })
+        .end(JSON.stringify({ id: 'sglang', state: 'active',
+          tail: `gateway log\nAuthorization: ${'Bearer'} ${['remote', 'value'].join('-')}` }))
+      return
+    }
+    if (request.url === '/gateway/api/deployment/sglang/status'
+      && request.headers['x-dsh-superagent-native'] === 'gateway-session') {
+      response.writeHead(200, { 'content-type': 'application/json' })
+        .end(JSON.stringify({ id: 'sglang', state: 'active' }))
+      return
+    }
     if (request.url === '/gateway/api/deployment/sglang/credentials'
       && request.headers['x-dsh-superagent-native'] === 'gateway-session') {
       response.writeHead(200, { 'content-type': 'application/json' })
@@ -208,7 +228,8 @@ it('merges gateway deployments with the local fleet and routes native traffic th
     if (request.url === '/gateway/api/fleet' && request.headers['x-dsh-superagent-native'] === 'gateway-session') {
       response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({
         organization: 'example-org', login: 'example-user', person: true,
-        deployments: [{ id: 'sglang', profile: 'superagent-sglang', repository: 'onenexus-team/sglang' }],
+        deployments: [{ id: 'sglang', profile: 'superagent-sglang', repository: 'onenexus-team/sglang',
+          capabilities: ['lifecycle', 'logs'] }],
       }))
       return
     }
@@ -226,11 +247,12 @@ it('merges gateway deployments with the local fleet and routes native traffic th
   const gatewayAddress = `http://127.0.0.1:${(gateway.address() as AddressInfo).port}`
   expect(view.gateway).toMatchObject({ organization: 'example-org', login: 'example-user', person: true })
   expect(view.deployments).toEqual([
-    expect.objectContaining({ id: 'inference-support-loop', status: 'ready', canControl: true }),
-    expect.objectContaining({ id: 'sglang', status: 'ready', canControl: false }),
+    expect.objectContaining({ id: 'inference-support-loop', status: 'ready', remote: false, canControl: true }),
+    expect.objectContaining({ id: 'sglang', status: 'ready', remote: true, canControl: true,
+      log: { path: 'journal:sglang', tail: 'gateway log\nAuthorization: Bearer [redacted]' } }),
   ])
-  await expect(fleet.control('sglang', 'restart')).rejects.toMatchObject({
-    status: 409, message: 'Lifecycle control is unavailable for the remote deployment sglang',
+  await expect(fleet.control('sglang', 'restart')).resolves.toMatchObject({
+    id: 'sglang', action: 'restart', code: 0, output: 'Remote restarted',
   })
   await expect(fleet.configureGatewayDeploymentCredentials('sglang', 'agent-github-token-1234'))
     .resolves.toEqual({ saved: true, revision: 8, restarting: true })
@@ -296,5 +318,80 @@ it('reads a fleet from a gateway that predates the person readiness flag', async
 
   const view = await new Fleet(state).view()
   expect(view.gateway).toMatchObject({ login: 'example-user', person: false })
-  expect(view.deployments).toEqual([expect.objectContaining({ id: 'sglang', canControl: false })])
+  expect(view.deployments).toEqual([expect.objectContaining({ id: 'sglang', remote: true, canControl: false })])
+})
+
+it('uses gateway service state when a stopped remote deployment has no management API', async () => {
+  const state = workspace()
+  const gateway = createServer((request, response) => {
+    if (request.url === '/gateway/api/fleet' && request.headers['x-dsh-superagent-native'] === 'gateway-session') {
+      response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({
+        organization: 'example-org', login: 'example-user', person: true,
+        deployments: [{ id: 'sglang', profile: 'superagent-sglang', repository: 'onenexus-team/sglang',
+          capabilities: ['lifecycle', 'logs'] }],
+      }))
+      return
+    }
+    if (request.url === '/gateway/api/deployment/sglang/state') {
+      response.writeHead(503, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'Deployment unavailable' }))
+      return
+    }
+    if (request.url === '/gateway/api/deployment/sglang/status'
+      && request.headers['x-dsh-superagent-native'] === 'gateway-session') {
+      response.writeHead(200, { 'content-type': 'application/json' })
+        .end(JSON.stringify({ id: 'sglang', state: 'inactive' }))
+      return
+    }
+    if (request.url === '/gateway/api/deployment/sglang/logs?lines=80'
+      && request.headers['x-dsh-superagent-native'] === 'gateway-session') {
+      response.writeHead(200, { 'content-type': 'application/json' })
+        .end(JSON.stringify({ id: 'sglang', state: 'inactive', tail: 'stopped cleanly' }))
+      return
+    }
+    response.writeHead(500).end(JSON.stringify({ error: `Unexpected gateway path: ${request.url}` }))
+  })
+  servers.push(gateway)
+  await new Promise<void>(resolve => gateway.listen(0, '127.0.0.1', resolve))
+  writeFileSync(join(state, 'gateway.json'), JSON.stringify({
+    version: 1, url: `http://127.0.0.1:${(gateway.address() as AddressInfo).port}`, token: 'gateway-session',
+  }), { mode: 0o600 })
+
+  expect((await new Fleet(state).view()).deployments[0]).toMatchObject({
+    id: 'sglang',
+    remote: true,
+    canControl: true,
+    status: 'stopped',
+    detail: 'Stopped intentionally',
+    log: { path: 'journal:sglang', tail: 'stopped cleanly' },
+  })
+})
+
+it('preserves a gateway lifecycle conflict for the operator', async () => {
+  const state = workspace()
+  const gateway = createServer((request, response) => {
+    if (request.url === '/gateway/api/fleet') {
+      response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({
+        organization: 'example-org', login: 'example-user', person: true,
+        deployments: [{ id: 'sglang', profile: 'superagent-sglang', repository: 'onenexus-team/sglang',
+          capabilities: ['lifecycle', 'logs'] }],
+      }))
+      return
+    }
+    if (request.url === '/gateway/api/deployment/sglang/lifecycle') {
+      response.writeHead(409, { 'content-type': 'application/json' })
+        .end(JSON.stringify({ error: 'Another lifecycle action is already running for sglang' }))
+      return
+    }
+    response.writeHead(500).end(JSON.stringify({ error: `Unexpected gateway path: ${request.url}` }))
+  })
+  servers.push(gateway)
+  await new Promise<void>(resolve => gateway.listen(0, '127.0.0.1', resolve))
+  writeFileSync(join(state, 'gateway.json'), JSON.stringify({
+    version: 1, url: `http://127.0.0.1:${(gateway.address() as AddressInfo).port}`, token: 'gateway-session',
+  }), { mode: 0o600 })
+
+  await expect(new Fleet(state).control('sglang', 'restart')).rejects.toMatchObject({
+    status: 409,
+    message: 'Another lifecycle action is already running for sglang',
+  })
 })

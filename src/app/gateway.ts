@@ -2,7 +2,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { spawn } from 'node:child_process'
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Duplex } from 'node:stream'
 import { isAbsolute, join } from 'node:path'
@@ -13,6 +13,7 @@ import { DEPLOYMENT_ROUTES, matchesRoute } from './api.ts'
 import { nativeToken } from './native-auth.ts'
 import { INTERNAL_HEADER, INTERNAL_REQUEST_HEADER } from './native-transport.ts'
 import { LIMITS } from '../limits.ts'
+import { redactSensitive } from './fleet.ts'
 
 const PREFIX = '/gateway/api'
 const COOKIE = 'dsh-superagent-gateway'
@@ -21,6 +22,7 @@ const GITHUB_DEVICE_URL = 'https://github.com/login/device/code'
 const GITHUB_TOKEN_URL = 'https://github.com/login/oauth/access_token'
 const GITHUB_USER_URL = 'https://api.github.com/user'
 const NATIVE_MAX_BODY_BYTES = 300 * 1024 * 1024
+const LIFECYCLE_HELPER_TIMEOUT_MS = 300_000
 
 const organization = z.string().trim().regex(/^[A-Za-z0-9_.-]+$/, 'GitHub organization login')
 const Deployment = z.object({
@@ -113,6 +115,23 @@ const SettingsSave = z.object({
   revision: z.number().int().nonnegative(),
   restarting: z.boolean(),
 })
+const LifecycleAction = z.enum(['start', 'stop', 'restart'])
+const LifecycleResult = z.object({
+  id: z.string().min(1),
+  action: LifecycleAction,
+  state: z.string().min(1),
+  output: z.string().default(''),
+})
+const DeploymentStatus = z.object({
+  id: z.string().min(1),
+  state: z.string().min(1),
+})
+const DeploymentLogs = z.object({
+  id: z.string().min(1),
+  state: z.string().min(1),
+  tail: z.string(),
+})
+type LifecycleAction = z.infer<typeof LifecycleAction>
 
 /** A client-facing refusal with the HTTP status the gateway should return. */
 class GatewayError extends Error { constructor(readonly status: number, message: string) { super(message) } }
@@ -187,8 +206,30 @@ function allDeployments(registry: RegistryConfig): DeploymentConfig[] {
   return [...registry.deployments, ...registry.people.flatMap(person => person.deployments)]
 }
 
+function generatedDeployment(registry: RegistryConfig, deployment: DeploymentConfig): boolean {
+  return registry.onboarding !== undefined && deployment.tokenDir !== undefined
+}
+
+function deploymentCapabilities(registry: RegistryConfig, deployment: DeploymentConfig): ('lifecycle' | 'logs')[] {
+  return generatedDeployment(registry, deployment) ? ['lifecycle', 'logs'] : []
+}
+
 function deploymentToken(deployment: DeploymentConfig): string | undefined {
   return nativeToken(deployment.tokenDir ?? deployment.stateDir, false)
+}
+
+function auditLifecycle(stateDir: string, record: Record<string, unknown>): void {
+  const path = join(stateDir, 'audit.jsonl')
+  try {
+    appendFileSync(path, `${JSON.stringify({ at: new Date().toISOString(), ...record })}\n`, {
+      encoding: 'utf8',
+      flag: 'a',
+      mode: 0o600,
+    })
+    chmodSync(path, 0o600)
+  } catch {
+    throw new GatewayError(503, 'The gateway lifecycle audit log is unavailable')
+  }
 }
 
 function sessionValue(stateDir: string, login: string, expiresAt: number): string {
@@ -220,7 +261,11 @@ function setSession(res: ServerResponse, stateDir: string, login: string, secure
 type FetchLike = (url: string, init?: RequestInit) => Promise<Response>
 const ONBOARDING_TIMEOUT_MS = 180_000
 
-async function runOnboarding(config: RegistryConfig['onboarding'], request: unknown): Promise<unknown> {
+async function runOnboarding(
+  config: RegistryConfig['onboarding'],
+  request: unknown,
+  timeoutMs = ONBOARDING_TIMEOUT_MS,
+): Promise<unknown> {
   if (!config) throw new GatewayError(501, 'Self-service onboarding is not configured')
   const [command, ...args] = config.command
   return await new Promise((resolve, reject) => {
@@ -238,7 +283,7 @@ async function runOnboarding(config: RegistryConfig['onboarding'], request: unkn
     const timer = setTimeout(() => {
       child.kill('SIGTERM')
       finish(new GatewayError(504, 'Self-service onboarding timed out'))
-    }, ONBOARDING_TIMEOUT_MS)
+    }, timeoutMs)
     child.stdout.on('data', chunk => { stdout += chunk.toString('utf8') })
     child.stderr.on('data', chunk => { stderr += chunk.toString('utf8') })
     child.once('error', error => finish(new GatewayError(502, `Self-service onboarding failed: ${error.message}`)))
@@ -489,6 +534,9 @@ function proxyNativeMux(
 /** Register the gateway API on DSH's configured public Web server. */
 export function registerGateway(ctx: Context, stateDir: string, fetcher: FetchLike = fetch): () => void {
   const deploymentPath = /^\/gateway\/api\/deployment\/([a-z0-9][a-z0-9-]*)\/(.+)$/
+  const lifecyclePath = /^\/gateway\/api\/deployment\/([a-z0-9][a-z0-9-]*)\/lifecycle$/
+  const logsPath = /^\/gateway\/api\/deployment\/([a-z0-9][a-z0-9-]*)\/logs$/
+  const statusPath = /^\/gateway\/api\/deployment\/([a-z0-9][a-z0-9-]*)\/status$/
   const credentialPath = /^\/gateway\/api\/deployment\/([a-z0-9][a-z0-9-]*)\/credentials$/
   const nativePath = /^\/gateway\/native\/([a-z0-9][a-z0-9-]*)\/api(?:\/.*)?$/
   type NativeRoute = { dispose: () => void; close: () => void }
@@ -501,6 +549,7 @@ export function registerGateway(ctx: Context, stateDir: string, fetcher: FetchLi
     })
   }
   let onboardingBusy = false
+  const lifecycleBusy = new Set<string>()
   const disposeHttp = ctx.webServer.register({ kind: 'prefix', path: '/gateway', handler: async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://dsh.internal')
     try {
@@ -586,6 +635,78 @@ export function registerGateway(ctx: Context, stateDir: string, fetcher: FetchLi
         } finally { onboardingBusy = false }
         return
       }
+      const lifecycle = lifecyclePath.exec(url.pathname)
+      if (lifecycle && req.method === 'POST') {
+        const target = findDeployment(registry, login, lifecycle[1]!)
+        if (!target) throw new GatewayError(404, `Deployment not found: ${lifecycle[1]}`)
+        if (!generatedDeployment(registry, target)) {
+          throw new GatewayError(501, `Lifecycle control is not configured for ${target.id}`)
+        }
+        const action = LifecycleAction.parse((await jsonBody(req)).action)
+        if (lifecycleBusy.has(target.id)) {
+          throw new GatewayError(409, `Another lifecycle action is already running for ${target.id}`)
+        }
+        lifecycleBusy.add(target.id)
+        try {
+          auditLifecycle(stateDir, { phase: 'attempt', login, deployment: target.id, action })
+          let result: z.infer<typeof LifecycleResult>
+          try {
+            result = LifecycleResult.parse(await runOnboarding(registry.onboarding, {
+              operation: 'lifecycle', login, id: target.id, action, ...registry.onboarding,
+            }, LIFECYCLE_HELPER_TIMEOUT_MS))
+            if (result.id !== target.id || result.action !== action) {
+              throw new GatewayError(502, 'Lifecycle helper returned a different deployment or action')
+            }
+          } catch (error) {
+            auditLifecycle(stateDir, {
+              phase: 'result', login, deployment: target.id, action, outcome: 'failed',
+              error: redactSensitive(error instanceof Error ? error.message : String(error)),
+            })
+            throw error
+          }
+          auditLifecycle(stateDir, {
+            phase: 'result', login, deployment: target.id, action, outcome: 'succeeded', state: result.state,
+          })
+          json(res, 200, {
+            id: result.id,
+            action: result.action,
+            state: result.state,
+            output: redactSensitive(result.output),
+          })
+        } finally {
+          lifecycleBusy.delete(target.id)
+        }
+        return
+      }
+      const status = statusPath.exec(url.pathname)
+      if (status && req.method === 'GET') {
+        const target = findDeployment(registry, login, status[1]!)
+        if (!target) throw new GatewayError(404, `Deployment not found: ${status[1]}`)
+        if (!generatedDeployment(registry, target)) {
+          throw new GatewayError(501, `Lifecycle status is not configured for ${target.id}`)
+        }
+        const result = DeploymentStatus.parse(await runOnboarding(registry.onboarding, {
+          operation: 'status', login, id: target.id, ...registry.onboarding,
+        }))
+        if (result.id !== target.id) throw new GatewayError(502, 'Status helper returned a different deployment')
+        json(res, 200, result)
+        return
+      }
+      const logs = logsPath.exec(url.pathname)
+      if (logs && req.method === 'GET') {
+        const target = findDeployment(registry, login, logs[1]!)
+        if (!target) throw new GatewayError(404, `Deployment not found: ${logs[1]}`)
+        if (!generatedDeployment(registry, target)) {
+          throw new GatewayError(501, `Logs are not configured for ${target.id}`)
+        }
+        const lines = z.coerce.number().int().min(1).max(80).parse(url.searchParams.get('lines') ?? 80)
+        const result = DeploymentLogs.parse(await runOnboarding(registry.onboarding, {
+          operation: 'logs', login, id: target.id, lines, ...registry.onboarding,
+        }))
+        if (result.id !== target.id) throw new GatewayError(502, 'Log helper returned a different deployment')
+        json(res, 200, { id: result.id, state: result.state, tail: redactSensitive(result.tail.slice(-64 * 1024)) })
+        return
+      }
       const credentials = credentialPath.exec(url.pathname)
       if (credentials && req.method === 'POST') {
         const deployment = findDeployment(registry, login, credentials[1]!)
@@ -624,7 +745,12 @@ export function registerGateway(ctx: Context, stateDir: string, fetcher: FetchLi
       if (url.pathname === `${PREFIX}/fleet` && req.method === 'GET') {
         json(res, 200, { organization: registry.organization, login,
           person: registry.people.some(person => person.login === login),
-          deployments: personDeployments(registry, login).map(({ id, profile, repository }) => ({ id, profile, repository })) })
+          deployments: personDeployments(registry, login).map(deployment => ({
+            id: deployment.id,
+            profile: deployment.profile,
+            repository: deployment.repository,
+            capabilities: deploymentCapabilities(registry, deployment),
+          })) })
         return
       }
       const native = nativePath.exec(url.pathname)

@@ -55,6 +55,34 @@ it('plans a person and deployment with derived server paths', async () => {
   expect(JSON.parse(credentials.stdout)).toEqual({
     id: 'widgets', cli: `${baseDir}/people/alice/bin/agent-widgets`,
   })
+
+  const lifecycle = await run({
+    operation: 'lifecycle', login: 'alice', id: 'widgets', action: 'restart',
+    gatewayUser: 'gateway', gatewayGroup: 'gateway', checkout: '/opt/dsh-superagent', baseDir,
+  })
+  expect(lifecycle).toMatchObject({ code: 0 })
+  expect(JSON.parse(lifecycle.stdout)).toEqual({
+    id: 'widgets', action: 'restart', state: 'unchanged',
+    unit: 'dsh-superagent-person-alice-widgets.service', output: '',
+  })
+
+  const status = await run({
+    operation: 'status', login: 'alice', id: 'widgets',
+    gatewayUser: 'gateway', gatewayGroup: 'gateway', checkout: '/opt/dsh-superagent', baseDir,
+  })
+  expect(status).toMatchObject({ code: 0 })
+  expect(JSON.parse(status.stdout)).toEqual({
+    id: 'widgets', state: 'unchanged', unit: 'dsh-superagent-person-alice-widgets.service',
+  })
+
+  const logs = await run({
+    operation: 'logs', login: 'alice', id: 'widgets', lines: 80,
+    gatewayUser: 'gateway', gatewayGroup: 'gateway', checkout: '/opt/dsh-superagent', baseDir,
+  })
+  expect(logs).toMatchObject({ code: 0 })
+  expect(JSON.parse(logs.stdout)).toEqual({
+    id: 'widgets', state: 'unchanged', unit: 'dsh-superagent-person-alice-widgets.service', tail: '',
+  })
 })
 
 it('keeps the detached deployment alive when recovery finishes', () => {
@@ -98,6 +126,18 @@ it('rejects invalid names instead of deriving unsafe paths', async () => {
     gatewayUser: 'gateway', gatewayGroup: 'gateway', checkout: '/opt/dsh-superagent', baseDir: '/var/lib/dsh-superagent',
   })
   expect(invalidToken).toMatchObject({ code: 1, stderr: expect.stringContaining('invalid GitHub token') })
+
+  const invalidAction = await run({
+    operation: 'lifecycle', login: 'alice', id: 'widgets', action: 'shell',
+    gatewayUser: 'gateway', gatewayGroup: 'gateway', checkout: '/opt/dsh-superagent', baseDir: '/var/lib/dsh-superagent',
+  })
+  expect(invalidAction).toMatchObject({ code: 1, stderr: expect.stringContaining('action must be') })
+
+  const invalidLines = await run({
+    operation: 'logs', login: 'alice', id: 'widgets', lines: 81,
+    gatewayUser: 'gateway', gatewayGroup: 'gateway', checkout: '/opt/dsh-superagent', baseDir: '/var/lib/dsh-superagent',
+  })
+  expect(invalidLines).toMatchObject({ code: 1, stderr: expect.stringContaining('lines must be between') })
 
   const longLogin = await run({
     operation: 'person', login: 'A'.repeat(39), gatewayUser: 'gateway', gatewayGroup: 'gateway',

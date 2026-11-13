@@ -1,5 +1,5 @@
 import { createServer, type Server } from 'node:http'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import type { AddressInfo } from 'node:net'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Duplex } from 'node:stream'
@@ -14,6 +14,9 @@ import { nativeToken } from '../src/app/native-auth.ts'
 const DEVICE_URL = 'https://github.com/login/device/code'
 const TOKEN_URL = 'https://github.com/login/oauth/access_token'
 const USER_URL = 'https://api.github.com/user'
+const PRIVATE_CONTROL_VALUE = ['private', 'control', 'value'].join('-')
+const PRIVATE_LOG_VALUE = ['private', 'log', 'value'].join('-')
+const PRIVATE_QUERY_VALUE = ['private', 'query', 'value'].join('-')
 
 const cleanup: (() => void | Promise<void>)[] = []
 afterEach(async () => { for (const dispose of cleanup.splice(0).reverse()) await dispose() })
@@ -98,6 +101,7 @@ function onboardingHelper(state: string, deploymentUrl: string): string {
   writeFileSync(path, `#!/usr/bin/env python3
 import json
 import sys
+import time
 request = json.load(__file__ and open(0))
 print('pam warning', file=sys.stderr)
 with open(${JSON.stringify(requestsPath)}, 'a') as record:
@@ -111,8 +115,22 @@ elif request['operation'] == 'deployment':
         'workspace': '/var/lib/dsh-superagent/people/member/worktrees/widgets',
         'tokenDir': ${JSON.stringify(join(state, 'gateway-tokens'))},
     }))
-else:
+elif request['operation'] == 'credentials':
     print(json.dumps({'id': request['id'], 'cli': ${JSON.stringify(join(state, 'agent-widgets'))}}))
+elif request['operation'] == 'lifecycle':
+    time.sleep(0.25)
+    print(json.dumps({
+        'id': request['id'], 'action': request['action'], 'state': 'active',
+        'output': 'Authorization: ' + 'Bearer ' + ${JSON.stringify(PRIVATE_CONTROL_VALUE)},
+    }))
+elif request['operation'] == 'status':
+    print(json.dumps({'id': request['id'], 'state': 'inactive'}))
+elif request['operation'] == 'logs':
+    print(json.dumps({
+        'id': request['id'], 'state': 'inactive',
+        'tail': 'last line\\nAuthorization: ' + 'Bearer ' + ${JSON.stringify(PRIVATE_LOG_VALUE)}
+          + '\\nhttps://example.test/?token=' + ${JSON.stringify(PRIVATE_QUERY_VALUE)},
+    }))
 `, { mode: 0o755 })
   return path
 }
@@ -146,7 +164,7 @@ it('signs in a GitHub organization member and forwards one deployment management
   expect(await gateway.call('GET', '/gateway/api/fleet')).toMatchObject({ status: 401, body: { error: 'Gateway sign-in required' } })
   expect(await gateway.call('GET', '/gateway/api/fleet', undefined, { cookie: cookie! })).toMatchObject({ status: 200, body: {
     login: 'member', organization: 'example-org', person: false,
-    deployments: [{ id: 'sglang', profile: 'superagent-sglang', repository: 'example-org/sglang' }],
+    deployments: [{ id: 'sglang', profile: 'superagent-sglang', repository: 'example-org/sglang', capabilities: [] }],
   } })
   expect(await gateway.call('GET', '/gateway/api/deployment/sglang/state', undefined, { cookie: cookie! }))
     .toMatchObject({ status: 200, body: { health: { runtime: { state: 'ready' } } } })
@@ -322,9 +340,42 @@ it('onboards a person and deployment without exposing another person’s registr
   expect(saved.people).toEqual([expect.objectContaining({ login: 'member' })])
   expect(saved.people[0]?.deployments[0]).toMatchObject({ id: 'widgets', tokenDir })
 
+  expect(await gateway.call('POST', '/gateway/api/deployment/widgets/lifecycle', { action: 'stop' }))
+    .toMatchObject({ status: 401, body: { error: 'Gateway sign-in required' } })
+  expect(await gateway.call('POST', '/gateway/api/deployment/widgets/lifecycle', { action: 'explode' }, { cookie: cookie! }))
+    .toMatchObject({ status: 400 })
+  const lifecycle = await Promise.all([
+    gateway.call('POST', '/gateway/api/deployment/widgets/lifecycle', { action: 'restart' }, { cookie: cookie! }),
+    gateway.call('POST', '/gateway/api/deployment/widgets/lifecycle', { action: 'restart' }, { cookie: cookie! }),
+  ])
+  expect(lifecycle.map(result => result.status).sort()).toEqual([200, 409])
+  const completed = lifecycle.find(result => result.status === 200)!
+  expect(completed.body).toMatchObject({ id: 'widgets', action: 'restart', state: 'active' })
+  expect(completed.body.output).toContain('Authorization: Bearer [redacted]')
+  expect(JSON.stringify(completed.body)).not.toContain(PRIVATE_CONTROL_VALUE)
+  expect(await gateway.call('GET', '/gateway/api/deployment/widgets/status', undefined, { cookie: cookie! }))
+    .toMatchObject({ status: 200, body: { id: 'widgets', state: 'inactive' } })
+  const logs = await gateway.call('GET', '/gateway/api/deployment/widgets/logs?lines=80', undefined, { cookie: cookie! })
+  expect(logs).toMatchObject({ status: 200, body: { id: 'widgets', state: 'inactive' } })
+  expect(logs.body.tail).toContain('last line')
+  expect(logs.body.tail).toContain('Authorization: Bearer [redacted]')
+  expect(logs.body.tail).toContain('token=[redacted]')
+  expect(JSON.stringify(logs.body)).not.toContain(PRIVATE_LOG_VALUE)
+  expect(JSON.stringify(logs.body)).not.toContain(PRIVATE_QUERY_VALUE)
+
+  const auditPath = join(state, 'audit.jsonl')
+  expect(statSync(auditPath).mode & 0o777).toBe(0o600)
+  const audit = readFileSync(auditPath, 'utf8').trim().split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
+  expect(audit).toEqual([
+    expect.objectContaining({ phase: 'attempt', login: 'member', deployment: 'widgets', action: 'restart' }),
+    expect.objectContaining({ phase: 'result', login: 'member', deployment: 'widgets', action: 'restart', outcome: 'succeeded' }),
+  ])
+  expect(JSON.stringify(audit)).not.toContain(PRIVATE_CONTROL_VALUE)
+
   expect(await gateway.call('GET', '/gateway/api/fleet', undefined, { cookie: cookie! })).toMatchObject({
     status: 200, body: { login: 'member', person: true, deployments: [
-      { id: 'widgets', profile: 'superagent-widgets', repository: 'example-org/widgets' },
+      { id: 'widgets', profile: 'superagent-widgets', repository: 'example-org/widgets',
+        capabilities: ['lifecycle', 'logs'] },
     ] },
   })
   expect(await gateway.call('GET', '/gateway/api/deployment/widgets/state', undefined, { cookie: cookie! }))
@@ -368,4 +419,13 @@ it('onboards a person and deployment without exposing another person’s registr
   socket.send('hello')
   await expect(new Promise<string>(resolve => socket.once('message', data => resolve(data.toString()))))
     .resolves.toBe('echo:hello')
+
+  const otherGateway = await serveGateway(state, gatewayFetch(true, 'other-member'))
+  await otherGateway.call('POST', '/gateway/api/device')
+  const otherSession = await otherGateway.call('POST', '/gateway/api/session', { device_code: 'device-code' })
+  const otherCookie = otherSession.setCookie?.split(';', 1)[0]
+  expect(await otherGateway.call('POST', '/gateway/api/deployment/widgets/lifecycle', { action: 'stop' },
+    { cookie: otherCookie! })).toMatchObject({ status: 404, body: { error: 'Deployment not found: widgets' } })
+  expect(await gateway.call('GET', '/gateway/api/deployment/widgets/logs?lines=81', undefined, { cookie: cookie! }))
+    .toMatchObject({ status: 400 })
 })

@@ -74,6 +74,7 @@ const GatewayFleet = z.object({
     id: z.string().regex(/^[a-z0-9][a-z0-9-]*$/, 'lowercase deployment id'),
     profile,
     repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/, 'owner/repository'),
+    capabilities: z.array(z.enum(['lifecycle', 'logs'])).default([]),
   })),
 })
 const GatewayDevice = z.object({
@@ -110,6 +111,21 @@ const GatewayCredentials = z.object({
   saved: z.boolean(),
   revision: z.number().int().nonnegative(),
   restarting: z.boolean(),
+})
+const RemoteLifecycle = z.object({
+  id: z.string().min(1),
+  action: z.enum(['start', 'stop', 'restart']),
+  state: z.string().min(1),
+  output: z.string().default(''),
+})
+const RemoteStatus = z.object({
+  id: z.string().min(1),
+  state: z.string().min(1),
+})
+const RemoteLogs = z.object({
+  id: z.string().min(1),
+  state: z.string().min(1),
+  tail: z.string(),
 })
 
 const Health = z.object({ state: z.string(), detail: z.string().default('') }).passthrough()
@@ -151,6 +167,7 @@ export interface FleetTicketView { id: string; title: string; stage: string; upd
 export interface FleetTriggerView { key: string; title: string; source: string; lastAt: string; pending: number; evaluating: boolean }
 export interface FleetDeploymentView {
   id: string
+  remote: boolean
   name: string
   repository: string
   profile: string
@@ -198,9 +215,21 @@ export interface FleetNativeTarget {
   token: string
 }
 
+interface RemoteDeployment {
+  id: string
+  profile: string
+  repository: string
+  capabilities: ('lifecycle' | 'logs')[]
+}
+
 /** A lifecycle refusal with the HTTP status the management route should return. */
 export class FleetControlError extends Error {
   constructor(readonly status: 400 | 404 | 409 | 502, message: string) { super(message) }
+}
+
+/** A gateway HTTP refusal preserved while the controller translates it into a Fleet control error. */
+class JsonRequestError extends Error {
+  constructor(readonly status: number, message: string) { super(message) }
 }
 
 type DeploymentConfig = ManagedConfig
@@ -254,10 +283,10 @@ export function managementApi(target: FleetNativeTarget, path: string): string {
   return target.remote ? `${target.url.replace(/\/$/, '')}/${path}` : api(target.url, path)
 }
 
-async function json<T extends z.ZodType>(url: string, schema: T, token: string): Promise<z.infer<T>> {
+async function json<T extends z.ZodType>(url: string, schema: T, token: string, timeoutMs = 2_500): Promise<z.infer<T>> {
   const response = await fetch(url, {
     headers: { 'x-orchestrator-request': '1', 'x-dsh-superagent-native': token, accept: 'application/json' },
-    signal: AbortSignal.timeout(2_500),
+    signal: AbortSignal.timeout(timeoutMs),
   })
   if (!response.ok) throw new Error(`${response.status} from ${new URL(url).pathname}`)
   return schema.parse(await response.json() as unknown)
@@ -265,10 +294,12 @@ async function json<T extends z.ZodType>(url: string, schema: T, token: string):
 
 async function requestJson<T extends z.ZodType>(url: string, schema: T, init: RequestInit): Promise<z.infer<T>> {
   const response = await fetch(url, { ...init, signal: init.signal ?? AbortSignal.timeout(10_000) })
-  const value = await response.json().catch(() => { throw new Error(`${response.status} from ${new URL(url).pathname}`) })
+  const value = await response.json().catch(() => {
+    throw new JsonRequestError(response.status, `${response.status} from ${new URL(url).pathname}`)
+  })
   if (!response.ok || response.status === 202) {
     const problem = z.object({ error: z.string().optional(), status: z.string().optional() }).safeParse(value)
-    throw new Error(problem.success && problem.data.error ? problem.data.error
+    throw new JsonRequestError(response.status, problem.success && problem.data.error ? problem.data.error
       : problem.success && problem.data.status ? problem.data.status
       : `${response.status} from ${new URL(url).pathname}`)
   }
@@ -313,7 +344,28 @@ function stopped(logDir: string | undefined, profile: string): boolean {
   return !!logDir && existsSync(join(logDir, 'control', 'profiles', profile, 'manually-stopped'))
 }
 
-async function snapshot(target: FleetNativeTarget, logDir: string | undefined, canControl: boolean): Promise<FleetDeploymentView> {
+async function remoteLogTail(target: FleetNativeTarget): Promise<{ path: string; tail: string } | undefined> {
+  const value = await json(managementApi(target, 'logs?lines=80'), RemoteLogs, target.token, 15_000)
+  if (value.id !== target.id) throw new Error('Gateway returned logs for a different deployment')
+  return { path: `journal:${target.id}`, tail: redactSensitive(value.tail) }
+}
+
+async function remoteStatus(target: FleetNativeTarget): Promise<{ status: FleetStatus; detail: string } | undefined> {
+  const value = await json(managementApi(target, 'status'), RemoteStatus, target.token, 15_000)
+  if (value.id !== target.id) throw new Error('Gateway returned status for a different deployment')
+  if (value.state === 'activating' || value.state === 'deactivating') return { status: 'starting', detail: 'Starting' }
+  if (value.state === 'inactive') return { status: 'stopped', detail: 'Stopped intentionally' }
+  if (value.state === 'failed') return { status: 'error', detail: 'Deployment service failed' }
+  if (value.state === 'active' || value.state === 'reloading') return undefined
+  return { status: 'unreachable', detail: `Deployment service is ${redactSensitive(value.state)}` }
+}
+
+async function snapshot(
+  target: FleetNativeTarget,
+  logDir: string | undefined,
+  canControl: boolean,
+  remoteLogs = false,
+): Promise<FleetDeploymentView> {
   try {
     const state = await json(managementApi(target, 'state'), State, target.token)
     const [tickets, threads] = await Promise.all([
@@ -327,6 +379,7 @@ async function snapshot(target: FleetNativeTarget, logDir: string | undefined, c
     const repository = state.setup.accounts?.repository || target.repository
     return {
       id: target.id,
+      remote: target.remote,
       name: title({ repository: target.repository }, repository),
       repository,
       profile: target.profile,
@@ -350,25 +403,30 @@ async function snapshot(target: FleetNativeTarget, logDir: string | undefined, c
         recent: threads.items.slice(0, 8).map(thread => ({ key: thread.key, title: thread.title, source: thread.source, lastAt: thread.lastAt,
           pending: thread.pending, evaluating: thread.evaluating !== undefined && thread.evaluating !== null })),
       },
-      log: logTail(logDir, target.profile),
+      log: remoteLogs ? await remoteLogTail(target).catch(() => undefined) : logTail(logDir, target.profile),
       canControl,
     }
   } catch (error) {
+    const remote = target.remote && canControl
+      ? await remoteStatus(target).catch(() => undefined)
+      : undefined
+    const localStopped = stopped(logDir, target.profile)
     return {
       id: target.id,
+      remote: target.remote,
       name: title({ repository: target.repository }),
       repository: target.repository,
       profile: target.profile,
       url: target.url,
       stateDir: target.stateDir,
       workspace: target.workspace,
-      status: stopped(logDir, target.profile) ? 'stopped' : 'unreachable',
-      detail: stopped(logDir, target.profile) ? 'Stopped intentionally' : redactSensitive(reason(error)),
+      status: remote?.status ?? (localStopped ? 'stopped' : 'unreachable'),
+      detail: remote?.detail ?? (localStopped ? 'Stopped intentionally' : redactSensitive(reason(error))),
       health: [],
       load: { running: 0, queued: 0, maxWorkers: 0 },
       tickets: { open: 0, pending: 0, working: 0, idle: 0, recent: [] },
       triggers: { pending: 0, evaluating: 0, recent: [] },
-      log: logTail(logDir, target.profile),
+      log: remoteLogs ? await remoteLogTail(target).catch(() => undefined) : logTail(logDir, target.profile),
       canControl,
     }
   }
@@ -402,7 +460,7 @@ export class Fleet {
     }
   }
 
-  private remoteTarget(session: AuthenticatedGatewaySession, deployment: { id: string; profile: string; repository: string }): FleetNativeTarget {
+  private remoteTarget(session: AuthenticatedGatewaySession, deployment: RemoteDeployment): FleetNativeTarget {
     return {
       id: deployment.id,
       remote: true,
@@ -449,11 +507,19 @@ export class Fleet {
     const remoteDeployments = session !== undefined && token !== undefined && remote.value
       ? remote.value.deployments
         .filter(deployment => !localIds.has(deployment.id))
-        .map(deployment => this.remoteTarget({ url: session.url, token }, deployment))
+        .map(deployment => ({
+          target: this.remoteTarget({ url: session.url, token }, deployment),
+          capabilities: new Set(deployment.capabilities),
+        }))
       : []
     const deployments = await Promise.all([
       ...localDeployments.map(target => snapshot(target, logDir, executable(control))),
-      ...remoteDeployments.map(target => snapshot(target, undefined, false)),
+      ...remoteDeployments.map(item => snapshot(
+        item.target,
+        undefined,
+        item.capabilities.has('lifecycle'),
+        item.capabilities.has('logs'),
+      )),
     ])
     const selected = this.selectedId()
     const gatewayError = remote.error ?? gatewaySession.error ?? (duplicates.length ? `Remote deployment id already exists locally: ${duplicates.map(item => item.id).join(', ')}` : undefined)
@@ -480,9 +546,41 @@ export class Fleet {
     const deployment = loaded.value?.deployments.find(item => item.id === id)
     if (!deployment) {
       const remote = await this.remoteTargets()
-      if (remote.value?.deployments.some(item => item.id === id)) {
-        throw new FleetControlError(409, `Lifecycle control is unavailable for the remote deployment ${id}`)
+      const remoteDeployment = remote.value?.deployments.find(item => item.id === id)
+      if (remoteDeployment) {
+        if (!remoteDeployment.capabilities.includes('lifecycle')) {
+          throw new FleetControlError(409, `Lifecycle control is unavailable for the remote deployment ${id}`)
+        }
+        if (this.busy.has(id)) throw new FleetControlError(409, `Another lifecycle action is already running for ${id}`)
+        this.busy.add(id)
+        try {
+          const session = this.authenticatedGatewaySession()
+          const target = this.remoteTarget(session, remoteDeployment)
+          const result = await requestJson(managementApi(target, 'lifecycle'), RemoteLifecycle, {
+            method: 'POST',
+            headers: { accept: 'application/json', 'content-type': 'application/json',
+              'x-orchestrator-request': '1', 'x-dsh-superagent-native': target.token },
+            body: JSON.stringify({ action }),
+            signal: AbortSignal.timeout(310_000),
+          })
+          if (result.id !== id || result.action !== action) {
+            throw new FleetControlError(502, 'Gateway returned a different lifecycle result')
+          }
+          return { id, action, code: 0,
+            output: redactSensitive(result.output || `${action} completed (${result.state})`) }
+        } catch (error) {
+          if (error instanceof FleetControlError) throw error
+          if (error instanceof JsonRequestError) {
+            const status = error.status === 400 || error.status === 404 || error.status === 409 || error.status === 502
+              ? error.status : 502
+            throw new FleetControlError(status, redactSensitive(error.message))
+          }
+          throw new FleetControlError(502, redactSensitive(reason(error)))
+        } finally {
+          this.busy.delete(id)
+        }
       }
+      if (remote.error) throw new FleetControlError(502, remote.error)
       throw new FleetControlError(404, `Deployment not found: ${id}`)
     }
     const script = loaded.value?.controlScript

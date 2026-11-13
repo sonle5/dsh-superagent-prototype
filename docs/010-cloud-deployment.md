@@ -59,7 +59,7 @@ Create `/var/lib/dsh-superagent/gateway/gateway.json` from [examples/cloud/regis
 
 For a fresh self-service fleet, use an empty `deployments` list and fill in `people`/`onboarding` only. A shared entry in `deployments` is a migration record and must name `ownerLogin`; it is visible only to that GitHub login.
 
-## 3. Install the fixed onboarding helper
+## 3. Install the fixed privileged helper
 
 The helper is a fixed Python program, not a generic shell entry point:
 
@@ -74,7 +74,7 @@ Allow only the gateway user to run exactly that file as root:
 <gateway-user> ALL=(root) NOPASSWD: /opt/dsh-superagent/scripts/dsh-superagent-onboard
 ```
 
-The helper accepts only three JSON operations on standard input: `person`, `deployment` and `credentials`. It never accepts a shell command, profile name from the request, arbitrary path, or model credential. It creates `dsh-<github-login>`, derives a safe Linux username when GitHub’s login is long, creates that person’s directories, initializes the deployment profile from DSH's shipped `web` template, installs the Superagent bundle, writes a root-owned environment file, enables a per-person unit, waits for the deployment native token, and copies that token into a gateway-readable directory owned by the gateway user.
+The helper accepts only six JSON operations on standard input: `person`, `deployment`, `credentials`, `status`, `lifecycle`, and `logs`. It never accepts a shell command, profile name from the request, arbitrary path, unit name, or model credential. It creates `dsh-<github-login>`, derives a safe Linux username when GitHub’s login is long, creates that person’s directories, initializes the deployment profile from DSH's shipped `web` template, installs the Superagent bundle, writes a root-owned environment file, enables a per-person unit, waits for the deployment native token, and copies that token into a gateway-readable directory owned by the gateway user.
 
 The generated unit name is:
 
@@ -85,6 +85,8 @@ dsh-superagent-person-<github-login>-<deployment-id>.service
 The helper starts and enables it directly. Do not enable a generic `dsh-superagent@` unit for a self-service deployment.
 The generated unit treats launcher statuses 2 and 3 as successful startup because the process is running and waiting for operator action; those component/setup states remain visible through health checks.
 
+The same sudoers rule also supplies deployment-scoped lifecycle control and bounded logs. For those requests the helper derives the unit name from the already validated GitHub login and deployment id; the gateway never sends a unit name. `status` runs `systemctl is-active`, `lifecycle` accepts only `start`, `stop`, or `restart`, and `logs` accepts 1–80 lines from that unit's journal. The helper has no generic shell or arbitrary `systemctl` entry point.
+
 ## 4. Onboard from Desktop
 
 Start Desktop with the controller profile, then use the Cloud Fleet card:
@@ -94,6 +96,10 @@ Start Desktop with the controller profile, then use the Cloud Fleet card:
 3. Enter a lowercase deployment id and `owner/repository`, then create the deployment. The gateway calls the fixed helper and returns only non-secret metadata.
 4. Paste that deployment agent GitHub account’s PAT into **Configure agent credentials**. The helper writes a `0700` `gh` wrapper owned by that person and saves it in the GitHub Source. The PAT is not written to the gateway registry or returned by the API. Grant Contents, Issues and Pull requests read/write plus Metadata read, turn off **Read the account notification inbox**, and enable repository Issue/comment polling; fine-grained PATs cannot read the notification inbox.
 5. Configure model credentials through the connected deployment’s normal DSH provider settings. They stay under that person’s Linux user and profile.
+
+The generated deployment card also exposes Start, Stop, Restart, and a journal tail. These calls remain HTTPS requests to the same gateway. The gateway checks ownership, rejects overlapping lifecycle actions for that deployment with HTTP `409`, and writes attempt/result records to `/var/lib/dsh-superagent/gateway/audit.jsonl` with mode `0600`. The journal tail is limited to 80 lines and 64 KiB and redacts authorization headers, bearer tokens, API keys, and URL query tokens.
+
+Stopping preserves the deployment database, Session history, repository grouping, model selections, and worktrees. The unit’s 300-second stop timeout gives active task teardown time to finish. A stopped deployment is reported as `stopped` from its systemd state even though its loopback management API is intentionally unavailable; Start remains available.
 
 The self-service deployment’s state paths are:
 

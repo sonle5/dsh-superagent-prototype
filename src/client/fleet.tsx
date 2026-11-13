@@ -47,7 +47,7 @@ function CloudGateway({ reload, deployments, selected }: {
   const [repository, setRepository] = useState('')
   const [credentialId, setCredentialId] = useState('')
   const [githubToken, setGithubToken] = useState('')
-  const remote = deployments.filter(deployment => !deployment.canControl)
+  const remote = deployments.filter(deployment => deployment.remote)
   const activeCredentialId = credentialId || selected && remote.some(deployment => deployment.id === selected) ? selected : remote[0]?.id
   const start = useAction(async () => setDevice(await call('POST gateway/device')))
   const complete = useAction(async () => {

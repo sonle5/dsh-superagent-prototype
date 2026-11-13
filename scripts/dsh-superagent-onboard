@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Create one self-service Superagent person or deployment from fixed JSON input.
+"""Manage fixed self-service Superagent server resources from JSON input.
 
 Run as root through a sudoers rule that names this file. The gateway supplies JSON on stdin;
-this helper never accepts an arbitrary command, credential, profile name, or path.
+this helper never accepts an arbitrary command, unit name, credential, profile name, or path.
 """
 
 import argparse
@@ -25,6 +25,9 @@ GITHUB_TOKEN = re.compile(r"^[A-Za-z0-9_-]{20,255}$")
 PORT_RANGE = range(3082, 4000)
 PROFILE_TEMPLATE = "web"
 WEB_APP_BUNDLE = "@deepseek-ai/dsh-web-app"
+ACTIONS = {"start", "stop", "restart"}
+MAX_LOG_LINES = 80
+MAX_OUTPUT = 64 * 1024
 
 
 class OnboardingError(Exception):
@@ -95,6 +98,76 @@ def write(path, content, mode=0o600, user=None, group=None):
 
 def run_checked(command):
     subprocess.run(command, check=True, stdout=subprocess.DEVNULL)
+
+
+def deployment_unit(login, deployment_id):
+    return f"dsh-superagent-person-{login}-{deployment_id}.service"
+
+
+def systemctl_state(unit):
+    result = subprocess.run(
+        ["systemctl", "is-active", unit],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    state = (result.stdout or result.stderr).strip().splitlines()
+    return state[-1] if state else "unknown"
+
+
+def systemctl_action(login, deployment_id, action, dry):
+    unit = deployment_unit(login, deployment_id)
+    if dry:
+        return {"id": deployment_id, "action": action, "state": "unchanged", "unit": unit, "output": ""}
+    try:
+        result = subprocess.run(
+            ["systemctl", action, unit],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise OnboardingError(f"systemctl {action} timed out") from error
+    output = "\n".join(value.strip() for value in (result.stdout, result.stderr) if value.strip())
+    if result.returncode != 0:
+        raise OnboardingError(output[-MAX_OUTPUT:] or f"systemctl {action} exited {result.returncode}")
+    return {
+        "id": deployment_id,
+        "action": action,
+        "state": systemctl_state(unit),
+        "unit": unit,
+        "output": output[-MAX_OUTPUT:],
+    }
+
+
+def systemctl_status(login, deployment_id, dry):
+    unit = deployment_unit(login, deployment_id)
+    return {"id": deployment_id, "state": "unchanged" if dry else systemctl_state(unit), "unit": unit}
+
+
+def journal_logs(login, deployment_id, lines, dry):
+    if isinstance(lines, bool) or not isinstance(lines, int) or not 1 <= lines <= MAX_LOG_LINES:
+        raise OnboardingError(f"lines must be between 1 and {MAX_LOG_LINES}")
+    unit = deployment_unit(login, deployment_id)
+    if dry:
+        return {"id": deployment_id, "state": "unchanged", "unit": unit, "tail": ""}
+    try:
+        result = subprocess.run(
+            ["journalctl", "-u", unit, "-n", str(lines), "--no-pager", "-o", "cat"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise OnboardingError("journal read timed out") from error
+    if result.returncode != 0:
+        raise OnboardingError(result.stderr.strip()[-MAX_OUTPUT:] or f"journalctl exited {result.returncode}")
+    return {
+        "id": deployment_id,
+        "state": systemctl_state(unit),
+        "unit": unit,
+        "tail": result.stdout[-MAX_OUTPUT:],
+    }
 
 
 def profile_patch(state_dir, port):
@@ -299,6 +372,30 @@ def credentials(request, dry):
     return {"id": deployment_id, "cli": str(path)}
 
 
+def lifecycle(request, dry):
+    login = require(request.get("login"), LOGIN, "login")
+    deployment_id = require(request.get("id"), ID, "deployment id")
+    action = request.get("action")
+    if action not in ACTIONS:
+        raise OnboardingError("action must be start, stop, or restart")
+    config(request)
+    return systemctl_action(login, deployment_id, action, dry)
+
+
+def status(request, dry):
+    login = require(request.get("login"), LOGIN, "login")
+    deployment_id = require(request.get("id"), ID, "deployment id")
+    config(request)
+    return systemctl_status(login, deployment_id, dry)
+
+
+def logs(request, dry):
+    login = require(request.get("login"), LOGIN, "login")
+    deployment_id = require(request.get("id"), ID, "deployment id")
+    config(request)
+    return journal_logs(login, deployment_id, request.get("lines"), dry)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true", help="print the fixed plan without changing the server")
@@ -312,9 +409,15 @@ def main():
             result = deployment(request, args.dry_run)
         elif operation == "credentials":
             result = credentials(request, args.dry_run)
+        elif operation == "lifecycle":
+            result = lifecycle(request, args.dry_run)
+        elif operation == "status":
+            result = status(request, args.dry_run)
+        elif operation == "logs":
+            result = logs(request, args.dry_run)
         else:
-            raise OnboardingError("operation must be person or deployment")
-    except (json.JSONDecodeError, OnboardingError, subprocess.CalledProcessError) as error:
+            raise OnboardingError("unknown operation")
+    except (json.JSONDecodeError, OnboardingError, subprocess.SubprocessError) as error:
         print(str(error), file=sys.stderr)
         return 1
     print(json.dumps(result))
