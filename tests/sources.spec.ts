@@ -326,7 +326,7 @@ describe('feishu source', () => {
   })
 })
 describe('github source', () => {
-  it('normalizes comments and reviews into triggers with review-thread channels, and marks only GitHub Apps and machine accounts as automated', () => {
+  it('normalizes comments and reviews into triggers with review-thread channels and source-native authorship', () => {
     const trigger = commentTrigger({ id: 5, body: 'nit', user: { login: 'review-bot[bot]', type: 'Bot' }, html_url: 'https://github.com/acme/widgets/pull/7#discussion_r5', updated_at: '2026-09-01T00:00:00Z' }, { number: 7, isPr: true, prAuthor: 'agent-bot' }, 'inline', 'agent-bot')
     expect(trigger).toMatchObject({ source: 'github', threads: [{ source: 'github', id: '7' }], human: false, channel: { address: { number: '7', url: 'https://github.com/acme/widgets/pull/7#discussion_r5' } }, meta: { commentId: 5, kind: 'inline', prAuthor: 'agent-bot' } })
     // A review bot on an ordinary account counts as a person here; the prompts name it as automated.
@@ -337,10 +337,11 @@ describe('github source', () => {
     expect(review({ state: 'APPROVED', commit_id: 'abc123' })).toBe('APPROVED review of commit abc123')
     expect(review({ state: 'CHANGES_REQUESTED', commit_id: 'abc123', body: 'Keep the margin' })).toBe('CHANGES_REQUESTED review of commit abc123\n\nKeep the margin')
     expect(review({ state: 'COMMENTED', commit_id: 'abc123' })).toBe('')
-    // A mention of the agent addresses it, whatever the case; the agent's own messages are automated.
+    // A mention of the agent addresses it, whatever the case. Equal logins are not evidence of automation:
+    // the Source drops marked Superagent replies before translating them.
     expect(commentTrigger({ id: 9, body: '@Agent-Bot please fix', user: { login: 'alice', type: 'User' } }, { number: 7, isPr: true }, 'conversation', 'agent-bot')).toMatchObject({ human: true, addressed: 'mention' })
     expect(commentTrigger({ id: 10, body: 'mail@agent-bot.example', user: { login: 'alice', type: 'User' } }, { number: 7, isPr: true }, 'conversation', 'agent-bot')).not.toHaveProperty('addressed')
-    expect(commentTrigger({ id: 11, body: 'pushed', user: { login: 'Agent-Bot', type: 'User' } }, { number: 7, isPr: true }, 'conversation', 'agent-bot').human).toBe(false)
+    expect(commentTrigger({ id: 11, body: 'pushed', user: { login: 'Agent-Bot', type: 'User' } }, { number: 7, isPr: true }, 'conversation', 'agent-bot').human).toBe(true)
   })
   it('reads the address of an Issue, a PR or a review comment of the repository, and nothing else', () => {
     expect(githubAddress('https://api.github.com/repos/acme/widgets/pulls/9', 'acme/widgets')).toEqual({ number: 9, pr: true })
@@ -1399,6 +1400,7 @@ describe('observing the GitHub repository', () => {
     await pollRound(h)
     expect(h.receive.mock.calls.map(([trigger]) => [trigger.meta.number, trigger.meta.kind, trigger.meta.commentId]))
       .toEqual([[8, 'issue', undefined], [8, 'conversation', 2]])
+    expect(h.receive.mock.calls.map(([trigger]) => trigger.human)).toEqual([true, true])
     h.store.close()
   })
   it('fails the round for a stream whose read fails, keeps its cursor, and still reads the other streams', async () => {

@@ -59,14 +59,14 @@ function commentText(comment: GithubComment, kind: 'conversation' | 'inline' | '
 }
 export const mentions = (text: string, login: string): boolean =>
   new RegExp(`(?:^|[^a-zA-Z0-9_@])@${escapeRegExp(login)}(?![a-zA-Z0-9_-])`, 'i').test(text)
-const author = (user: { login: string; type?: string }, agent: string) =>
-  ({ actor: { source: SOURCE, id: user.login }, human: isHumanLogin(user) && !sameName(user.login, agent) })
+const author = (user: { login: string; type?: string }) =>
+  ({ actor: { source: SOURCE, id: user.login }, human: isHumanLogin(user) })
 /** Builds a trigger for a comment or review; text is empty for a bodyless comment or a `COMMENTED` review without a body. */
 export function commentTrigger(comment: GithubComment, ref: PullRef, kind: 'conversation' | 'inline' | 'review', agent: string): Trigger {
   const at = comment.updated_at ?? comment.submitted_at ?? comment.created_at ?? new Date().toISOString()
   const version = comment.updated_at ?? comment.submitted_at ?? ''
   const id = key('github-comment', comment.html_url ?? `github:${ref.number}`, String(comment.id), version)
-  return { id, source: SOURCE, threads: [{ source: SOURCE, id: String(ref.number) }], ...author(comment.user, agent), at,
+  return { id, source: SOURCE, threads: [{ source: SOURCE, id: String(ref.number) }], ...author(comment.user), at,
     text: commentText(comment, kind),
     ...(mentions(comment.body ?? '', agent) ? { addressed: 'mention' as const } : {}),
     channel: githubChannel(ref.number, comment.html_url ?? undefined),
@@ -82,7 +82,7 @@ export function commentTrigger(comment: GithubComment, ref: PullRef, kind: 'conv
 export function issueTrigger(issue: Opened, agent: string): Trigger {
   const body = issue.body ?? ''
   return { id: key('github-issue', String(issue.number)), source: SOURCE,
-    threads: [{ source: SOURCE, id: String(issue.number) }], ...author(issue.user, agent), at: issue.created_at,
+    threads: [{ source: SOURCE, id: String(issue.number) }], ...author(issue.user), at: issue.created_at,
     text: `${issue.title}\n\n${body}`,
     ...(mentions(body, agent) ? { addressed: 'mention' as const } : {}),
     channel: githubChannel(issue.number, issue.html_url), url: issue.html_url, meta: { number: issue.number, isPr: false, kind: 'issue' } }
