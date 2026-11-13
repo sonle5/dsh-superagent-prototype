@@ -225,6 +225,7 @@ Remote lifecycle and log controls were accepted on 2026-11-13 against deployed c
 - The hdt98 Session ID, Eval `openai / gpt-6.1-terra / high`, Executor `openai / gpt-6.1-sol / xhigh`, and recent history remained unchanged.
 - The live gateway returned `401` unauthenticated, `404` for another person's deployment, `400` for an invalid action, and `409` for an overlapping action. Audit records were mode `0600` and contained no credentials or command environment.
 - `pnpm check` passed with 71 test files, 1,332 tests, and the production build. The Fleet-page regression also verifies that an intentional selected-deployment poll failure does not produce a redundant global error banner.
+- The final least-privilege CI polling deployment uses commit `74ea8f8c83c9fa0f2f5ed46db37cbde101edcdf3`. The `hdt98` wrapper returned `200` for Actions workflow runs and commit statuses; its expected Checks API `403` is covered by the Actions fallback. After restarting the gateway and all deployments, each of the three deployments reported all ten health components as `ready`.
 
 ## Migration and upgrades
 

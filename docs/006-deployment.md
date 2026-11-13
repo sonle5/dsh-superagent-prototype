@@ -51,7 +51,7 @@ Below, `$DSH_HOME` means `${DSH_HOME:-$HOME/.dsh}`.
 
    Sign in as the agent account; the last command prints its login. dsh-superagent reads the login the same way.
 
-   A fine-grained PAT needs repository access limited to the deployment repository, with Contents, Issues and Pull requests read/write, Actions and Commit statuses read-only, and Metadata read. GitHub does not let a fine-grained PAT read the account notification inbox or call the Checks API. DSH therefore falls back from check runs to repository Actions workflow runs; Commit statuses remains required. Turn off **Read the account notification inbox** under the GitHub Source's advanced settings, then enable the repository observation streams needed by that deployment, normally both **Receive new Issues** and **Receive comments**. A classic token is not required for notification or CI polling.
+   A fine-grained PAT needs repository access limited to the deployment repository, with Contents, Issues and Pull requests read/write, Actions and Commit statuses read-only, and Metadata read. GitHub does not let a fine-grained PAT read the account notification inbox or call the Checks API. DSH therefore falls back from check runs to repository Actions workflow runs; Commit statuses read-only remains required. Turn off **Read the account notification inbox** under the GitHub Source's advanced settings, then enable the repository observation streams needed by that deployment, normally both **Receive new Issues** and **Receive comments**. A classic token is not required for notification or CI polling.
 
 ### Feishu bot (optional)
 
