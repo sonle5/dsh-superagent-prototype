@@ -210,6 +210,16 @@ The current verified public endpoint is `https://dsh-superagent.201-79-39-167.ss
 
 The `hdt98` account now has its own private `hdt98/dsh-superagent-onboarding-smoke` deployment, fine-grained repository PAT, and OpenAI provider. Its prepared-worktree, polling, reboot, model-attestation, normal sign-in, Session-history, and blast-radius checks have passed. The account-onboarding test also exposed a partial-provisioning recovery bug. Existing Linux users are now required to have their directories and `0700` home permission repaired before onboarding returns successfully, with regression coverage in `tests/onboarding-helper.spec.ts`.
 
+Remote lifecycle and log controls were accepted on 2026-11-13 against commit `2d472b5402cbbe55e37153c787df703b629a3f7a`:
+
+- Desktop Restart completed in about five seconds and returned `active`.
+- Desktop Stop changed the card to `Stopped intentionally` and the service to `inactive`; the bounded journal remained visible.
+- Desktop Start returned the service to `active`, and all ten management-health components returned to `ready`.
+- The deployment had no active Ticket during these checks, so the 300-second graceful in-flight teardown path remains covered by automated tests rather than a destructive live run.
+- The hdt98 Session ID, Eval `openai / gpt-6.1-terra / high`, Executor `openai / gpt-6.1-sol / xhigh`, and recent history remained unchanged.
+- The live gateway returned `401` unauthenticated, `404` for another person's deployment, `400` for an invalid action, and `409` for an overlapping action. Audit records were mode `0600` and contained no credentials or command environment.
+- `pnpm check` passed with 71 test files, 1,328 tests, and the production build. The Fleet-page regression also verifies that an intentional selected-deployment poll failure does not produce a redundant global error banner.
+
 ## Migration and upgrades
 
 - Stop the Mac-local deployment before starting its server copy; two running deployments polling one GitHub account duplicate work.
