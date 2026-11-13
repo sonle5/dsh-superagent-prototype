@@ -223,7 +223,7 @@ it('keeps the controller loopback-only and serves its registry without a local r
   expect(() => serveControl(state, '0.0.0.0')).toThrow('Fleet control requires a loopback Web server')
 })
 
-it('requires native controller capability for protected model-proxy routes', async () => {
+it('lets the signed-in controller call protected model-proxy routes and forwards the gateway capability', async () => {
   const state = mkdtempSync(join(tmpdir(), 'dsh-model-proxy-controller-'))
   cleanup.push(() => { rmSync(state, { recursive: true, force: true }) })
   writeFileSync(join(state, 'fleet.json'), JSON.stringify({ version: 1, deployments: [] }))
@@ -249,10 +249,7 @@ it('requires native controller capability for protected model-proxy routes', asy
     version: 1, url: `http://127.0.0.1:${(gateway.address() as AddressInfo).port}`, token: 'gateway-session',
   }))
   const call = serveControl(state)
-  expect(await call('GET', 'gateway/model-proxy')).toEqual({ status: 403,
-    body: { error: 'Trusted controller request required' } })
-  const token = nativeToken(state)!
-  expect(await call('GET', 'gateway/model-proxy', undefined, { 'x-dsh-superagent-native': token })).toEqual({
+  expect(await call('GET', 'gateway/model-proxy')).toEqual({
     status: 200,
     body: {
       status: 'ready',
@@ -260,6 +257,11 @@ it('requires native controller capability for protected model-proxy routes', asy
       providers: [{ id: 'one-nexus', label: 'OneNexus', state: 'configured' }],
       deployments: [],
     },
+  })
+  const signedOut = serveControl(state, '127.0.0.1', () => 401)
+  expect(await signedOut('GET', 'gateway/model-proxy')).toEqual({
+    status: 401,
+    body: { error: 'Signed-in management request required' },
   })
 })
 

@@ -160,15 +160,6 @@ type RouteHandler<K extends keyof Api> = (input: Input<K>) => ApiResponse<K> | P
 type Routes = { [K in Exclude<keyof Api, GatewayRouteKey | ProviderRouteKey>]: RouteHandler<K> }
 type ControllerRoutes = { [K in ControllerRouteKey | ProviderRouteKey]: RouteHandler<K> }
 type RouteTable = { [K in keyof Api]?: RouteHandler<K> }
-const NATIVE_CONTROLLER_ROUTES = new Set<keyof Api>([
-  'GET gateway/model-proxy',
-  'POST gateway/model-proxy/claude/connect',
-  'GET gateway/model-proxy/claude/status',
-  'DELETE gateway/model-proxy/claude/session',
-  'PUT gateway/model-proxy/provider/:provider',
-  'POST gateway/deployment/:id/credentials',
-  'POST fleet/:id/model-proxy',
-])
 const offset = z.coerce.number().int().nonnegative().catch(0)
 const limit = (fallback: number, max: number) => z.coerce.number().int().positive().catch(fallback).transform(value => Math.min(max, value))
 const TicketsQuery = z.object({ state: z.enum(TICKET_FILTERS).catch('open'), offset, limit: limit(20, 1000) })
@@ -410,10 +401,6 @@ function registerManagement(ctx: Context, stateDir: string, runtime?: HttpHost):
         }
         const route = match(table, req.method ?? 'GET', url.pathname.slice('/orchestrator/api/'.length).split('/'))
         if (!route) throw new RouteError(404, 'Unknown operation')
-        if (NATIVE_CONTROLLER_ROUTES.has(route.key) && !native) {
-          json(res, 403, { error: 'Trusted controller request required' })
-          return
-        }
         const query = Object.fromEntries(url.searchParams)
         json(res, 200, await route.run({ params: route.params as never, query, body: maxBytes => readBody(req, maxBytes) }))
       } catch (error) { json(res, ...failure(error)) }

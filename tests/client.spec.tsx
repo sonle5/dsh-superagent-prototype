@@ -100,3 +100,23 @@ it('tells a dsh-superagent that does not answer from a record it does not have, 
   expect(await failure(async () => Response.json({ error: 'Unknown ticket', code: 'unknownTicket' }, { status: 404 }))).toEqual({
     message: 'user unknownTicket', status: 404, missing: true, unreachable: false })
 })
+
+it('keeps every fleet and gateway route on the controller while selected deployments use deployment routes', async () => {
+  const messages = { offline: 'offline', notRunning: 'not running', serverError: (status: number) => `server ${status}`,
+    requestFailed: (status: number) => `request ${status}`, setup: () => 'setup', user: ({ code }: { code: string }) => `user ${code}` }
+  const fetch = vi.fn(async (_input: RequestInfo | URL) => Response.json({}))
+  vi.stubGlobal('fetch', fetch)
+  const call = caller(() => messages, 'widgets')
+
+  await call('GET gateway/model-proxy')
+  await call('GET fleet')
+  await call('POST fleet/:id/restart', { id: 'widgets' })
+  expect(fetch.mock.calls.map(([url]) => url)).toEqual([
+    '/orchestrator/api/gateway/model-proxy',
+    '/orchestrator/api/fleet',
+    '/orchestrator/api/fleet/widgets/restart',
+  ])
+
+  await call('GET state')
+  expect(fetch.mock.calls[3]?.[0]).toBe('/orchestrator/api/deployment/widgets/state')
+})

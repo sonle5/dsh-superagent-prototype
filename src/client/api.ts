@@ -1,6 +1,6 @@
 /** Same-origin client and polling hook for the orchestrator management API. */
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { Api, ApiRequest, ApiResponse } from '../app/api.ts'
+import { FLEET_ROUTES, matchesRoute, type Api, type ApiRequest, type ApiResponse } from '../app/api.ts'
 import { USER_ERRORS, type UserErrorCode } from '../core/errors.ts'
 import type { TicketStage } from '../core/stage.ts'
 import type { SetupProblem } from '../setup.ts'
@@ -112,8 +112,7 @@ export function caller(messages: () => ApiMessages, deployment?: string): Call {
     const path = pattern.replace(/:(\w+)/g, (_match, name: string) => encodeURIComponent(String(values[name])))
     const query = Object.entries(values.query ?? {}).filter(([, value]) => value !== undefined && value !== '')
       .map(([name, value]) => `${name}=${encodeURIComponent(String(value))}`).join('&')
-    const local = method === 'GET' && (path === 'fleet' || path === 'gateway/status' || path.startsWith('fleet/'))
-      || method !== 'GET' && (path.startsWith('fleet/') || path.startsWith('deployments/') || path.startsWith('gateway/'))
+    const local = matchesRoute(FLEET_ROUTES, method, path.split('/'))
     const target = local || !deployment ? path : `deployment/${encodeURIComponent(deployment)}/${path}`
     return api(messages(), query ? `${target}?${query}` : target, method, values.body)
   }
