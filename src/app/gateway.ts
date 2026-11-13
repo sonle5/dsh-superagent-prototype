@@ -22,7 +22,7 @@ const GITHUB_DEVICE_URL = 'https://github.com/login/device/code'
 const GITHUB_TOKEN_URL = 'https://github.com/login/oauth/access_token'
 const GITHUB_USER_URL = 'https://api.github.com/user'
 const NATIVE_MAX_BODY_BYTES = 300 * 1024 * 1024
-const LIFECYCLE_HELPER_TIMEOUT_MS = 300_000
+export const LIFECYCLE_HELPER_TIMEOUT_MS = 350_000
 
 const organization = z.string().trim().regex(/^[A-Za-z0-9_.-]+$/, 'GitHub organization login')
 const Deployment = z.object({

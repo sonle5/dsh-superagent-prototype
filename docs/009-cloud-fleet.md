@@ -113,7 +113,9 @@ The fleet has one address. A server can start on its IP address with a short-liv
 Generated per-person deployments advertise `lifecycle` and `logs` capabilities in the gateway fleet response. Desktop shows Start, Stop, Restart, and journal-tail controls only for deployments that advertise the relevant capability. Legacy shared deployments remain visible but do not claim control paths that their generic systemd units do not implement.
 
 - Start and restart first use the deployment management API. If it is unavailable, the controller asks the gateway for the derived systemd state, so an intentionally stopped deployment appears as `stopped` rather than `unreachable`.
-- Stop runs `systemctl stop` through the fixed helper. The generated unit retains its 300-second `ExecStop` timeout for graceful task teardown and Session persistence.
+- Stop runs `systemctl stop` through the fixed helper. The launcher receives a 300-second graceful-stop budget, systemd allows
+  330 seconds for that stop operation, the privileged helper allows 340 seconds for `systemctl`, and the gateway allows 350
+  seconds for the helper. Each outer timeout therefore leaves room for the inner operation to finish and report its result.
 - Requests for the same deployment are rejected with HTTP `409` while another lifecycle action is running. Actions on different deployments remain independent.
 - Lifecycle authorization is checked against the signed-in person before the helper runs. Another person's deployment returns HTTP `404`.
 - The gateway appends one attempt and one result record to `<gateway stateDir>/audit.jsonl` with mode `0600`. The log never contains provider credentials, tokens, or command environments.

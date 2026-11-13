@@ -99,7 +99,11 @@ Start Desktop with the controller profile, then use the Cloud Fleet card:
 
 The generated deployment card also exposes Start, Stop, Restart, and a journal tail. These calls remain HTTPS requests to the same gateway. The gateway checks ownership, rejects overlapping lifecycle actions for that deployment with HTTP `409`, and writes attempt/result records to `/var/lib/dsh-superagent/gateway/audit.jsonl` with mode `0600`. The journal tail is limited to 80 lines and 64 KiB and redacts authorization headers, bearer tokens, API keys, and URL query tokens.
 
-Stopping preserves the deployment database, Session history, repository grouping, model selections, and worktrees. The unit’s 300-second stop timeout gives active task teardown time to finish. A stopped deployment is reported as `stopped` from its systemd state even though its loopback management API is intentionally unavailable; Start remains available.
+Stopping preserves the deployment database, Session history, repository grouping, model selections, and worktrees. The
+launcher gets 300 seconds to finish active-task teardown, systemd allows 330 seconds for that operation, the helper allows
+340 seconds, and the gateway allows 350 seconds. These nested limits ensure systemd does not apply its 90-second default or
+an outer watchdog does not kill the request before the launcher can finish. A stopped deployment is reported as `stopped`
+from its systemd state even though its loopback management API is intentionally unavailable; Start remains available.
 
 The self-service deployment’s state paths are:
 

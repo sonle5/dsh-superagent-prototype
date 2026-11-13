@@ -1,8 +1,11 @@
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { spawnSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { expect, it } from 'vitest'
+import { LIFECYCLE_HELPER_TIMEOUT_MS } from '../src/app/gateway.ts'
+
+const onboardingHelper = join(import.meta.dirname, '..', 'scripts', 'dsh-superagent-onboard')
 
 it('does not copy the gateway web login token from stdout into the journal', () => {
   const unit = readFileSync(join(import.meta.dirname, '..', 'examples', 'cloud', 'systemd',
@@ -23,6 +26,31 @@ it('does not tear down a recovered deployment when the recovery oneshot exits', 
   const unit = readFileSync(join(import.meta.dirname, '..', 'examples', 'cloud', 'systemd',
     'dsh-superagent-recover@.service'), 'utf8')
   expect(unit).toContain('KillMode=process')
+})
+
+it('keeps deployment shutdown inside ordered service, helper, and gateway timeouts', () => {
+  const timeouts = JSON.parse(execFileSync('python3', ['-c', [
+    'import json, runpy',
+    `module = runpy.run_path(${JSON.stringify(onboardingHelper)})`,
+    "print(json.dumps({name: module[name] for name in "
+      + "['GRACEFUL_STOP_SECONDS', 'SYSTEMD_STOP_TIMEOUT_SECONDS', 'SYSTEMCTL_STOP_TIMEOUT_SECONDS']}))",
+  ].join('\n')], { encoding: 'utf8' })) as {
+    GRACEFUL_STOP_SECONDS: number
+    SYSTEMD_STOP_TIMEOUT_SECONDS: number
+    SYSTEMCTL_STOP_TIMEOUT_SECONDS: number
+  }
+  const unit = execFileSync('python3', ['-c', [
+    'import runpy, sys',
+    `module = runpy.run_path(${JSON.stringify(onboardingHelper)})`,
+    "sys.stdout.write(module['unit_content']('dsh-alice', '/opt/dsh-superagent', '/etc/example.env', "
+      + "'superagent-widgets', 'http://127.0.0.1:3083', '/var/lib/widgets'))",
+  ].join('\n')], { encoding: 'utf8' })
+
+  expect(unit).toContain(`--stop-timeout ${timeouts.GRACEFUL_STOP_SECONDS}`)
+  expect(unit).toContain(`TimeoutStopSec=${timeouts.SYSTEMD_STOP_TIMEOUT_SECONDS}`)
+  expect(timeouts.SYSTEMD_STOP_TIMEOUT_SECONDS).toBeGreaterThan(timeouts.GRACEFUL_STOP_SECONDS)
+  expect(timeouts.SYSTEMCTL_STOP_TIMEOUT_SECONDS).toBeGreaterThan(timeouts.SYSTEMD_STOP_TIMEOUT_SECONDS)
+  expect(LIFECYCLE_HELPER_TIMEOUT_MS).toBeGreaterThan(timeouts.SYSTEMCTL_STOP_TIMEOUT_SECONDS * 1000)
 })
 
 it('installs renewed certificates and restarts the gateway', () => {

@@ -95,6 +95,25 @@ it('keeps the detached deployment alive when recovery finishes', () => {
   expect(unit).toContain('KillMode=process')
 })
 
+it('allows stop and restart to outlive the launcher graceful-stop budget', () => {
+  const timeouts = JSON.parse(execFileSync('python3', ['-c', [
+    'import json, runpy, types',
+    `module = runpy.run_path(${JSON.stringify(script)})`,
+    'calls = []',
+    "module['systemctl_state'] = lambda _unit: 'inactive'",
+    'def run(command, **options):',
+    '    if command[1] in ("start", "stop", "restart"):',
+    '        calls.append((command[1], options["timeout"]))',
+    "    return types.SimpleNamespace(returncode=0, stdout='', stderr='')",
+    "module['subprocess'].run = run",
+    "for action in ('start', 'stop', 'restart'):",
+    "    module['systemctl_action']('alice', 'widgets', action, False)",
+    'print(json.dumps(calls))',
+  ].join('\n')], { encoding: 'utf8' })) as [string, number][]
+
+  expect(timeouts).toEqual([['start', 300], ['stop', 340], ['restart', 340]])
+})
+
 it('repairs an existing person without rerunning useradd', () => {
   execFileSync('python3', ['-c', [
     'import runpy, tempfile, types',

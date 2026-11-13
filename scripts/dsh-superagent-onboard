@@ -28,6 +28,9 @@ WEB_APP_BUNDLE = "@deepseek-ai/dsh-web-app"
 ACTIONS = {"start", "stop", "restart"}
 MAX_LOG_LINES = 80
 MAX_OUTPUT = 64 * 1024
+GRACEFUL_STOP_SECONDS = 300
+SYSTEMD_STOP_TIMEOUT_SECONDS = 330
+SYSTEMCTL_STOP_TIMEOUT_SECONDS = 340
 
 
 class OnboardingError(Exception):
@@ -119,12 +122,13 @@ def systemctl_action(login, deployment_id, action, dry):
     unit = deployment_unit(login, deployment_id)
     if dry:
         return {"id": deployment_id, "action": action, "state": "unchanged", "unit": unit, "output": ""}
+    timeout = SYSTEMCTL_STOP_TIMEOUT_SECONDS if action in {"stop", "restart"} else 300
     try:
         result = subprocess.run(
             ["systemctl", action, unit],
             capture_output=True,
             text=True,
-            timeout=300,
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired as error:
         raise OnboardingError(f"systemctl {action} timed out") from error
@@ -211,7 +215,8 @@ Group={user}
 EnvironmentFile={env_path}
 WorkingDirectory={checkout}
 ExecStart={checkout}/scripts/dsh-superagent start --profile {profile} --url {url} --state-dir {state_dir}
-ExecStop={checkout}/scripts/dsh-superagent stop --profile {profile} --url {url} --state-dir {state_dir} --stop-timeout 300
+ExecStop={checkout}/scripts/dsh-superagent stop --profile {profile} --url {url} --state-dir {state_dir} --stop-timeout {GRACEFUL_STOP_SECONDS}
+TimeoutStopSec={SYSTEMD_STOP_TIMEOUT_SECONDS}
 SuccessExitStatus=2 3
 RemainAfterExit=yes
 
