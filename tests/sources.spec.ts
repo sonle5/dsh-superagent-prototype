@@ -1323,16 +1323,17 @@ describe('observing the GitHub repository', () => {
     })
     return calls
   }
-  it('takes in the new Issues and PRs from when it started observing them, and asks again with the ETag while nothing is newer',
+  it('takes in the new Issues and PRs from when it started observing them, and reads again without a stale ETag',
     async () => {
     const h = host()
     observe(h, { observeIssues: true, observePulls: true })
     h.store.set('github-since', at(-24))
     h.store.set('github-stream:issues', { since: at(0), started: { issues: at(0), pulls: at(0) } })
-    const calls = repository(h, { issues: [issue(3, { created_at: at(-24), updated_at: at(1) }),
+    const answers = { issues: [issue(3, { created_at: at(-24), updated_at: at(1) }),
       issue(4, { created_at: at(2), updated_at: at(2) }),
       { ...issue(5, { created_at: at(3), updated_at: at(3) }), pull_request: { url: 'x' } },
-      issue(6, { created_at: at(4), updated_at: at(4), user: { login: 'agent-bot', type: 'User' } })] })
+      issue(6, { created_at: at(4), updated_at: at(4), user: { login: 'agent-bot', type: 'User' } })] }
+    const calls = repository(h, answers)
     await pollRound(h)
     // #3 was opened before the Source observed Issues, and #6 is the agent's own.
     expect(h.receive.mock.calls.map(([trigger]) => [trigger.meta.number, trigger.meta.kind, trigger.id]))
@@ -1341,13 +1342,16 @@ describe('observing the GitHub repository', () => {
     expect(h.store.get('github-stream:issues')).toEqual({ since: cursorAt(at(4)), started })
     const list = () => calls.filter(args => args[1]!.startsWith('repos/acme/widgets/issues?'))
     expect(list()[0]![1]).toContain(`since=${encodeURIComponent(at(0))}`)
-    // The next round repeats the request at the newest Issue, whose ETag the round after sends, which GitHub answers 304 for.
+    // GitHub can serve a 304 from an edge cache whose representation predates a newly opened Issue. Repository streams
+    // therefore never send a saved ETag, so the next poll sees an Issue that appeared after the previous empty result.
+    answers.issues = []
     await pollRound(h)
-    expect(h.store.get('github-stream:issues')).toEqual({ since: cursorAt(at(4)), started, etag: '"same"' })
+    expect(h.store.get('github-stream:issues')).toEqual({ since: cursorAt(at(4)), started })
     h.receive.mockClear()
+    answers.issues = [issue(7, { created_at: at(5), updated_at: at(5) })]
     await pollRound(h)
-    expect(list().at(-1)).toEqual(expect.arrayContaining(['-H', 'If-None-Match: "same"']))
-    expect(h.receive).not.toHaveBeenCalled()
+    expect(list().at(-1)).not.toContain('-H')
+    expect(h.receive).toHaveBeenCalledWith(expect.objectContaining({ meta: expect.objectContaining({ number: 7, kind: 'issue' }) }))
     // Switched off, the stream forgets where it was, so it starts afresh once switched on again.
     observe(h, {})
     await pollRound(h)
@@ -1444,7 +1448,7 @@ describe('observing the GitHub repository', () => {
     expect(Object.keys(h.store.get<{ started: Record<string, string> }>('github-stream:issues')!.started)).toEqual(['pulls'])
     h.store.close()
   })
-  it('keeps a stream\'s cursor five seconds before its newest item, and a stale cursor on the hour, so the ETag is sent again', async () => {
+  it('keeps a stream\'s cursor five seconds before its newest item, and clamps a stale cursor to the hour', async () => {
     const h = host()
     observe(h, { observeIssues: true })
     h.store.set('github-since', at(-24))
@@ -1461,7 +1465,7 @@ describe('observing the GitHub repository', () => {
     const since = (args: string[]) => decodeURIComponent(/since=([^&]+)/.exec(args[1]!)![1]!)
     expect(since(lists[0]!)).toBe(since(lists[1]!))
     expect(Date.parse(since(lists[0]!)) % 3_600_000).toBe(0)
-    expect(lists[1]).toEqual(expect.arrayContaining(['-H', 'If-None-Match: "same"']))
+    expect(lists[1]).not.toContain('-H')
     h.store.close()
   })
   it('gives each change of the default branch\'s CI its own id, also when one commit fails, passes and fails again', async () => {
