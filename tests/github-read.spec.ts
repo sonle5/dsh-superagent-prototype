@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest'
-import { Commands } from '../src/infra/commands.ts'
+import { CliError, Commands } from '../src/infra/commands.ts'
 import { testDeployment } from './fixtures/deployment.ts'
 import { readGithub, pullChecks } from '../src/sources/github-read.ts'
 
@@ -26,6 +26,24 @@ it('reads checks across pages and canonicalizes the latest status per context', 
   const result = await pullChecks(commands, 'abc')
   expect(result.checks.map((check: { name: string }) => check.name)).toEqual(['a', 'z'])
   expect(result.statuses).toEqual([{ context: 'build', state: 'success' }])
+})
+
+it('falls back to Actions workflow runs when a fine-grained PAT cannot read check runs', async () => {
+  const gh = vi.spyOn(commands, 'gh')
+  gh.mockRejectedValueOnce(new CliError('Resource not accessible by personal access token (403)', 403))
+    .mockResolvedValueOnce([{ workflow_runs: [{ name: 'unit', status: 'completed', conclusion: 'success' }] }])
+  vi.spyOn(commands, 'pages').mockResolvedValue([{ context: 'deploy', state: 'pending' }])
+  expect(await pullChecks(commands, 'abc')).toEqual({
+    head: 'abc',
+    checks: [{ name: 'unit', status: 'completed', conclusion: 'success' }],
+    statuses: [{ context: 'deploy', state: 'pending' }],
+  })
+  expect(gh).toHaveBeenLastCalledWith(['api', expect.stringContaining('/actions/runs?head_sha=abc&per_page=100'), '--paginate', '--slurp'])
+})
+
+it('does not hide a check-run authorization failure unrelated to fine-grained PATs', async () => {
+  vi.spyOn(commands, 'api').mockRejectedValueOnce(new CliError('Forbidden (403)', 403))
+  await expect(pullChecks(commands, 'abc')).rejects.toThrow('Forbidden (403)')
 })
 
 it('reads any requested PR’s CI on demand without restricting the author', async () => {

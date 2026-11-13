@@ -51,7 +51,7 @@ Below, `$DSH_HOME` means `${DSH_HOME:-$HOME/.dsh}`.
 
    Sign in as the agent account; the last command prints its login. dsh-superagent reads the login the same way.
 
-   A fine-grained PAT needs repository access limited to the deployment repository, with Contents, Issues and Pull requests read/write and Metadata read. GitHub does not let a fine-grained PAT read the account notification inbox. Turn off **Read the account notification inbox** under the GitHub Source's advanced settings, then enable the repository observation streams needed by that deployment, normally both **Receive new Issues** and **Receive comments**. A classic token is not required for notification processing.
+   A fine-grained PAT needs repository access limited to the deployment repository, with Contents, Issues and Pull requests read/write, Actions and Commit statuses read-only, and Metadata read. GitHub does not let a fine-grained PAT read the account notification inbox or call the Checks API. DSH therefore falls back from check runs to repository Actions workflow runs; Commit statuses remains required. Turn off **Read the account notification inbox** under the GitHub Source's advanced settings, then enable the repository observation streams needed by that deployment, normally both **Receive new Issues** and **Receive comments**. A classic token is not required for notification or CI polling.
 
 ### Feishu bot (optional)
 
@@ -340,6 +340,7 @@ Setup problems appear on the overview with a link to the fix, in the panel's lan
 | `@… cannot read …` or `@… cannot push to …` | Give the agent account write access to the repository |
 | `The GitHub Source names no repository.` | Set the repository, `owner/name`, on the GitHub card |
 | `Resource not accessible by personal access token` on GitHub notifications | Turn off **Read the account notification inbox**, enable **Receive new Issues** and **Receive comments**, then retry; fine-grained PATs cannot read the notification inbox |
+| `Resource not accessible by personal access token` while polling CI | Grant the PAT Actions and Commit statuses read-only, then restart the deployment; fine-grained PATs cannot call the Checks API directly |
 | A Ticket fails with `The prepare command failed: …` | The output names the cause, such as a wrong clone path; fix the command, then retry the Ticket |
 | `git does not read the github.com credential configuration dsh-superagent writes` | Install git 2.32 or later |
 | A Ticket fails with `The git configuration of the repository in … sets …` | Remove the named credential or `http.*.extraheader` settings from the clone's `.git/config` |

@@ -94,7 +94,7 @@ Start Desktop with the controller profile, then use the Cloud Fleet card:
 1. Sign in with GitHub device flow.
 2. Select **Create my cloud account**. This creates the person entry and Linux user.
 3. Enter a lowercase deployment id and `owner/repository`, then create the deployment. The gateway calls the fixed helper and returns only non-secret metadata.
-4. Paste that deployment agent GitHub account’s PAT into **Configure agent credentials**. The helper writes a `0700` `gh` wrapper owned by that person and saves it in the GitHub Source. The PAT is not written to the gateway registry or returned by the API. Grant Contents, Issues and Pull requests read/write plus Metadata read, turn off **Read the account notification inbox**, and enable repository Issue/comment polling; fine-grained PATs cannot read the notification inbox.
+4. Paste that deployment agent GitHub account’s PAT into **Configure agent credentials**. The helper writes a `0700` `gh` wrapper owned by that person and saves it in the GitHub Source. The PAT is not written to the gateway registry or returned by the API. Grant Contents, Issues and Pull requests read/write; Actions and Commit statuses read-only; and Metadata read. Turn off **Read the account notification inbox**, and enable repository Issue/comment polling; fine-grained PATs can read neither the notification inbox nor the Checks API. DSH falls back to repository Actions workflow runs and Commit statuses for CI.
 5. Configure model credentials through the connected deployment’s normal DSH provider settings. They stay under that person’s Linux user and profile.
 
 The generated deployment card also exposes Start, Stop, Restart, and a journal tail. These calls remain HTTPS requests to the same gateway. The gateway checks ownership, rejects overlapping lifecycle actions for that deployment with HTTP `409`, and writes attempt/result records to `/var/lib/dsh-superagent/gateway/audit.jsonl` with mode `0600`. The journal tail is limited to 80 lines and 64 KiB and redacts authorization headers, bearer tokens, API keys, and URL query tokens.
@@ -214,15 +214,17 @@ The current verified public endpoint is `https://dsh-superagent.201-79-39-167.ss
 
 The `hdt98` account now has its own private `hdt98/dsh-superagent-onboarding-smoke` deployment, fine-grained repository PAT, and OpenAI provider. Its prepared-worktree, polling, reboot, model-attestation, normal sign-in, Session-history, and blast-radius checks have passed. The account-onboarding test also exposed a partial-provisioning recovery bug. Existing Linux users are now required to have their directories and `0700` home permission repaired before onboarding returns successfully, with regression coverage in `tests/onboarding-helper.spec.ts`.
 
-Remote lifecycle and log controls were accepted on 2026-11-13 against commit `2d472b5402cbbe55e37153c787df703b629a3f7a`:
+Remote lifecycle and log controls were accepted on 2026-11-13 against deployed commit `700b823a34c43d26c43e2ed8552b6ceff38af670`:
 
 - Desktop Restart completed in about five seconds and returned `active`.
 - Desktop Stop changed the card to `Stopped intentionally` and the service to `inactive`; the bounded journal remained visible.
 - Desktop Start returned the service to `active`, and all ten management-health components returned to `ready`.
-- The deployment had no active Ticket during these checks, so the 300-second graceful in-flight teardown path remains covered by automated tests rather than a destructive live run.
+- A second live run stopped the deployment while a code-writing Ticket was working. Systemd completed the Stop in two seconds with `Result=success`, no timeout, and no signal. After Start, the Ticket used the same Session and worktree, recorded the first Assignment as `hostRestarted`, delivered the recovery note to a second Assignment, and asked the worker to reconcile remote state before continuing.
+- The recovered worker found the existing branch, commit and PR, did not create duplicates, and finished in `person / review`. The source Issue and PR remained grouped under one Ticket. The branch contains one commit, the PR is mergeable, the only changed paths are `acceptance/code_writing_probe.py` and `acceptance/test_code_writing_probe.py`, and the required three-test `unittest` run passed.
+- The persisted worker Session retained Eval `openai / gpt-6.1-terra / high` and Executor `openai / gpt-6.1-sol / xhigh` after Stop/Start. Exactly one acknowledgement and one final result were posted to the source Issue.
 - The hdt98 Session ID, Eval `openai / gpt-6.1-terra / high`, Executor `openai / gpt-6.1-sol / xhigh`, and recent history remained unchanged.
 - The live gateway returned `401` unauthenticated, `404` for another person's deployment, `400` for an invalid action, and `409` for an overlapping action. Audit records were mode `0600` and contained no credentials or command environment.
-- `pnpm check` passed with 71 test files, 1,328 tests, and the production build. The Fleet-page regression also verifies that an intentional selected-deployment poll failure does not produce a redundant global error banner.
+- `pnpm check` passed with 71 test files, 1,332 tests, and the production build. The Fleet-page regression also verifies that an intentional selected-deployment poll failure does not produce a redundant global error banner.
 
 ## Migration and upgrades
 
