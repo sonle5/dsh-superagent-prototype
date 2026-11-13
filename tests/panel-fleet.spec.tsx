@@ -20,6 +20,14 @@ it('shows every peer deployment with equal lifecycle and management controls', a
     zh.fleetManage])
 })
 
+it('does not report the selected deployment poll as a global error on the Fleet control page', async () => {
+  server.downDeployment = 'inference-support-loop'
+  await mount()
+  await click(tab(zh['tab.fleet']))
+  expect(document.querySelector('.dt-column > .dt-error')).toBeNull()
+  expect(text()).toContain('onenexus-team/inference-support-loop')
+})
+
 it('starts a stopped deployment and refreshes its aggregate state', async () => {
   await mount()
   await click(tab(zh['tab.fleet']))
