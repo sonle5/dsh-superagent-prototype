@@ -5,7 +5,7 @@ import { sameName } from '../infra/text.ts'
 import { GithubAccountsSchema } from '../deployment.ts'
 import { CliError, validItems, type Tally } from '../infra/commands.ts'
 import { ciCounts, ciFact, ciFailures, ciSummary, githubThreadContext, pullChecks } from './github-read.ts'
-import { branchCiTrigger, ciTrigger, commentTrigger, CommentSchema, githubAddress, issueTrigger, IssueSchema, pullTrigger, SOURCE }
+import { branchCiTrigger, ciTrigger, commentTrigger, CommentSchema, githubAddress, issueTrigger, IssueSchema, mentions, pullTrigger, SOURCE }
   from './github-trigger.ts'
 import { githubLink, sendGithub } from './github-channel.ts'
 import type { GithubComment, PullRef } from './github-trigger.ts'
@@ -161,8 +161,12 @@ export interface Retry { since: string; pr: boolean; comment?: ExactComment; fai
 const RETRY_WINDOW_MS = 24 * 3600_000
 /** GitHub can surface a new Issue's mention after the polling cursor passed its `created_at`. */
 const OPENED_GRACE_MS = 5 * 60_000
+/** Outbound GitHub messages carry this marker, so a deployment can share its operator's account without reading its own replies. */
+const AGENT_MARKER = /<!--\s*dsh-superagent:[^>]+-->/i
 /** True when GitHub returns HTTP 410 (Gone); HTTP 404 is retried because it can indicate revoked access to a private repository. */
 const deleted = (error: unknown): boolean => error instanceof CliError && error.code === 410
+const agentOutput = (login: string, user: { login: string }, body: string | null | undefined): boolean =>
+  sameName(user.login, login) && AGENT_MARKER.test(body ?? '')
 /** Records a failed read on the Thread and in the round; deleted (410) or abandoned (24h+) threads do not fail the round. */
 function failed(ctx: SourceContext, round: Round, number: number, error: unknown, abandoned = false): void {
   if (deleted(error)) round.dropped.push(number)
@@ -226,17 +230,19 @@ async function readStream(ctx: SourceContext, round: Round, id: string, path: st
   for (const item of items) {
     // Stopping mid-stream aborts before advancing the cursor so unread items are retried.
     if (stopped(ctx, round)) throw new Error('The GitHub Source stopped during the poll')
-    if (sameName(item.user.login, login)) continue
     if (id === 'issues') {
       const issue = IssueSchema.safeParse(item)
       const pr = issue.success && !!issue.data.pull_request
       if (!issue.success || !fresh(issue.data.created_at, pr ? 'pulls' : 'issues')) continue
-      await ctx.receive(pr ? pullTrigger(issue.data, login) : issueTrigger(issue.data, login))
+      const trigger = pr ? pullTrigger(issue.data, login) : issueTrigger(issue.data, login)
+      if (sameName(issue.data.user.login, login) && trigger.addressed !== 'mention') continue
+      await ctx.receive(trigger)
       nameThread(ctx, issue.data.number, issue.data.title)
       continue
     }
     const number = Number(/\/(?:issues|pulls)\/(\d+)$/.exec((id === 'comments' ? item.issue_url : item.pull_request_url) ?? '')?.[1])
     if (!number || !fresh(item.updated_at ?? item.created_at, 'comments')) continue
+    if (agentOutput(login, item.user, item.body)) continue
     const isPr = id === 'review-comments' || /\/pull\//.test(item.html_url ?? '')
     const ref = { number, isPr, ...item.html_url ? { url: item.html_url } : {} }
     const trigger = commentTrigger(item, ref, id === 'comments' ? 'conversation' : 'inline', login)
@@ -360,7 +366,8 @@ async function readNotified(ctx: SourceContext, round: Round, number: number, it
       // An Issue opened by someone other than the agent near the cursor brings its body so a mention in it reaches the gate.
       // A mention added by a later edit to the body is not read: only the author can be the actor of the body.
       const { login } = ctx.deployment.github
-      const opened = Date.parse(issue.created_at) >= Date.parse(since) - OPENED_GRACE_MS && !sameName(issue.user.login, login)
+      const opened = Date.parse(issue.created_at) >= Date.parse(since) - OPENED_GRACE_MS
+        && (!sameName(issue.user.login, login) || mentions(issue.body ?? '', login))
       if (opened) await ctx.receive(issueTrigger(issue, login))
       const ref = { number, isPr: false, url: issue.html_url }
       await intakeComments(ctx, ref, since, round)
@@ -372,7 +379,8 @@ async function readNotified(ctx: SourceContext, round: Round, number: number, it
     const pr = await pull(ctx, round, number)
     // Emit a PR description trigger for PRs opened since the cursor; its ID is the same as the one produced by the repository PR stream.
     const { login } = ctx.deployment.github
-    if (pr.created_at && Date.parse(pr.created_at) >= Date.parse(since) && !sameName(pr.user.login, login)) {
+    if (pr.created_at && Date.parse(pr.created_at) >= Date.parse(since)
+      && (!sameName(pr.user.login, login) || mentions(pr.body ?? '', login))) {
       const opened = { number, title: pr.title ?? '', body: pr.body, user: pr.user, created_at: pr.created_at, html_url: pr.html_url }
       await ctx.receive(pullTrigger(opened, login))
     }
@@ -422,7 +430,7 @@ async function intakeExactComment(ctx: SourceContext, round: Round, ref: PullRef
     throw error
   }
   const { login } = ctx.deployment.github
-  if (sameName(comment.user.login, login)) return
+  if (agentOutput(login, comment.user, comment.body)) return
   const trigger = commentTrigger(comment, ref, exact.kind, login)
   if (trigger.text) await ctx.receive(trigger)
 }
@@ -439,7 +447,7 @@ async function intakeComments(ctx: SourceContext, ref: PullRef, since: string, r
       if (stopped(ctx, round)) throw new Error('The GitHub Source stopped during the poll')
       const timestamp = Date.parse(comment.updated_at ?? comment.submitted_at ?? comment.created_at ?? '')
       if (!Number.isFinite(timestamp) || timestamp < Date.parse(since)) continue
-      if (sameName(comment.user.login, login)) continue
+      if (agentOutput(login, comment.user, comment.body)) continue
       // A review decision without a body still reaches the ticket: a worker may be waiting for that approval.
       const trigger = commentTrigger(comment, ref, kind, login)
       if (trigger.text) await ctx.receive(trigger)

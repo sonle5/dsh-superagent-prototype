@@ -111,6 +111,8 @@ Each person brings an agent GitHub account and model-provider access.
 
 Grant the PAT Contents, Issues and Pull requests read/write; Actions and Commit statuses read-only; and Metadata read. GitHub does not expose the account notification inbox or the Checks API to fine-grained PATs, so set the GitHub Source's **Read the account notification inbox** off and enable **Receive new Issues** and **Receive comments**. DSH reads check runs when the token supports them and otherwise falls back to repository Actions workflow runs plus Commit statuses. Repository polling therefore remains least-privilege; do not replace the PAT with an over-broad classic token merely to make notification or CI polling succeed.
 
+The PAT may belong to a dedicated agent account or the signed-in operator. Same-account operation requires an explicit mention on a new Issue or PR; comments are accepted when they do not carry the hidden marker every Superagent reply receives. This keeps single-account fleets usable without turning the agent's own replies into new Tickets.
+
 Token-based agent credentials are still reachable by that person's worker because the worker runs as that Linux user. That is the intended agent-account boundary, not an isolation boundary against prompt injection; use a dedicated agent GitHub account with least-privilege access.
 
 The protected proxy reduces model-key exposure but does not make workers read-only. Workers can still read the deployment PAT, sibling worktrees under the same person's Linux identity, and any other data that identity can access. Kernel-enforced per-Ticket filesystem and egress isolation remains deferred.

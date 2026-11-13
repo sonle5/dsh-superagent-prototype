@@ -53,6 +53,8 @@ Below, `$DSH_HOME` means `${DSH_HOME:-$HOME/.dsh}`.
 
    A fine-grained PAT needs repository access limited to the deployment repository, with Contents, Issues and Pull requests read/write, Actions and Commit statuses read-only, and Metadata read. GitHub does not let a fine-grained PAT read the account notification inbox or call the Checks API. DSH therefore falls back from check runs to repository Actions workflow runs; Commit statuses read-only remains required. Turn off **Read the account notification inbox** under the GitHub Source's advanced settings, then enable the repository observation streams needed by that deployment, normally both **Receive new Issues** and **Receive comments**. A classic token is not required for notification or CI polling.
 
+   The CLI may use a dedicated agent account or the operator's account. With the operator's account, address the agent explicitly (`@<agent login>`) in an Issue or PR, or post a comment; unmentioned same-account Issue and PR bodies are treated as agent output. Every Superagent comment carries a hidden `<!-- dsh-superagent:… -->` marker, which the Source skips so it cannot invoke itself. A dedicated least-privilege account remains preferable when the team can provide one.
+
 ### Feishu bot (optional)
 
 1. Create a self-built app with the bot capability. Grant it the permissions to receive message events, read and send chat messages, and read chat members, then publish the app version.

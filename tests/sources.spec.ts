@@ -478,14 +478,15 @@ describe('github source', () => {
       .toEqual([expect.objectContaining({ text: '[PR #12](https://github.com/acme/widgets/pull/12) was closed without merging.' })])
     h.store.close()
   })
-  it('polls subscribed PR threads since their checkpoint and skips the bot\'s own comments', async () => {
+  it('polls subscribed PR threads since their checkpoint and skips the bot\'s marked comments', async () => {
     const h = host()
     const thread: Thread = { key: 'github:7', ref: { source: 'github', id: '7' }, createdAt: '2026-09-01T00:00:00Z',
       lastAt: new Date().toISOString(), subscriptions: ['t'], correlated: [], pending: [], meta: { number: 7, isPr: true } }
     h.store.threads.save(thread)
     const comment = (id: number, login: string, at: string, body: string) => ({ id, body, user: { login }, created_at: at, updated_at: at })
     github(h, { 'issues/7': { ...issue(7, { title: 'Fix the margin' }), pull_request: { url: 'x' } }, 'pulls/7': openPull(7),
-      'issues/7/comments': [comment(1, 'agent-bot', '2026-09-01T01:00:00Z', 'mine'), comment(2, 'a', '2026-08-01T00:00:00Z', 'old'),
+      'issues/7/comments': [comment(1, 'agent-bot', '2026-09-01T01:00:00Z', 'mine\n\n<!-- dsh-superagent:old -->'),
+        comment(2, 'a', '2026-08-01T00:00:00Z', 'old'),
         comment(3, 'b', '2026-09-01T02:00:00Z', 'new')] })
     await pollGithubThreads(h)
     expect(h.receive).toHaveBeenCalledTimes(1)
@@ -1378,6 +1379,26 @@ describe('observing the GitHub repository', () => {
     await pollRound(h)
     expect(h.receive.mock.calls.map(([trigger]) => [trigger.meta.number, trigger.meta.isPr, trigger.meta.kind, trigger.human]))
       .toEqual([[7, false, 'conversation', true], [9, true, 'conversation', false], [9, true, 'inline', true]])
+    h.store.close()
+  })
+  it('accepts explicit operator events when the agent uses the same GitHub account, but ignores marked replies', async () => {
+    const h = host()
+    observe(h, { observeIssues: true, observeComments: true })
+    h.store.set('github-since', at(-24))
+    h.store.set('github-stream:issues', { since: at(0), started: { issues: at(0) } })
+    h.store.set('github-stream:comments', { since: at(0), started: { comments: at(0) } })
+    const own = { login: 'agent-bot', type: 'User' }
+    const comment = (id: number, body: string) => ({ id, body, user: own,
+      issue_url: 'https://api.github.com/repos/acme/widgets/issues/8',
+      html_url: `https://github.com/acme/widgets/issues/8#issuecomment-${id}`, created_at: at(2), updated_at: at(2) })
+    repository(h, {
+      issues: [issue(8, { body: '@agent-bot inspect this', created_at: at(1), updated_at: at(1), user: own }),
+        issue(9, { body: 'Agent-created note', created_at: at(1), updated_at: at(1), user: own })],
+      comments: [comment(1, 'Earlier reply\n\n<!-- dsh-superagent:old -->'), comment(2, '@agent-bot follow up')],
+    })
+    await pollRound(h)
+    expect(h.receive.mock.calls.map(([trigger]) => [trigger.meta.number, trigger.meta.kind, trigger.meta.commentId]))
+      .toEqual([[8, 'issue', undefined], [8, 'conversation', 2]])
     h.store.close()
   })
   it('fails the round for a stream whose read fails, keeps its cursor, and still reads the other streams', async () => {
