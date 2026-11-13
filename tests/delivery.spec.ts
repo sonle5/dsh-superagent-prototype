@@ -8,11 +8,18 @@ import { AgentDelivery } from '../src/app/delivery.ts'
 function fixture(history: UserMessage[] = []) {
   const ctx = new Context()
   const inbox = { nextTurn: [] as UserMessage[], nextStep: [] as UserMessage[] }
+  const remove = (id: string) => {
+    for (const messages of [inbox.nextTurn, inbox.nextStep]) {
+      const index = messages.findIndex(message => message.id === id)
+      if (index >= 0) { messages.splice(index, 1); return true }
+    }
+    return false
+  }
   const steer = vi.fn((message: UserMessage) => { inbox.nextStep.push(message) })
   const followup = vi.fn((message: UserMessage) => { inbox.nextTurn.push(message) })
   const injected = vi.fn((_message: UserMessage) => {})
   // Only the delivery-facing Agent methods participate in this fixture.
-  const agent = { id: SessionId('delivery-test'), session: {}, inbox, steer, followup, inject: injected } as unknown as Agent
+  const agent = { id: SessionId('delivery-test'), status: 'running', session: {}, inbox: { ...inbox, remove }, steer, followup, inject: injected } as unknown as Agent
   const event = (message: UserMessage): SessionEvent => ({ type: 'user/message', seq: SessionSeq(0), time: 0, surfaceOp: 'append', data: message })
   const read = vi.fn(async (offset: number, length: number) => ({ events: history.slice(offset, offset + length).map(event) }))
   const close = vi.fn(async () => {})
@@ -21,7 +28,7 @@ function fixture(history: UserMessage[] = []) {
   const agents = new Map([[agent.id, agent]])
   ctx.reflect.provide('agents', agents)
   ctx.reflect.provide('sessionPersistence', { open, flush })
-  const delivery = new AgentDelivery(ctx)
+  const delivery = new AgentDelivery(ctx, agent.id)
   const signal = new AbortController()
   const send = (id = 'request', mode: 'queue' | 'steer' = 'steer') => delivery.send(agent, id, '{"event_id":"event"}', mode, signal.signal)
   const inject = (id: string, summary: string) => delivery.send(agent, id, '{"settings_saved":"policy"}', { inject: summary }, signal.signal)
@@ -30,7 +37,7 @@ function fixture(history: UserMessage[] = []) {
     inbox.nextStep.splice(0); inbox.nextTurn.splice(0)
     ctx.emit('session/event', agent.session, event(message))
   }
-  return { agent, agents, inbox, steer, followup, injected, open, read, close, flush, send, inject, holds, consume, signal }
+  return { agent, agents, ctx, delivery, inbox, steer, followup, injected, open, read, close, flush, send, inject, holds, consume, signal }
 }
 
 it.each(['queue', 'steer'] as const)('delivers %s as an orchestrator relay, deduplicating pending and consumed messages', async mode => {
@@ -52,6 +59,42 @@ it.each(['queue', 'steer'] as const)('delivers %s as an orchestrator relay, dedu
   await restored.send('request', mode)
   expect(restored.steer).not.toHaveBeenCalled()
   expect(restored.followup).not.toHaveBeenCalled()
+})
+
+it('wakes an idle Session instead of leaving a steering relay in its next-step inbox', async () => {
+  const f = fixture()
+  ;(f.agent as unknown as { status: string }).status = 'idle'
+  await f.send('request', 'steer')
+  expect(f.steer).not.toHaveBeenCalled()
+  expect(f.followup).toHaveBeenCalledOnce()
+  expect(f.inbox.nextTurn).toHaveLength(1)
+  expect(f.inbox.nextStep).toHaveLength(0)
+})
+
+it('promotes a relay stranded by a running turn ending before its next step', async () => {
+  const f = fixture()
+  await f.send('request', 'steer')
+  expect(f.inbox.nextStep).toHaveLength(1)
+  const message = f.inbox.nextStep[0]!
+  ;(f.agent as unknown as { status: string }).status = 'idle'
+  f.ctx.emit('agent/status', { agent: f.agent, status: 'idle' })
+  await Promise.resolve()
+  expect(f.followup).toHaveBeenCalledOnce()
+  expect(f.followup).toHaveBeenCalledWith(message)
+  expect(f.inbox.nextStep).toHaveLength(0)
+  expect(f.inbox.nextTurn).toEqual([message])
+})
+
+it('promotes a relay already stranded in restored Session input', () => {
+  const f = fixture()
+  const message = createUserMessage({ content: [{ type: 'text', text: 'old relay' }], source: {
+    kind: 'dsh-superagent', form: 'relay' } })
+  f.inbox.nextStep.push(message)
+  ;(f.agent as unknown as { status: string }).status = 'idle'
+  f.delivery.recover(f.agent)
+  expect(f.followup).toHaveBeenCalledOnce()
+  expect(f.followup).toHaveBeenCalledWith(message)
+  expect(f.inbox.nextStep).toHaveLength(0)
 })
 
 it.each(['pending', 'consumed', 'live'] as const)('recognizes legacy plugin identity in %s input without rewriting it', async location => {

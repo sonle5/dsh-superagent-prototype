@@ -35,7 +35,7 @@ Below, `$DSH_HOME` means `${DSH_HOME:-$HOME/.dsh}`.
 
 ### Agent GitHub account
 
-1. Create a GitHub user account for the agent and give it write access to each repository. A GitHub App cannot be the agent, because dsh-superagent reads the account's notifications. A shared account exposes their union of access to every worker that can use it.
+1. Create a GitHub user account for the agent and give it write access to each repository. A GitHub App cannot be the agent, because dsh-superagent acts through the account's authenticated GitHub CLI. A shared account exposes their union of access to every worker that can use it.
 2. Give it a GitHub CLI that uses only its own credentials:
 
    ```sh
@@ -50,6 +50,10 @@ Below, `$DSH_HOME` means `${DSH_HOME:-$HOME/.dsh}`.
    ```
 
    Sign in as the agent account; the last command prints its login. dsh-superagent reads the login the same way.
+
+   A fine-grained PAT needs repository access limited to the deployment repository, with Contents, Issues and Pull requests read/write, Actions and Commit statuses read-only, and Metadata read. GitHub does not let a fine-grained PAT read the account notification inbox or call the Checks API. DSH therefore falls back from check runs to repository Actions workflow runs; Commit statuses read-only remains required. Turn off **Read the account notification inbox** under the GitHub Source's advanced settings, then enable the repository observation streams needed by that deployment, normally both **Receive new Issues** and **Receive comments**. A classic token is not required for notification or CI polling.
+
+   The CLI may use a dedicated agent account or the operator's account. With the operator's account, address the agent explicitly (`@<agent login>`) in an Issue or PR, or post a comment; unmentioned same-account Issue and PR bodies are treated as agent output. Every Superagent comment carries a hidden `<!-- dsh-superagent:… -->` marker, which the Source skips so it cannot invoke itself. A dedicated least-privilege account remains preferable when the team can provide one.
 
 ### Feishu bot (optional)
 
@@ -88,8 +92,11 @@ When this repository is already the checkout, skip the `git clone` line. DeepSee
 For each deployment, install this bundle into a new profile:
 
 ```sh
+dsh --profile superagent-<deployment> --from-default-profile web --dump-config >/dev/null
 dsh plugin --profile superagent-<deployment> add "link:$PWD"
 ```
+
+The deployment patch targets the shipped `webserver` entry, so initialize a new repository profile from the `web` template before adding the Superagent bundle.
 
 For the Desktop fleet controller, also install the bundle into the Desktop profile if it is not already present:
 
@@ -115,15 +122,15 @@ After the first start, edit machine limits in **Settings → Deployment** or the
 ## Start and stop
 
 ```sh
-scripts/dsh-superagent --profile <profile> --url <url> start
-scripts/dsh-superagent --profile <profile> --url <url> status
+scripts/dsh-superagent --profile <profile> --url <url> --state-dir <stateDir> start
+scripts/dsh-superagent --profile <profile> --url <url> --state-dir <stateDir> status
 ```
 
-`start` runs `dsh --profile <profile>` in tmux session `dsh-<profile>`. It waits up to one minute for the runtime to become ready or report a setup requirement. On a first run it prints the missing setup information. It refuses duplicate instances, including ones started outside this script. Pass both `--profile` and `--url` for every managed deployment; the profile name does not imply its port.
+`start` runs `dsh --profile <profile>` in tmux session `dsh-<profile>` on a tmux server socket derived from the profile name. Each profile therefore has an independent tmux server and systemd cgroup, even when several deployments share a machine. It waits up to one minute for the runtime to become ready or report a setup requirement. On a first run it prints the missing setup information. It refuses duplicate instances, including ones started outside this script. Pass both `--profile` and `--url` for every managed deployment; the profile name does not imply its port.
 
 `stop` and `restart` request graceful shutdown and wait up to five minutes for Executors from the script, or one minute when invoked by Fleet. They never force-kill the process or touch other tmux sessions.
 
-`status` prints process ids, health and setup problems. For a different profile or port, use `--profile` and `--url`, or set `DSH_SUPERAGENT_PROFILE` and `DSH_SUPERAGENT_URL`.
+`status` prints process ids, health and setup problems. For a different profile or port, use `--profile` and `--url`, or set `DSH_SUPERAGENT_PROFILE` and `DSH_SUPERAGENT_URL`. `--state-dir` defaults to `$DSH_HOME/state/<profile>` and must be passed for a custom state directory; Fleet supplies it automatically from its registry.
 
 `status`, `start` and `restart` exit with one of four codes:
 
@@ -232,9 +239,9 @@ Setup must succeed before polling or work starts. Overview lists missing require
 
 ### Management API
 
-The panel uses a local HTTP API that agents can also call. `SETUP.md` uses it to save settings, and the service script reads `GET state`.
+The panel uses a local HTTP API that agents and the service script can also call. `SETUP.md` uses it to save settings, and the service script reads `GET state`.
 
-Send requests to `http://127.0.0.1:<port>/orchestrator/api/` with `x-orchestrator-request: 1`. The host must be `127.0.0.1:<port>` or `localhost:<port>`. Missing headers or an `Origin` from another site receive 403.
+The panel's browser requests use the signed DSH web session. Machine callers send requests to `http://127.0.0.1:<port>/orchestrator/api/` with `x-orchestrator-request: 1` and `x-dsh-superagent-native` containing the contents of `<stateDir>/native-proxy-token`. The host must be `127.0.0.1:<port>` or `localhost:<port>`. Missing credentials, a missing marker or an `Origin` from another site receive 401 or 403. The deployment creates the token; callers must read it, not create a replacement.
 
 API saves have the panel's permissions. They can change execution environment and setup account fields, unlike saves made through the main Session's tools.
 
@@ -273,7 +280,7 @@ A refusal has a status and `error`, its English text:
 
 The blocks:
 
-- `source:github`, `source:feishu`: `{"enabled": true, "config": {…}}`. GitHub's config has `repository` and `cli`, and the switches `observeIssues`, `observePulls`, `observeComments` and `observeCi`, off by default, which receive every new Issue, new pull request and comment in the repository and the default branch's CI; Feishu's has `cli`, `chats` as `[{"chatId": "oc_…", "name": "…", "listen": "mentions"}]` (or `"all"`), `directMessages`, and `otherChats` as `"none"` or `"mentions"`.
+- `source:github`, `source:feishu`: `{"enabled": true, "config": {…}}`. GitHub's config has `repository` and `cli`; `notifications`, which reads the account notification inbox and defaults to `true`; and the switches `observeIssues`, `observePulls`, `observeComments` and `observeCi`, off by default, which receive every new Issue, new pull request and comment in the repository and the default branch's CI. Set `notifications` to `false` for a fine-grained PAT and enable the repository streams needed by that deployment. Feishu's config has `cli`, `chats` as `[{"chatId": "oc_…", "name": "…", "listen": "mentions"}]` (or `"all"`), `directMessages`, and `otherChats` as `"none"` or `"mentions"`.
 - `policy`: `{"rules": […], "sources": {"github": {"allowed": [{"id": "<login>"}], "bots": [{"id": "dependabot[bot]"}]}, "feishu": {"allowed": [{"id": "ou_…", "name": "…"}], "syncChat": "oc_…", "admission": {"oc_…": {"unlistedAddressed": "explicit"}}}}}`. `bots` lists the bots whose messages may become inferred candidates. An `admission` row is keyed by chat id, `other` or `direct` for Feishu, and by `issues`, `pulls`, `comments` or `ci` for GitHub; an unset cell takes its default (see [002 Authorization](002-authorization.md)).
 - `eval`: `mode`, `timeoutSeconds` and `model`.
 - `executor`: `model`, `maxWorkers`, `directory`, `prepare` and `blockedCommands`. The processing pause is a setting of its own, `paused`, which `POST executor/pause` sets.
@@ -282,8 +289,9 @@ Changing a repository or CLI runs the corresponding setup check first. A failed 
 
 ```sh
 api=http://127.0.0.1:3082/orchestrator/api
-rev=$(curl -s -H 'x-orchestrator-request: 1' $api/settings | jq '.sources[] | select(.id == "github") | .revision')
-curl -s -X PUT -H 'x-orchestrator-request: 1' -H 'content-type: application/json' $api/settings/source:github \
+token=$(tr -d '\n' < "$DSH_HOME/state/superagent/native-proxy-token")
+rev=$(curl -s -H 'x-orchestrator-request: 1' -H "x-dsh-superagent-native: $token" $api/settings | jq '.sources[] | select(.id == "github") | .revision')
+curl -s -X PUT -H 'x-orchestrator-request: 1' -H "x-dsh-superagent-native: $token" -H 'content-type: application/json' $api/settings/source:github \
   -d "{\"value\": {\"enabled\": true, \"config\": {\"repository\": \"acme/widgets\", \"cli\": \"$HOME/.local/bin/gh-agent\"}}, \"revision\": $rev}"
 ```
 
@@ -333,6 +341,8 @@ Setup problems appear on the overview with a link to the fix, in the panel's lan
 | `The agent GitHub CLI cannot read its account` | Sign the wrapper in with `auth login` |
 | `@… cannot read …` or `@… cannot push to …` | Give the agent account write access to the repository |
 | `The GitHub Source names no repository.` | Set the repository, `owner/name`, on the GitHub card |
+| `Resource not accessible by personal access token` on GitHub notifications | Turn off **Read the account notification inbox**, enable **Receive new Issues** and **Receive comments**, then retry; fine-grained PATs cannot read the notification inbox |
+| `Resource not accessible by personal access token` while polling CI | Grant the PAT Actions and Commit statuses read-only, then restart the deployment; fine-grained PATs cannot call the Checks API directly |
 | A Ticket fails with `The prepare command failed: …` | The output names the cause, such as a wrong clone path; fix the command, then retry the Ticket |
 | `git does not read the github.com credential configuration dsh-superagent writes` | Install git 2.32 or later |
 | A Ticket fails with `The git configuration of the repository in … sets …` | Remove the named credential or `http.*.extraheader` settings from the clone's `.git/config` |

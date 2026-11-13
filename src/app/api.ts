@@ -9,6 +9,7 @@ import type { SourceStatusView } from './views/sources.ts'
 import type { DecisionListView, SearchView, ThreadDetailView, ThreadListView } from './views/threads.ts'
 import type { TicketListView } from './views/tickets.ts'
 import type { FleetView } from './fleet.ts'
+import type { ProviderControlView } from './providers.ts'
 
 export const TICKET_FILTERS = ['open', 'person', 'working', 'idle', 'ended'] as const
 export const THREAD_FILTERS = ['subscribed', 'evaluating', 'recent', 'all'] as const
@@ -17,13 +18,97 @@ export type ThreadFilter = typeof THREAD_FILTERS[number]
 interface Paged { offset?: number; limit?: number }
 /** Whether a context update was already injected into the main Session or is still pending delivery. */
 type Delivery = 'injected' | 'pending'
+export type ModelProxyProviderId = 'claude' | 'nexus13' | 'one-nexus' | 'openai'
+export interface ModelProxyView {
+  status: string
+  baseURL: string
+  providers: {
+    id: ModelProxyProviderId
+    label: string
+    state: 'connected' | 'configured' | 'sign-in-required' | 'missing' | 'error'
+  }[]
+  deployments: {
+    id: string
+    keyConfigured: boolean
+  }[]
+}
 
 export interface Api {
   'GET fleet': { response: FleetView }
+  'GET gateway/status': { response: {
+    configured: boolean
+    url?: string
+    organization?: string
+    login?: string
+    person?: boolean
+    error?: string
+  } }
+  'POST gateway/device': { response: {
+    device_code: string
+    user_code: string
+    verification_uri: string
+    expires_in: number
+    interval: number
+  } }
+  'POST gateway/session': { body: { device_code: string }; response: { login: string; organization: string; expiresAt: string } }
+  'POST gateway/person': { response: {
+    login: string
+    user?: string
+    created: boolean
+  } }
+  'POST gateway/deployment': { body: { id: string; repository: string }; response: {
+    login: string
+    created: boolean
+    deployment: {
+      id: string
+      profile: string
+      repository: string
+      url: string
+      stateDir: string
+      workspace: string
+    }
+  } }
+  'POST gateway/deployment/:id/credentials': { body: { githubToken: string }; response: {
+    saved: boolean
+    revision: number
+    restarting: boolean
+  } }
+  'DELETE gateway/session': { response: { signedOut: true } }
+  'GET gateway/model-proxy': { response: ModelProxyView }
+  'POST gateway/model-proxy/claude/connect': { response: { url: string; expiresAt: string } }
+  'GET gateway/model-proxy/claude/status': { response: {
+    state: 'idle' | 'waiting' | 'connected' | 'error'
+    error?: string
+  } }
+  'DELETE gateway/model-proxy/claude/session': { response: { cancelled: boolean } }
+  'PUT gateway/model-proxy/provider/:provider': { body: { apiKey: string }; response: {
+    provider: 'one-nexus' | 'openai'
+    configured: true
+  } }
+  'POST fleet/:id/model-proxy': { response: ProviderControlView }
   'POST deployments/:id/select': { response: { selected: string } }
   'POST fleet/:id/start': { response: { id: string; action: 'start'; code: number; output: string } }
   'POST fleet/:id/stop': { response: { id: string; action: 'stop'; code: number; output: string } }
   'POST fleet/:id/restart': { response: { id: string; action: 'restart'; code: number; output: string } }
+  'GET fleet/:id/providers': { response: ProviderControlView }
+  'PUT fleet/:id/providers/:provider': { body: {
+    displayName: string
+    api: 'openai-completions' | 'anthropic-messages' | 'openai-responses'
+    baseURL: string
+    credentialRef: string
+    apiKey?: string
+    models: {
+      id: string
+      name: string
+      contextWindow?: number
+      maxTokens?: number
+      reasoning: boolean
+      image: boolean
+    }[]
+    revision: number
+  }; response: ProviderControlView }
+  'POST fleet/:id/providers/:provider/credential': { body: { value: string }; response: ProviderControlView }
+  'DELETE fleet/:id/providers/:provider': { body: { revision: number }; response: ProviderControlView }
   'GET state': { response: StateView }
   'GET overview': { response: OverviewView }
   'GET search': { query: { q: string }; response: SearchView }
@@ -52,10 +137,27 @@ export interface Api {
 }
 export const FLEET_ROUTES = [
   'GET fleet',
+  'GET gateway/status',
+  'POST gateway/device',
+  'POST gateway/session',
+  'POST gateway/person',
+  'POST gateway/deployment',
+  'POST gateway/deployment/:id/credentials',
+  'DELETE gateway/session',
+  'GET gateway/model-proxy',
+  'POST gateway/model-proxy/claude/connect',
+  'GET gateway/model-proxy/claude/status',
+  'DELETE gateway/model-proxy/claude/session',
+  'PUT gateway/model-proxy/provider/:provider',
+  'POST fleet/:id/model-proxy',
   'POST deployments/:id/select',
   'POST fleet/:id/start',
   'POST fleet/:id/stop',
   'POST fleet/:id/restart',
+  'GET fleet/:id/providers',
+  'PUT fleet/:id/providers/:provider',
+  'POST fleet/:id/providers/:provider/credential',
+  'DELETE fleet/:id/providers/:provider',
 ] as const satisfies readonly (keyof Api)[]
 export const DEPLOYMENT_ROUTES = [
   'GET state',

@@ -290,7 +290,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 
 | Path | Responsibility |
 | --- | --- |
-| `src/index.ts` | The main plugin entry: in `repository` mode, reads the machine settings, starts the Runtime, and gives it the restart that a save of a Source's account uses; in `control` mode, mounts only Fleet lifecycle, the fixed deployment-management proxy and native Session routing |
+| `src/index.ts` | The main plugin entry: in `repository` mode, reads the machine settings, starts the Runtime, and gives it the restart that a save of a Source's account uses; in `control` mode, mounts only Fleet lifecycle, the fixed deployment-management proxy and native Session routing; in `gateway` mode, mounts only the public gateway API |
 | `src/deployment.ts` | The plugin `Config` and `Machine`; `resolveDeployment` and `resolveFeishuBot` read the repository and the accounts from the Source settings, each CLI run as Executor shells run it; `SETUP_FIELDS` lists the Source fields setup reads. The code names no person, account or organization |
 | `src/setup.ts` | Setup problems: `SetupError`, with a code, the place that fixes it and the English text the log, the main Session and the panel share |
 | `src/policy.ts` | The Policy: the settings schemas by block, the Policy version, the gate and Mandate revalidation |
@@ -342,11 +342,13 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/tools/tool.ts` | The `Tool` type, `readTool`, the `orchestrator_read` of both roles, and `AcknowledgementSchema` |
 | `src/app/tools/main.ts` | The main Session's tools |
 | `src/app/tools/executor.ts` | An Executor Session's tools |
-| `src/app/http.ts` | The `/orchestrator/api` routes: the same-origin check, request limits, one status per kind of failure and validated forwarding to registered deployment APIs |
-| `src/app/fleet.ts` | The local fleet registry, aggregate reads from independent loopback deployments, stopped-versus-unreachable status, recent log tails, and lifecycle actions restricted to registered DSH profiles |
+| `src/app/http.ts` | The `/orchestrator/api` routes: signed-panel or native-capability admission, the same-origin check, request limits, one status per kind of failure and validated forwarding to registered deployment APIs; in control mode, the gateway sign-in, person/deployment onboarding and credential proxy routes |
+| `src/app/providers.ts` | Deployment-scoped provider and model management over DSH's native settings, provider catalog and credential APIs; transactional migration behind the protected model proxy, versioned deployment keys, secret redaction, conflict mapping and user-layer reset |
+| `src/app/gateway.ts` | The `/gateway` routes: GitHub device sign-in, organization membership admission, a signed gateway session, the per-person server registry, self-service person/deployment onboarding, fixed agent- and model-credential operations, deployment-id management forwarding, and authenticated native HTTP and WebSocket forwarding |
+| `src/app/fleet.ts` | The local fleet registry; controller gateway sign-in state; aggregate reads from local and gateway deployments; native-capability and gateway-session credentials; protected model-proxy operations; the one-click Claude localhost callback listener; person/deployment onboarding and credential proxies; stopped-versus-unreachable status; recent log tails; and lifecycle actions restricted to registered local DSH profiles |
 | `src/app/native-auth.ts` | The private per-deployment capability shared by the controller and repository halves of native Session routing |
 | `src/app/native-aggregate.ts` | Deployment-scoped Session, Workspace and Remote-event identities; request-owner selection; inbound and outbound identity remapping; repository-prefixed titles; and bounded Session-list and search merges |
-| `src/app/native-transport.ts` | The controller and repository halves of deployment-aware native DSH transport: one aggregate Session/Workspace/control/event view, owner-routed unary and streaming calls, per-peer timeouts and partial availability, cancellation, per-stream event correlation and operator-peer compatibility; HTTP retains a durable no-interaction peer while every mux mints its own answer peer so closing a stream cannot invalidate API requests |
+| `src/app/native-transport.ts` | The controller and repository halves of deployment-aware native DSH transport: one aggregate Session/Workspace/control/event view, owner-routed unary and streaming calls, path-preserving target bases for gateway routing, per-peer timeouts and partial availability, cancellation, per-stream event correlation and operator-peer compatibility; HTTP retains a durable no-interaction peer while every mux mints its own answer peer so closing a stream cannot invalidate API requests |
 | `src/app/api.ts` | `Api`, every route with its parameters, query, body and response, and the filters of the lists; it imports only types, so the panel bundles it |
 | `src/app/views/text.ts` | The two forms of a view's text: `preview`, plain text on one line, and `markdown` without HTML; `plain` and `readable` |
 | `src/app/views/records.ts` | The rows the views share: Triggers, Tickets, Threads, Decisions and Channel links, and `ownersOf`, the owners of follow-ups as one request reads them |
@@ -382,13 +384,16 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/client/app.tsx` | The panel: header, search, glossary, tabs and the page of the current route |
 | `src/client/provider.tsx` | What every page reads from its host: copy, management deployment context, calls, navigation, notices, the state poll, and `restart`, which reads the state quickly while dsh-superagent restarts; deployment changes persist only the management/unscoped-selection context and never reload Desktop or replace the aggregate native Session tree |
 | `src/client/native-transport.ts` | Desktop-only replacement of the Gateway Remote WebSocket URL with the controller-owned aggregate native transport |
+| `src/client/native-id.ts` | Browser-safe encoding of deployment-scoped aggregate Session ids used by links to a Ticket's main and worker Sessions |
 | `src/client/api.ts` | Calls and polls of the management API, typed by `src/app/api.ts`, and the Decision filters of the Eval status |
 | `src/client/route.ts` | The tabs, the settings groups, the typed routes that `parseRoute` reads, and the route memory with the settings group opened last |
 | `src/client/overview.tsx` | The overview |
 | `src/client/fleet.tsx` | The native fleet page: deployment health, load, recent Tickets and Trigger Threads, workspace paths, logs, lifecycle actions and context switching |
+| `src/client/access.tsx` | The cloud identity and credential plane: human sign-out, deployment agent token, protected Claude/OneNexus/OpenAI gateway status and write-only actions, deployment migration, and effective Eval/Executor routes |
 | `src/client/source.tsx`, `trigger.tsx`, `eval.tsx`, `execution.tsx` | One file per stage: its status, and its settings where it has some |
 | `src/client/thread.tsx`, `ticket.tsx` | The record pages: a Thread with its timeline, and a Ticket with its authorization, Inputs and Assignments |
 | `src/client/settings.tsx` | The Settings tab: the group navigation and the group on screen |
+| `src/client/providers.tsx` | The deployment-scoped Models settings: redacted provider state, model capabilities, advanced provider profiles, write-only credential replacement and inherited-override reset |
 | `src/client/settings-kit.tsx` | The building blocks of settings blocks: the settings the stage groups share, `useBlockDraft`, the fields, among them a Source kind's, and the history of saves |
 | `src/client/prompts.tsx` | The Prompts settings: the page owns the view it read and its editor the draft, and the Edit, Full prompt and History tabs render from them; a built-in part's editor shows a changed default and keeps or drops the override |
 | `src/client/prompt-config.ts` | The prompt configuration by section, by the team sections, skill names, built-in parts (`part/<key>`, with `withOverride`) and part headings the prompt views give, and the line diff of the full prompt, as pure functions |
@@ -430,11 +435,14 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/delivery.spec.ts` | `AgentDelivery` |
 | `tests/retry-health.spec.ts`, `tests/role-models.spec.ts` | Model budget retries, and the models of the two roles |
 | `tests/runtime.spec.ts` | The whole application on a simulated DeepSeek Harness host, through tools and HTTP |
+| `tests/gateway.spec.ts` | The public gateway: GitHub device and organization sign-in, session-cookie and native-token issuance, per-person registry isolation, self-service onboarding, agent- and model-credential provisioning, trusted-controller enforcement, same-origin admission, and deployment management/native HTTP/WebSocket forwarding |
 | `tests/tools.spec.ts` | The Sessions' tools: what `orchestrator_read` reads for each role, and the shapes and checks of the other main Session tools |
 | `tests/runtime-concurrency.spec.ts` | Work that overlaps: Triggers during a pass, Tickets that change during deliveries and launches |
-| `tests/http.spec.ts` | The same-origin and loopback checks, the status of each kind of failure, the body limit, path parameters, queries and the validated deployment-management proxy |
-| `tests/fleet.spec.ts` | Fleet registry validation, aggregation from independent deployments, stopped-versus-unreachable status, log tails, managed-target lookup and fixed-profile lifecycle invocation |
+| `tests/http.spec.ts` | Management admission, same-origin and loopback checks, the status of each kind of failure, the body limit, path parameters, queries, gateway sign-in/onboarding proxies and the validated deployment-management proxy |
+| `tests/fleet.spec.ts` | Fleet registry validation, aggregation from independent deployments, gateway sign-in and onboarding proxies, native-capability forwarding, protected-proxy and one-click Claude callback flows, stopped-versus-unreachable status, log tails, managed-target lookup and fixed-profile lifecycle invocation |
+| `tests/onboarding-helper.spec.ts` | The fixed privileged helper’s dry-run plans: derived person and protected-proxy users, per-person deployment units and health/recovery timers, token directories, agent CLI wrappers and invalid input rejection |
 | `tests/native-aggregate.spec.ts` | Aggregate identity round trips and validation, request-tree remapping, owner detection, title projection prefixing and bounded Session-search merging |
+| `tests/native-routing.spec.ts` | Deployment-aware native API and Remote-mux URL construction, Desktop-baseline gating, and remote-state path ownership |
 | `tests/native-proxy.spec.ts` | End-to-end aggregate HTTP and WebSocket routing across deployments: Session/search and Workspace/control/event aggregation, owner routing, partial availability and timeouts, title normalization, interactive uplinks and cancellation, per-stream event correlation, capability and origin rejection, operator-peer authentication and teardown |
 | `tests/native-transport.spec.ts` | Desktop Remote-mux URL routing and constructor restoration |
 | `tests/settings.spec.ts` | Settings saves that race a model or account check, a Policy sync that a save outran, and the refusals of the pause, a sync and a block |
@@ -446,12 +454,16 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/cards.spec.ts` | The rules the built-in text must state, file by file |
 | `tests/model-surface.spec.ts` | Everything models read: tools, prompts, skills and inputs, checked against the tool schemas, the execution environment and the glossary, within a size budget per role |
 | `tests/deployment.spec.ts`, `tests/environment.spec.ts`, `tests/index.spec.ts` | The plugin configuration and setup, the agent's process environment, the plugin entry |
-| `tests/service-script.spec.ts` | `scripts/dsh-superagent` against fake `ps`, `tmux` and `dsh` |
+| `tests/service-script.spec.ts` | `scripts/dsh-superagent` against fake `ps`, `tmux`, `dsh` and management API processes |
 | `tests/control.spec.ts` | The control-only plugin entry and its independent controller state |
 | `tests/client.spec.tsx`, `tests/navigation.spec.ts`, `tests/controls.spec.tsx` | The client plugin's registration and polling, Session navigation and route memory, the local controls, and the panel's imports, which have no cycle |
 | `tests/panel-overview.spec.tsx`, `panel-source.spec.tsx`, `panel-trigger.spec.tsx`, `panel-eval.spec.tsx`, `panel-execution.spec.tsx` | Each page of the panel, against a fake management API answered by route |
 | `tests/panel-fleet.spec.tsx` | The native fleet page, its deployment details, lifecycle actions and management-context switching, against a fake management API |
 | `tests/panel-settings.spec.tsx`, `panel-prompts.spec.tsx`, `panel-deployment.spec.tsx`, `panel-panel.spec.tsx` | The settings groups, drafts and history, the prompts, the Deployment page, and the panel's search, glossary and route memory |
+| `tests/panel-access.spec.tsx` | Human cloud session, agent credential, protected model gateway, one-click Claude login, deployment protection and effective role routes |
+| `tests/panel-providers.spec.tsx` | Provider and model onboarding, redacted credentials, write-only key replacement, revision refusal, reset and deployment isolation |
+| `tests/provider-control.spec.ts` | DSH provider and credential adapter reads, writes, transactional protected-proxy migration, secret redaction, conflict mapping and user-layer reset |
+| `tests/cloud-systemd.spec.ts` | The cloud gateway unit keeps DSH's one-time web login stdout token out of the shared journal |
 | `tests/draft.spec.ts`, `tests/prompt-config.spec.ts`, `tests/markdown.spec.ts`, `tests/marks.spec.ts` | Draft states, merges and the save bar's line; the prompt configuration by section and the line diff; the Markdown subset and its links; the mark of every state the views classify |
 | `tests/locales.spec.ts`, `tests/styles.spec.ts` | The copy in both languages, the stylesheet |
 | `tests/class-docs.spec.ts` | Every class in `src` has a JSDoc block before it |

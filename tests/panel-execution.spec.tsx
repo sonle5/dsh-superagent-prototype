@@ -3,6 +3,7 @@
 import { act } from 'react'
 import { expect, it } from 'vitest'
 import { en, zh } from '../src/client/locales.ts'
+import { nativeSessionId } from '../src/app/native-aggregate.ts'
 import { usePanel, mount, remount, all, find, tab, click, type, text, field, at } from './fixtures/panel.tsx'
 import { MEMBER, server, ticketSummary, threadSummary } from './fixtures/panel-server.ts'
 
@@ -74,6 +75,17 @@ it('shows a Ticket with its stage, its Mandate details with the Trigger and Deci
     'DSH_SUPERAGENT_GITHUB_NUMBER—'])
   await click(document.querySelector<HTMLElement>('.dt-trigger-link')!)
   expect(tab(zh['tab.trigger']).getAttribute('aria-selected')).toBe('true')
+})
+
+it('opens the Ticket worker and its deployment main Session through aggregate navigation ids', async () => {
+  at({ page: 'execution', id: 't1' })
+  await mount()
+  await click(zh.openMaster)
+  await click(zh.openWorker)
+  expect(server.opened).toEqual([
+    nativeSessionId('inference-support-loop', 'master'),
+    nativeSessionId('inference-support-loop', 'worker-t1'),
+  ])
 })
 
 it('shows a failed Ticket\'s stage, provider route, and recovery attempts', async () => {

@@ -326,7 +326,7 @@ describe('feishu source', () => {
   })
 })
 describe('github source', () => {
-  it('normalizes comments and reviews into triggers with review-thread channels, and marks only GitHub Apps and machine accounts as automated', () => {
+  it('normalizes comments and reviews into triggers with review-thread channels and source-native authorship', () => {
     const trigger = commentTrigger({ id: 5, body: 'nit', user: { login: 'review-bot[bot]', type: 'Bot' }, html_url: 'https://github.com/acme/widgets/pull/7#discussion_r5', updated_at: '2026-09-01T00:00:00Z' }, { number: 7, isPr: true, prAuthor: 'agent-bot' }, 'inline', 'agent-bot')
     expect(trigger).toMatchObject({ source: 'github', threads: [{ source: 'github', id: '7' }], human: false, channel: { address: { number: '7', url: 'https://github.com/acme/widgets/pull/7#discussion_r5' } }, meta: { commentId: 5, kind: 'inline', prAuthor: 'agent-bot' } })
     // A review bot on an ordinary account counts as a person here; the prompts name it as automated.
@@ -337,10 +337,11 @@ describe('github source', () => {
     expect(review({ state: 'APPROVED', commit_id: 'abc123' })).toBe('APPROVED review of commit abc123')
     expect(review({ state: 'CHANGES_REQUESTED', commit_id: 'abc123', body: 'Keep the margin' })).toBe('CHANGES_REQUESTED review of commit abc123\n\nKeep the margin')
     expect(review({ state: 'COMMENTED', commit_id: 'abc123' })).toBe('')
-    // A mention of the agent addresses it, whatever the case; the agent's own messages are automated.
+    // A mention of the agent addresses it, whatever the case. Equal logins are not evidence of automation:
+    // the Source drops marked Superagent replies before translating them.
     expect(commentTrigger({ id: 9, body: '@Agent-Bot please fix', user: { login: 'alice', type: 'User' } }, { number: 7, isPr: true }, 'conversation', 'agent-bot')).toMatchObject({ human: true, addressed: 'mention' })
     expect(commentTrigger({ id: 10, body: 'mail@agent-bot.example', user: { login: 'alice', type: 'User' } }, { number: 7, isPr: true }, 'conversation', 'agent-bot')).not.toHaveProperty('addressed')
-    expect(commentTrigger({ id: 11, body: 'pushed', user: { login: 'Agent-Bot', type: 'User' } }, { number: 7, isPr: true }, 'conversation', 'agent-bot').human).toBe(false)
+    expect(commentTrigger({ id: 11, body: 'pushed', user: { login: 'Agent-Bot', type: 'User' } }, { number: 7, isPr: true }, 'conversation', 'agent-bot').human).toBe(true)
   })
   it('reads the address of an Issue, a PR or a review comment of the repository, and nothing else', () => {
     expect(githubAddress('https://api.github.com/repos/acme/widgets/pulls/9', 'acme/widgets')).toEqual({ number: 9, pr: true })
@@ -478,14 +479,15 @@ describe('github source', () => {
       .toEqual([expect.objectContaining({ text: '[PR #12](https://github.com/acme/widgets/pull/12) was closed without merging.' })])
     h.store.close()
   })
-  it('polls subscribed PR threads since their checkpoint and skips the bot\'s own comments', async () => {
+  it('polls subscribed PR threads since their checkpoint and skips the bot\'s marked comments', async () => {
     const h = host()
     const thread: Thread = { key: 'github:7', ref: { source: 'github', id: '7' }, createdAt: '2026-09-01T00:00:00Z',
       lastAt: new Date().toISOString(), subscriptions: ['t'], correlated: [], pending: [], meta: { number: 7, isPr: true } }
     h.store.threads.save(thread)
     const comment = (id: number, login: string, at: string, body: string) => ({ id, body, user: { login }, created_at: at, updated_at: at })
     github(h, { 'issues/7': { ...issue(7, { title: 'Fix the margin' }), pull_request: { url: 'x' } }, 'pulls/7': openPull(7),
-      'issues/7/comments': [comment(1, 'agent-bot', '2026-09-01T01:00:00Z', 'mine'), comment(2, 'a', '2026-08-01T00:00:00Z', 'old'),
+      'issues/7/comments': [comment(1, 'agent-bot', '2026-09-01T01:00:00Z', 'mine\n\n<!-- dsh-superagent:old -->'),
+        comment(2, 'a', '2026-08-01T00:00:00Z', 'old'),
         comment(3, 'b', '2026-09-01T02:00:00Z', 'new')] })
     await pollGithubThreads(h)
     expect(h.receive).toHaveBeenCalledTimes(1)
@@ -654,6 +656,32 @@ describe('github source', () => {
     const paths = calls.map(args => args[1]!.split('?')[0])
     expect(paths).toEqual(expect.arrayContaining(['repos/acme/widgets/issues/12', 'repos/acme/widgets/issues/13']))
     expect(h.health.github).toMatchObject({ state: 'ready', detail: '2 notifications; next poll ≥ 120s' })
+    h.store.close()
+  })
+  it('supports repository polling without the notification inbox used by fine-grained tokens', async () => {
+    const h = host()
+    h.store.saveSettings({ ...h.store.settings(), sources: { ...h.store.settings().sources, github: { enabled: true, config: {
+      repository: 'acme/widgets',
+      cli: '/usr/bin/gh',
+      notifications: false,
+      observeIssues: true,
+      observeComments: true,
+      observePulls: false,
+      observeCi: false,
+    } } } })
+    const started = new Date(Date.now() - 3_600_000).toISOString()
+    h.store.set('github-stream:issues', {
+      since: started,
+      started: { issues: started },
+    })
+    expect(h.config('github')).toMatchObject({ notifications: false })
+    const reads = github(h, { issues: [issue(12, { body: '@agent-bot inspect this', created_at: started, updated_at: started })],
+      'issues/comments': [] })
+    expect(await pollRound(h)).toBe(60)
+    expect(bare(reads)).not.toContain('notifications')
+    expect(bare(reads)).toEqual(expect.arrayContaining(['issues', 'issues/comments']))
+    expect(h.receive).toHaveBeenCalledWith(expect.objectContaining({ meta: expect.objectContaining({ number: 12, kind: 'issue' }) }))
+    expect(h.health.github).toMatchObject({ state: 'ready', detail: 'Repository polling; next poll ≥ 60s' })
     h.store.close()
   })
   it('drops a notified Issue whose reads fail for a day, so the Source leaves the error, and keeps its read position', async () => {
@@ -862,6 +890,15 @@ describe('github source', () => {
     // An Issue has only its conversation; the comments are read since the notification cursor.
     const since = encodeURIComponent('2026-09-08T00:00:00.000Z')
     expect(reads.filter(path => path.includes('/comments'))).toEqual([`issues/12/comments?per_page=100&since=${since}`])
+    h.store.close()
+  })
+  it('takes in a new Issue when its notification arrives after the cursor passed its creation time', async () => {
+    const h = host()
+    const created = '2026-09-09T00:00:00.000Z'
+    notify(h, [issue(12, { created_at: created, body: '@agent-bot inspect this' })], {}, '2026-09-09T00:00:10.000Z')
+    await pollRound(h)
+    expect(h.receive.mock.calls.map(([trigger]) => trigger)).toEqual([
+      expect.objectContaining({ id: key('github-issue', '12'), at: created, addressed: 'mention' })])
     h.store.close()
   })
   it('takes in the exact mentioned comment from a delayed notification after the thread cursor moved past it', async () => {
@@ -1095,7 +1132,7 @@ it('reports GitHub as failing only after the configured number of consecutive fa
   expect(pollFailure(1, 3, eof)).toBeUndefined()
   expect(pollFailure(2, 3, eof)).toBeUndefined()
   expect(pollFailure(3, 3, eof)).toEqual({ state: 'error', detail: '3 consecutive failed polls; last: Error: Get "https://api.github.com/x": EOF', code: 'pollFailures', values: { count: '3', error: 'Error: Get "https://api.github.com/x": EOF' } })
-  expect(githubKind.schema.parse({})).toEqual({ repository: '', cli: '', pollSeconds: 60, failuresBeforeError: 3, observeIssues: false,
+  expect(githubKind.schema.parse({})).toEqual({ repository: '', cli: '', pollSeconds: 60, failuresBeforeError: 3, notifications: true, observeIssues: false,
     observePulls: false, observeComments: false, observeCi: false })
 })
 describe('feishu event consumer', () => {
@@ -1125,7 +1162,7 @@ describe('feishu event consumer', () => {
     warn) echo '[event] ready' >&2; echo 'WARN the connection was reset' >&2; exec sleep 60 ;;
     ready) echo '[event] ready' >&2; exec sleep 60 ;;
     flaky) echo '[event] ready' >&2; [ "$n" -gt 1 ] && exec sleep 60; exit 1 ;;
-    events) echo '[event] ready' >&2; cat '${dir}/events'; touch '${dir}/printed'; exec sleep 60 ;;
+    events) echo '[event] ready' >&2; while [ ! -f '${dir}/events' ]; do sleep 0.01; done; cat '${dir}/events'; touch '${dir}/printed'; exec sleep 60 ;;
     late) echo '[event] ready' >&2; sleep 1; cat '${dir}/events'; touch '${dir}/printed'; exec sleep 60 ;;
   esac
   `, { mode: 0o755 })
@@ -1159,14 +1196,17 @@ describe('feishu event consumer', () => {
     sender_id: 'ou_alice', sender_type: 'user', content: 'fix it', create_time: String(Date.now()),
     ...type === 'group' ? { mentions: [{ id: 'ou_bot', name: 'Bot' }] } : {} })
   it('takes in the event lines it reads, records each chat as direct or not, and reports a malformed line without stopping', async () => {
-    writeFileSync(join(dir, 'events'), [event('om_1', 'oc_group', 'group'), event('om_2', 'oc_dm', 'p2p'), 'not json',
-      event('om_3', 'oc_group', 'group')].join('\n') + '\n')
     const { ctx, health, store } = consumerSource(cli('events'))
     running = runFeishu(ctx, controller.signal)
+    await vi.waitFor(() => expect(health.feishu).toMatchObject({ state: 'ready' }), until)
+    writeFileSync(join(dir, 'events'), [event('om_1', 'oc_group', 'group'), event('om_2', 'oc_dm', 'p2p'), 'not json',
+      event('om_3', 'oc_group', 'group')].join('\n') + '\n')
     await vi.waitFor(() => expect(store.triggers.get(feishuTriggerId('om_3'))).toBeDefined(), until)
     expect(['om_1', 'om_2'].map(id => store.triggers.get(feishuTriggerId(id))?.meta.direct)).toEqual([false, true])
     expect(store.get(KV.feishu.chats)).toEqual({ oc_group: false, oc_dm: true })
-    expect(health.feishu).toMatchObject({ state: 'error', detail: expect.stringContaining('JSON') })
+    await vi.waitFor(() => {
+      expect(health.feishu).toMatchObject({ state: 'error', detail: expect.stringContaining('JSON') })
+    }, until)
     controller.abort(); await running; store.close()
   }, 20_000)
   it('drops the events it reads once the Source is off', async () => {
@@ -1285,16 +1325,17 @@ describe('observing the GitHub repository', () => {
     })
     return calls
   }
-  it('takes in the new Issues and PRs from when it started observing them, and asks again with the ETag while nothing is newer',
+  it('takes in the new Issues and PRs from when it started observing them, and reads again without a stale ETag',
     async () => {
     const h = host()
     observe(h, { observeIssues: true, observePulls: true })
     h.store.set('github-since', at(-24))
     h.store.set('github-stream:issues', { since: at(0), started: { issues: at(0), pulls: at(0) } })
-    const calls = repository(h, { issues: [issue(3, { created_at: at(-24), updated_at: at(1) }),
+    const answers = { issues: [issue(3, { created_at: at(-24), updated_at: at(1) }),
       issue(4, { created_at: at(2), updated_at: at(2) }),
       { ...issue(5, { created_at: at(3), updated_at: at(3) }), pull_request: { url: 'x' } },
-      issue(6, { created_at: at(4), updated_at: at(4), user: { login: 'agent-bot', type: 'User' } })] })
+      issue(6, { created_at: at(4), updated_at: at(4), user: { login: 'agent-bot', type: 'User' } })] }
+    const calls = repository(h, answers)
     await pollRound(h)
     // #3 was opened before the Source observed Issues, and #6 is the agent's own.
     expect(h.receive.mock.calls.map(([trigger]) => [trigger.meta.number, trigger.meta.kind, trigger.id]))
@@ -1303,13 +1344,16 @@ describe('observing the GitHub repository', () => {
     expect(h.store.get('github-stream:issues')).toEqual({ since: cursorAt(at(4)), started })
     const list = () => calls.filter(args => args[1]!.startsWith('repos/acme/widgets/issues?'))
     expect(list()[0]![1]).toContain(`since=${encodeURIComponent(at(0))}`)
-    // The next round repeats the request at the newest Issue, whose ETag the round after sends, which GitHub answers 304 for.
+    // GitHub can serve a 304 from an edge cache whose representation predates a newly opened Issue. Repository streams
+    // therefore never send a saved ETag, so the next poll sees an Issue that appeared after the previous empty result.
+    answers.issues = []
     await pollRound(h)
-    expect(h.store.get('github-stream:issues')).toEqual({ since: cursorAt(at(4)), started, etag: '"same"' })
+    expect(h.store.get('github-stream:issues')).toEqual({ since: cursorAt(at(4)), started })
     h.receive.mockClear()
+    answers.issues = [issue(7, { created_at: at(5), updated_at: at(5) })]
     await pollRound(h)
-    expect(list().at(-1)).toEqual(expect.arrayContaining(['-H', 'If-None-Match: "same"']))
-    expect(h.receive).not.toHaveBeenCalled()
+    expect(list().at(-1)).not.toContain('-H')
+    expect(h.receive).toHaveBeenCalledWith(expect.objectContaining({ meta: expect.objectContaining({ number: 7, kind: 'issue' }) }))
     // Switched off, the stream forgets where it was, so it starts afresh once switched on again.
     observe(h, {})
     await pollRound(h)
@@ -1336,6 +1380,27 @@ describe('observing the GitHub repository', () => {
     await pollRound(h)
     expect(h.receive.mock.calls.map(([trigger]) => [trigger.meta.number, trigger.meta.isPr, trigger.meta.kind, trigger.human]))
       .toEqual([[7, false, 'conversation', true], [9, true, 'conversation', false], [9, true, 'inline', true]])
+    h.store.close()
+  })
+  it('accepts explicit operator events when the agent uses the same GitHub account, but ignores marked replies', async () => {
+    const h = host()
+    observe(h, { observeIssues: true, observeComments: true })
+    h.store.set('github-since', at(-24))
+    h.store.set('github-stream:issues', { since: at(0), started: { issues: at(0) } })
+    h.store.set('github-stream:comments', { since: at(0), started: { comments: at(0) } })
+    const own = { login: 'agent-bot', type: 'User' }
+    const comment = (id: number, body: string) => ({ id, body, user: own,
+      issue_url: 'https://api.github.com/repos/acme/widgets/issues/8',
+      html_url: `https://github.com/acme/widgets/issues/8#issuecomment-${id}`, created_at: at(2), updated_at: at(2) })
+    repository(h, {
+      issues: [issue(8, { body: '@agent-bot inspect this', created_at: at(1), updated_at: at(1), user: own }),
+        issue(9, { body: 'Agent-created note', created_at: at(1), updated_at: at(1), user: own })],
+      comments: [comment(1, 'Earlier reply\n\n<!-- dsh-superagent:old -->'), comment(2, '@agent-bot follow up')],
+    })
+    await pollRound(h)
+    expect(h.receive.mock.calls.map(([trigger]) => [trigger.meta.number, trigger.meta.kind, trigger.meta.commentId]))
+      .toEqual([[8, 'issue', undefined], [8, 'conversation', 2]])
+    expect(h.receive.mock.calls.map(([trigger]) => trigger.human)).toEqual([true, true])
     h.store.close()
   })
   it('fails the round for a stream whose read fails, keeps its cursor, and still reads the other streams', async () => {
@@ -1406,7 +1471,7 @@ describe('observing the GitHub repository', () => {
     expect(Object.keys(h.store.get<{ started: Record<string, string> }>('github-stream:issues')!.started)).toEqual(['pulls'])
     h.store.close()
   })
-  it('keeps a stream\'s cursor five seconds before its newest item, and a stale cursor on the hour, so the ETag is sent again', async () => {
+  it('keeps a stream\'s cursor five seconds before its newest item, and clamps a stale cursor to the hour', async () => {
     const h = host()
     observe(h, { observeIssues: true })
     h.store.set('github-since', at(-24))
@@ -1423,7 +1488,7 @@ describe('observing the GitHub repository', () => {
     const since = (args: string[]) => decodeURIComponent(/since=([^&]+)/.exec(args[1]!)![1]!)
     expect(since(lists[0]!)).toBe(since(lists[1]!))
     expect(Date.parse(since(lists[0]!)) % 3_600_000).toBe(0)
-    expect(lists[1]).toEqual(expect.arrayContaining(['-H', 'If-None-Match: "same"']))
+    expect(lists[1]).not.toContain('-H')
     h.store.close()
   })
   it('gives each change of the default branch\'s CI its own id, also when one commit fails, passes and fails again', async () => {

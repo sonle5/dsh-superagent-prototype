@@ -89,14 +89,16 @@ it('leaves a delivered follow-up to its ticket\'s worker: the main Session may s
 })
 
 /**
- * Count main-session model turns triggered by steers: each steer while idle starts a new turn,
- * whereas all steers arriving while running batch into the next step.
+ * Count main-session model turns triggered by relays: each relay while idle starts a new turn,
+ * whereas all relays arriving while running batch into the next step.
  */
 function modelCalls(host: Host) {
   const master = host.agents.get(host.runtime.masterId)!
   const seen: string[] = []
   const steer = master.steer.getMockImplementation() as (message: unknown) => void
+  const followup = master.followup.getMockImplementation() as (message: unknown) => void
   master.steer.mockImplementation((message: unknown) => { seen.push(master.status); steer(message) })
+  master.followup.mockImplementation((message: unknown) => { seen.push(master.status); followup(message) })
   return () => seen.filter(status => status === 'idle').length + (seen.includes('running') ? 1 : 0)
 }
 

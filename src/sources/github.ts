@@ -5,7 +5,7 @@ import { sameName } from '../infra/text.ts'
 import { GithubAccountsSchema } from '../deployment.ts'
 import { CliError, validItems, type Tally } from '../infra/commands.ts'
 import { ciCounts, ciFact, ciFailures, ciSummary, githubThreadContext, pullChecks } from './github-read.ts'
-import { branchCiTrigger, ciTrigger, commentTrigger, CommentSchema, githubAddress, issueTrigger, IssueSchema, pullTrigger, SOURCE }
+import { branchCiTrigger, ciTrigger, commentTrigger, CommentSchema, githubAddress, issueTrigger, IssueSchema, mentions, pullTrigger, SOURCE }
   from './github-trigger.ts'
 import { githubLink, sendGithub } from './github-channel.ts'
 import type { GithubComment, PullRef } from './github-trigger.ts'
@@ -25,6 +25,7 @@ const NotificationSchema = z.looseObject({
 
 const GithubConfigSchema = GithubAccountsSchema.extend({ pollSeconds: z.number().int().min(60).max(3600).default(60),
   failuresBeforeError: z.number().int().min(1).max(20).default(3),
+  notifications: z.boolean().default(true),
   observeIssues: z.boolean().default(false), observePulls: z.boolean().default(false), observeComments: z.boolean().default(false),
   observeCi: z.boolean().default(false) }).strict()
 export type GithubConfig = z.infer<typeof GithubConfigSchema>
@@ -48,6 +49,8 @@ export const githubKind: SourceKind<GithubConfig> = {
       hint: { zh: '命令名或绝对路径，通常是用 GH_CONFIG_DIR 登录智能体账号的 gh 包装脚本。智能体以它登录的账号行事，执行器以 gh 调用它。保存时检查它登录的账号能否推送到仓库，然后重启 dsh-superagent。', en: 'A command name or absolute path, usually a gh wrapper signed in to the agent account through GH_CONFIG_DIR. The agent acts as the account it is signed in to, and the Executor calls it as gh. Saving checks that this account can push to the repository, then restarts dsh-superagent.' } },
     { key: 'pollSeconds', type: 'number', advanced: true, min: 60, max: 3600, label: { zh: '轮询间隔 / 秒', en: 'Polling interval / seconds' }, hint: { zh: 'GitHub 要求更长间隔时以 GitHub 为准。', en: 'A longer interval requested by GitHub wins.' } },
     { key: 'failuresBeforeError', type: 'number', advanced: true, min: 1, max: 20, label: { zh: '连续失败几次后报告异常', en: 'Failed polls before reporting an error' }, hint: { zh: '单次网络中断会在下一次轮询时自动重试，不必报告。', en: 'A single network interruption is retried on the next poll and need not be reported.' } },
+    { key: 'notifications', type: 'switch', advanced: true, label: { zh: '读取账号通知', en: 'Read the account notification inbox' },
+      hint: { zh: '回流账号的通知会带来较早的提及和订阅事件。细粒度令牌不支持此接口；关闭时请同时打开仓库级 Issue、PR 和评论轮询。', en: 'The account notification inbox supplies earlier mention and subscription events. Fine-grained tokens do not support this endpoint; when it is off, enable repository Issue, pull request and comment polling.' } },
     { key: 'observeIssues', type: 'switch', label: { zh: '接收仓库里的新 Issue', en: 'Receive new Issues in the repository' },
       hint: { zh: '打开后，没有 @ 智能体的新 Issue 也会收到，由策略的接收表决定是否成为候选。从打开的时候开始，不读以前的。', en: 'New Issues that do not mention the agent are received too, and the Policy\'s admission table decides whether they become candidates. Starts when switched on; earlier ones are not read.' } },
     { key: 'observePulls', type: 'switch', label: { zh: '接收仓库里的新 PR', en: 'Receive new pull requests in the repository' },
@@ -156,8 +159,14 @@ const stopped = (ctx: SourceContext, round: Round): boolean => !!round.signal?.a
 interface ExactComment { path: string; kind: 'conversation' | 'inline' | 'review' }
 export interface Retry { since: string; pr: boolean; comment?: ExactComment; failedAt?: string; attempts?: number }
 const RETRY_WINDOW_MS = 24 * 3600_000
+/** GitHub can surface a new Issue's mention after the polling cursor passed its `created_at`. */
+const OPENED_GRACE_MS = 5 * 60_000
+/** Outbound GitHub messages carry this marker, so a deployment can share its operator's account without reading its own replies. */
+const AGENT_MARKER = /<!--\s*dsh-superagent:[^>]+-->/i
 /** True when GitHub returns HTTP 410 (Gone); HTTP 404 is retried because it can indicate revoked access to a private repository. */
 const deleted = (error: unknown): boolean => error instanceof CliError && error.code === 410
+const agentOutput = (login: string, user: { login: string }, body: string | null | undefined): boolean =>
+  sameName(user.login, login) && AGENT_MARKER.test(body ?? '')
 /** Records a failed read on the Thread and in the round; deleted (410) or abandoned (24h+) threads do not fail the round. */
 function failed(ctx: SourceContext, round: Round, number: number, error: unknown, abandoned = false): void {
   if (deleted(error)) round.dropped.push(number)
@@ -199,8 +208,9 @@ async function pollRepository(ctx: SourceContext, round: Round): Promise<void> {
 /**
  * Polls one repository-wide event stream (oldest first) since its cursor and steps the cursor to five seconds before the
  * newest item (`cursorAt`), relying on Trigger ID deduplication so repeated messages are no-ops. While the cursor stays
- * unchanged (including when clamped to the hourly horizon), sending the last page's ETag makes an unchanged list return
- * HTTP 304 and cost no rate limit. Items from before their kind was switched on or beyond the horizon are ignored.
+ * Repository lists always receive a full response. GitHub can answer a conditional request from an edge cache whose
+ * representation predates a newly opened Issue or comment, silently losing the event. Items from before their kind was
+ * switched on or beyond the horizon are ignored.
  */
 async function readStream(ctx: SourceContext, round: Round, id: string, path: string, config: GithubConfig): Promise<void> {
   const name = KV.github.stream(id)
@@ -210,14 +220,8 @@ async function readStream(ctx: SourceContext, round: Round, id: string, path: st
   const started: Record<string, string> = Object.fromEntries(kinds.map(kind => [kind, before[kind] ?? round.started]))
   const horizon = Math.floor((Date.parse(round.started) - POLL_HORIZON_MS) / 3_600_000) * 3_600_000
   const since = new Date(Math.max(Date.parse(stored?.since ?? round.started), horizon)).toISOString()
-  const conditional = stored?.etag && stored.since === since ? ['-H', `If-None-Match: ${stored.etag}`] : []
-  let raw: string
   const listed = `${path}&sort=updated&direction=asc&per_page=100&since=${encodeURIComponent(since)}`
-  try { raw = await ctx.commands.withSignal(round.signal).api(listed, '--include', ...conditional) }
-  catch (error) {
-    if (error instanceof CliError && error.code === 304) return
-    throw error
-  }
+  const raw = await ctx.commands.withSignal(round.signal).api(listed, '--include')
   const { headers, body } = included(raw)
   const items = validItems(ListedSchema, z.array(z.unknown()).parse(JSON.parse(body)), round.tally)
   const { login } = ctx.deployment.github
@@ -226,17 +230,19 @@ async function readStream(ctx: SourceContext, round: Round, id: string, path: st
   for (const item of items) {
     // Stopping mid-stream aborts before advancing the cursor so unread items are retried.
     if (stopped(ctx, round)) throw new Error('The GitHub Source stopped during the poll')
-    if (sameName(item.user.login, login)) continue
     if (id === 'issues') {
       const issue = IssueSchema.safeParse(item)
       const pr = issue.success && !!issue.data.pull_request
       if (!issue.success || !fresh(issue.data.created_at, pr ? 'pulls' : 'issues')) continue
-      await ctx.receive(pr ? pullTrigger(issue.data, login) : issueTrigger(issue.data, login))
+      const trigger = pr ? pullTrigger(issue.data, login) : issueTrigger(issue.data, login)
+      if (sameName(issue.data.user.login, login) && trigger.addressed !== 'mention') continue
+      await ctx.receive(trigger)
       nameThread(ctx, issue.data.number, issue.data.title)
       continue
     }
     const number = Number(/\/(?:issues|pulls)\/(\d+)$/.exec((id === 'comments' ? item.issue_url : item.pull_request_url) ?? '')?.[1])
     if (!number || !fresh(item.updated_at ?? item.created_at, 'comments')) continue
+    if (agentOutput(login, item.user, item.body)) continue
     const isPr = id === 'review-comments' || /\/pull\//.test(item.html_url ?? '')
     const ref = { number, isPr, ...item.html_url ? { url: item.html_url } : {} }
     const trigger = commentTrigger(item, ref, id === 'comments' ? 'conversation' : 'inline', login)
@@ -245,9 +251,7 @@ async function readStream(ctx: SourceContext, round: Round, id: string, path: st
   const newest = Math.max(...items.map(item => Date.parse(item.updated_at ?? '')).filter(Number.isFinite))
   const moved = Number.isFinite(newest) ? cursorAt(new Date(newest).toISOString()) : since
   const next = Date.parse(moved) > Date.parse(since) ? moved : since
-  const etag = /^etag:\s*(.+)$/im.exec(headers)?.[1]?.trim()
-  // The ETag belongs to this request, which the next round repeats only while the cursor stays unchanged.
-  ctx.state.set(name, { since: next, started, ...etag && next === since ? { etag } : {} })
+  ctx.state.set(name, { since: next, started })
 }
 /** Polls default-branch CI checks, emitting a trigger only when the set of failing checks changes after the initial baseline. */
 async function pollBranchCi(ctx: SourceContext, round: Round): Promise<void> {
@@ -281,7 +285,10 @@ async function pollBranchCi(ctx: SourceContext, round: Round): Promise<void> {
  */
 export async function pollRound(ctx: SourceContext, signal?: AbortSignal): Promise<number> {
   const round = newRound(signal)
-  const notified = await pollNotifications(ctx, round).then(value => ({ value }), (error: unknown) => ({ error }))
+  const config = ctx.config<GithubConfig>(SOURCE)
+  const notified = config?.notifications === false
+    ? { value: { count: 0, interval: Math.max(60, config.pollSeconds) } }
+    : await pollNotifications(ctx, round).then(value => ({ value }), (error: unknown) => ({ error }))
   await pollRepository(ctx, round)
   await pollTicketPulls(ctx, signal, round)
   await pollThreads(ctx, signal, round)
@@ -293,7 +300,9 @@ export async function pollRound(ctx: SourceContext, signal?: AbortSignal): Promi
   const dropped = (round.dropped.length ? `; deleted on GitHub: ${named(round.dropped)}` : '')
     + (round.abandoned.length ? `; dropped after their reads kept failing: ${named(round.abandoned)}` : '')
     + (round.tally.skipped ? `; ${round.tally.skipped} unreadable items skipped` : '')
-  ctx.report('github', { state: 'ready', detail: `${count} notifications; next poll ≥ ${interval}s${dropped}`, at: round.started })
+  ctx.report('github', { state: 'ready',
+    detail: `${config?.notifications === false ? 'Repository polling' : `${count} notifications`}; next poll ≥ ${interval}s${dropped}`,
+    at: round.started })
   return interval
 }
 /** Reads notifications since the cursor and each Issue or PR they name, advancing the cursor atomically with the retry map for failed reads; deleted (410) Issues are dropped once their error is recorded. */
@@ -354,10 +363,11 @@ async function readNotified(ctx: SourceContext, round: Round, number: number, it
     // `issues/<n>` also returns PRs with `pull_request` set; handle them in the PR branch below.
     isPr = !!issue.pull_request
     if (!isPr) {
-      // An Issue opened by someone other than the agent since the cursor brings its body so a mention in it reaches the gate.
+      // An Issue opened by someone other than the agent near the cursor brings its body so a mention in it reaches the gate.
       // A mention added by a later edit to the body is not read: only the author can be the actor of the body.
       const { login } = ctx.deployment.github
-      const opened = Date.parse(issue.created_at) >= Date.parse(since) && !sameName(issue.user.login, login)
+      const opened = Date.parse(issue.created_at) >= Date.parse(since) - OPENED_GRACE_MS
+        && (!sameName(issue.user.login, login) || mentions(issue.body ?? '', login))
       if (opened) await ctx.receive(issueTrigger(issue, login))
       const ref = { number, isPr: false, url: issue.html_url }
       await intakeComments(ctx, ref, since, round)
@@ -369,7 +379,8 @@ async function readNotified(ctx: SourceContext, round: Round, number: number, it
     const pr = await pull(ctx, round, number)
     // Emit a PR description trigger for PRs opened since the cursor; its ID is the same as the one produced by the repository PR stream.
     const { login } = ctx.deployment.github
-    if (pr.created_at && Date.parse(pr.created_at) >= Date.parse(since) && !sameName(pr.user.login, login)) {
+    if (pr.created_at && Date.parse(pr.created_at) >= Date.parse(since)
+      && (!sameName(pr.user.login, login) || mentions(pr.body ?? '', login))) {
       const opened = { number, title: pr.title ?? '', body: pr.body, user: pr.user, created_at: pr.created_at, html_url: pr.html_url }
       await ctx.receive(pullTrigger(opened, login))
     }
@@ -419,7 +430,7 @@ async function intakeExactComment(ctx: SourceContext, round: Round, ref: PullRef
     throw error
   }
   const { login } = ctx.deployment.github
-  if (sameName(comment.user.login, login)) return
+  if (agentOutput(login, comment.user, comment.body)) return
   const trigger = commentTrigger(comment, ref, exact.kind, login)
   if (trigger.text) await ctx.receive(trigger)
 }
@@ -436,7 +447,7 @@ async function intakeComments(ctx: SourceContext, ref: PullRef, since: string, r
       if (stopped(ctx, round)) throw new Error('The GitHub Source stopped during the poll')
       const timestamp = Date.parse(comment.updated_at ?? comment.submitted_at ?? comment.created_at ?? '')
       if (!Number.isFinite(timestamp) || timestamp < Date.parse(since)) continue
-      if (sameName(comment.user.login, login)) continue
+      if (agentOutput(login, comment.user, comment.body)) continue
       // A review decision without a body still reaches the ticket: a worker may be waiting for that approval.
       const trigger = commentTrigger(comment, ref, kind, login)
       if (trigger.text) await ctx.receive(trigger)

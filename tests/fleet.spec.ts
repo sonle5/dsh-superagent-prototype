@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it } from 'vitest'
 import { Fleet, FleetControlError } from '../src/app/fleet.ts'
+import { nativeToken } from '../src/app/native-auth.ts'
 
 const servers: Server[] = []
 const directories: string[] = []
@@ -44,6 +45,8 @@ it('aggregates independent deployments and their Tickets, Triggers, health, work
   const state = workspace()
   const inference = await listen('onenexus-team/inference-support-loop')
   const sglang = await listen('onenexus-team/sglang')
+  nativeToken(join(state, 'superagent'))
+  nativeToken(join(state, 'superagent-sglang'))
   const logDir = join(state, '.artifacts')
   mkdirSync(logDir)
   writeFileSync(join(logDir, 'dsh-superagent-superagent-sglang-20261102-000000-1.log'),
@@ -72,6 +75,35 @@ it('aggregates independent deployments and their Tickets, Triggers, health, work
   expect(view.deployments[1]?.log?.tail).toContain('Authorization: Bearer [redacted]')
   expect(view.deployments[1]?.log?.tail).not.toContain('private-token')
   expect(view.deployments[1]?.log?.tail).not.toContain('private-bearer')
+})
+
+it('authenticates every deployment request with its native capability', async () => {
+  const state = workspace()
+  const stateDir = join(state, 'superagent-sglang')
+  const token = nativeToken(stateDir)!
+  const requests: string[] = []
+  const server = createServer((request, response) => {
+    requests.push(String(request.headers['x-dsh-superagent-native']))
+    if (request.headers['x-dsh-superagent-native'] !== token) {
+      response.writeHead(401).end(JSON.stringify({ error: 'unauthorized' }))
+      return
+    }
+    response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({
+      setup: { problem: null, feishuProblem: null, accounts: { repository: 'onenexus-team/sglang', agent: 'agent-bot' } },
+      load: { running: 0, queued: 0, maxWorkers: 1 }, paused: false,
+      health: { runtime: { state: 'ready', detail: '' } },
+    }))
+  })
+  servers.push(server)
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  writeFileSync(join(state, 'fleet.json'), JSON.stringify({
+    version: 1, controlScript: '/usr/bin/true', logDir: join(state, '.artifacts'),
+    deployments: [{ id: 'sglang', profile: 'superagent-sglang', repository: 'onenexus-team/sglang',
+      url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, stateDir, workspace: '/Users/alice/src/sglang-superagent' }],
+  }))
+
+  expect(await new Fleet(state).view()).toMatchObject({ deployments: [{ id: 'sglang', status: 'ready' }] })
+  expect(requests).toEqual([token, token, token])
 })
 
 it('distinguishes an intentionally stopped deployment from an unreachable one', async () => {
@@ -109,7 +141,7 @@ it('invokes only the configured fixed script for a registered profile', async ()
   const fleet = new Fleet(state)
   expect(await fleet.control('sglang', 'restart')).toMatchObject({ id: 'sglang', action: 'restart', code: 0 })
   expect(readFileSync(argumentsFile, 'utf8'))
-    .toBe('restart\n--profile\nsuperagent-sglang\n--url\nhttp://127.0.0.1:3083\n--stop-timeout\n60\n')
+    .toBe(`restart\n--profile\nsuperagent-sglang\n--url\nhttp://127.0.0.1:3083\n--state-dir\n${join(state, 'superagent-sglang')}\n--stop-timeout\n60\n`)
   await expect(fleet.control('missing', 'start')).rejects.toEqual(expect.objectContaining<Partial<FleetControlError>>({
     status: 404, message: 'Deployment not found: missing',
   }))
@@ -125,11 +157,332 @@ it('persists one validated deployment for native Session routing', async () => {
     { id: 'sglang', profile: 'superagent-sglang', repository: 'onenexus-team/sglang', url: 'http://127.0.0.1:3083',
       stateDir: join(state, 'superagent-sglang'), workspace: '/Users/alice/src/sglang-superagent' }],
   }))
+  const inferenceToken = nativeToken(join(state, 'superagent'))!
+  const sglangToken = nativeToken(join(state, 'superagent-sglang'))!
 
   const fleet = new Fleet(state)
-  expect(fleet.nativeTarget()).toBeUndefined()
-  expect(fleet.select('sglang')).toEqual({ selected: 'sglang' })
-  expect(fleet.nativeTarget()).toMatchObject({ repository: 'onenexus-team/sglang', profile: 'superagent-sglang' })
+  expect(await fleet.nativeTarget()).toBeUndefined()
+  await expect(fleet.select('sglang')).resolves.toEqual({ selected: 'sglang' })
+  expect(await fleet.nativeTarget()).toMatchObject({ repository: 'onenexus-team/sglang', profile: 'superagent-sglang', token: sglangToken })
+  await expect(fleet.nativeTargets()).resolves.toEqual(expect.arrayContaining([
+    expect.objectContaining({ id: 'inference-support-loop', token: inferenceToken }),
+    expect.objectContaining({ id: 'sglang', token: sglangToken }),
+  ]))
+  rmSync(join(state, 'superagent-sglang', 'native-proxy-token'))
+  await expect(fleet.nativeTargets()).rejects.toThrow(/native capability/)
   expect((await fleet.view()).selected).toBe('sglang')
-  expect(() => new Fleet(state).select('missing')).toThrow('Deployment not found: missing')
+  await expect(new Fleet(state).select('missing')).rejects.toThrow('Deployment not found: missing')
+})
+
+it('merges gateway deployments with the local fleet and routes native traffic through their gateway prefix', async () => {
+  const state = workspace()
+  const localState = join(state, 'superagent')
+  const localUrl = await listen('onenexus-team/inference-support-loop')
+  nativeToken(localState)
+  writeFileSync(join(state, 'fleet.json'), JSON.stringify({
+    version: 1, controlScript: '/usr/bin/true', logDir: join(state, '.artifacts'),
+    deployments: [{ id: 'inference-support-loop', profile: 'superagent-inference-support-loop',
+      repository: 'onenexus-team/inference-support-loop', url: localUrl, stateDir: localState,
+      workspace: '/Users/alice/src/inference-support-loop' }],
+  }))
+  const gatewayUrl = await listen('onenexus-team/sglang')
+  writeFileSync(join(state, 'gateway.json'), JSON.stringify({
+    version: 1, url: gatewayUrl, token: 'gateway-session',
+  }), { mode: 0o600 })
+  const gateway = createServer((request, response) => {
+    if (request.url === '/gateway/api/deployment/sglang/lifecycle'
+      && request.method === 'POST'
+      && request.headers['x-dsh-superagent-native'] === 'gateway-session') {
+      response.writeHead(200, { 'content-type': 'application/json' })
+        .end(JSON.stringify({ id: 'sglang', action: 'restart', state: 'active', output: 'Remote restarted' }))
+      return
+    }
+    if (request.url === '/gateway/api/deployment/sglang/logs?lines=80'
+      && request.headers['x-dsh-superagent-native'] === 'gateway-session') {
+      response.writeHead(200, { 'content-type': 'application/json' })
+        .end(JSON.stringify({ id: 'sglang', state: 'active',
+          tail: `gateway log\nAuthorization: ${'Bearer'} ${['remote', 'value'].join('-')}` }))
+      return
+    }
+    if (request.url === '/gateway/api/deployment/sglang/status'
+      && request.headers['x-dsh-superagent-native'] === 'gateway-session') {
+      response.writeHead(200, { 'content-type': 'application/json' })
+        .end(JSON.stringify({ id: 'sglang', state: 'active' }))
+      return
+    }
+    if (request.url === '/gateway/api/deployment/sglang/credentials'
+      && request.headers['x-dsh-superagent-native'] === 'gateway-session') {
+      response.writeHead(200, { 'content-type': 'application/json' })
+        .end(JSON.stringify({ saved: true, revision: 8, restarting: true }))
+      return
+    }
+    if (request.url === '/gateway/api/deployment/sglang/state'
+      && request.headers['x-dsh-superagent-native'] === 'gateway-session') {
+      response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({
+        setup: { problem: null, feishuProblem: null, accounts: { repository: 'onenexus-team/sglang', agent: 'agent-bot' } },
+        load: { running: 1, queued: 2, maxWorkers: 3 }, paused: false,
+        health: { runtime: { state: 'ready', detail: '' } },
+      }))
+      return
+    }
+    if (request.url === '/gateway/api/fleet' && request.headers['x-dsh-superagent-native'] === 'gateway-session') {
+      response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({
+        organization: 'example-org', login: 'example-user', person: true,
+        deployments: [{ id: 'sglang', profile: 'superagent-sglang', repository: 'onenexus-team/sglang',
+          capabilities: ['lifecycle', 'logs'] }],
+      }))
+      return
+    }
+    response.writeHead(500).end(JSON.stringify({ error: `Unexpected gateway path: ${request.url}` }))
+  })
+  servers.push(gateway)
+  await new Promise<void>(resolve => gateway.listen(0, '127.0.0.1', resolve))
+  // The gateway fleet address uses this server's port, so point the session at it only after it listens.
+  writeFileSync(join(state, 'gateway.json'), JSON.stringify({
+    version: 1, url: `http://127.0.0.1:${(gateway.address() as AddressInfo).port}`, token: 'gateway-session',
+  }), { mode: 0o600 })
+
+  const fleet = new Fleet(state)
+  const view = await fleet.view()
+  const gatewayAddress = `http://127.0.0.1:${(gateway.address() as AddressInfo).port}`
+  expect(view.gateway).toMatchObject({ organization: 'example-org', login: 'example-user', person: true })
+  expect(view.deployments).toEqual([
+    expect.objectContaining({ id: 'inference-support-loop', status: 'ready', remote: false, canControl: true }),
+    expect.objectContaining({ id: 'sglang', status: 'ready', remote: true, canControl: true,
+      log: { path: 'journal:sglang', tail: 'gateway log\nAuthorization: Bearer [redacted]' } }),
+  ])
+  await expect(fleet.control('sglang', 'restart')).resolves.toMatchObject({
+    id: 'sglang', action: 'restart', code: 0, output: 'Remote restarted',
+  })
+  await expect(fleet.configureGatewayDeploymentCredentials('sglang', 'agent-github-token-1234'))
+    .resolves.toEqual({ saved: true, revision: 8, restarting: true })
+  expect(readFileSync(join(state, 'gateway.json'), 'utf8')).not.toContain('agent-github-token')
+  await expect(fleet.select('sglang')).resolves.toEqual({ selected: 'sglang' })
+  expect(await fleet.nativeTarget()).toMatchObject({
+    id: 'sglang',
+    url: `${gatewayAddress}/gateway/api/deployment/sglang`,
+    nativeUrl: `${gatewayAddress}/gateway/native/sglang`,
+    token: 'gateway-session',
+  })
+  await expect(fleet.nativeTargets()).resolves.toEqual(expect.arrayContaining([
+    expect.objectContaining({ id: 'inference-support-loop', nativeUrl: localUrl, token: nativeToken(localState) }),
+    expect.objectContaining({ id: 'sglang', token: 'gateway-session' }),
+  ]))
+})
+
+it('keeps the local fleet available when the controller gateway session is absent or invalid', async () => {
+  const state = workspace()
+  const localState = join(state, 'superagent')
+  const localUrl = await listen('onenexus-team/inference-support-loop')
+  nativeToken(localState)
+  writeFileSync(join(state, 'fleet.json'), JSON.stringify({
+    version: 1, controlScript: '/usr/bin/true', logDir: join(state, '.artifacts'),
+    deployments: [{ id: 'inference-support-loop', profile: 'superagent-inference-support-loop',
+      repository: 'onenexus-team/inference-support-loop', url: localUrl, stateDir: localState,
+      workspace: '/Users/alice/src/inference-support-loop' }],
+  }))
+  const fleet = new Fleet(state)
+  expect((await fleet.view()).deployments).toEqual([expect.objectContaining({ id: 'inference-support-loop', status: 'ready' })])
+  await expect(fleet.nativeTargets()).resolves.toEqual([expect.objectContaining({ id: 'inference-support-loop' })])
+
+  writeFileSync(join(state, 'gateway.json'), JSON.stringify({ version: 1, url: 'https://gateway.example.invalid' }), { mode: 0o600 })
+  expect((await fleet.view()).deployments).toEqual([expect.objectContaining({ id: 'inference-support-loop', status: 'ready' })])
+  await expect(fleet.nativeTargets()).resolves.toEqual([expect.objectContaining({ id: 'inference-support-loop' })])
+
+  writeFileSync(join(state, 'gateway.json'), '{', { mode: 0o600 })
+  expect((await fleet.view()).deployments).toEqual([expect.objectContaining({ id: 'inference-support-loop', status: 'ready' })])
+  await expect(fleet.nativeTargets()).resolves.toEqual([expect.objectContaining({ id: 'inference-support-loop' })])
+})
+
+it('reads a fleet from a gateway that predates the person readiness flag', async () => {
+  const state = workspace()
+  const gatewayUrl = await listen('onenexus-team/sglang')
+  writeFileSync(join(state, 'gateway.json'), JSON.stringify({
+    version: 1, url: gatewayUrl, token: 'gateway-session',
+  }), { mode: 0o600 })
+  const gateway = createServer((request, response) => {
+    if (request.url === '/gateway/api/fleet' && request.headers['x-dsh-superagent-native'] === 'gateway-session') {
+      response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({
+        organization: 'example-org', login: 'example-user',
+        deployments: [{ id: 'sglang', profile: 'superagent-sglang', repository: 'onenexus-team/sglang' }],
+      }))
+      return
+    }
+    response.writeHead(500).end(JSON.stringify({ error: `Unexpected gateway path: ${request.url}` }))
+  })
+  servers.push(gateway)
+  await new Promise<void>(resolve => gateway.listen(0, '127.0.0.1', resolve))
+  writeFileSync(join(state, 'gateway.json'), JSON.stringify({
+    version: 1, url: `http://127.0.0.1:${(gateway.address() as AddressInfo).port}`, token: 'gateway-session',
+  }), { mode: 0o600 })
+
+  const view = await new Fleet(state).view()
+  expect(view.gateway).toMatchObject({ login: 'example-user', person: false })
+  expect(view.deployments).toEqual([expect.objectContaining({ id: 'sglang', remote: true, canControl: false })])
+})
+
+it('uses gateway service state when a stopped remote deployment has no management API', async () => {
+  const state = workspace()
+  const gateway = createServer((request, response) => {
+    if (request.url === '/gateway/api/fleet' && request.headers['x-dsh-superagent-native'] === 'gateway-session') {
+      response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({
+        organization: 'example-org', login: 'example-user', person: true,
+        deployments: [{ id: 'sglang', profile: 'superagent-sglang', repository: 'onenexus-team/sglang',
+          capabilities: ['lifecycle', 'logs'] }],
+      }))
+      return
+    }
+    if (request.url === '/gateway/api/deployment/sglang/state') {
+      response.writeHead(503, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'Deployment unavailable' }))
+      return
+    }
+    if (request.url === '/gateway/api/deployment/sglang/status'
+      && request.headers['x-dsh-superagent-native'] === 'gateway-session') {
+      response.writeHead(200, { 'content-type': 'application/json' })
+        .end(JSON.stringify({ id: 'sglang', state: 'inactive' }))
+      return
+    }
+    if (request.url === '/gateway/api/deployment/sglang/logs?lines=80'
+      && request.headers['x-dsh-superagent-native'] === 'gateway-session') {
+      response.writeHead(200, { 'content-type': 'application/json' })
+        .end(JSON.stringify({ id: 'sglang', state: 'inactive', tail: 'stopped cleanly' }))
+      return
+    }
+    response.writeHead(500).end(JSON.stringify({ error: `Unexpected gateway path: ${request.url}` }))
+  })
+  servers.push(gateway)
+  await new Promise<void>(resolve => gateway.listen(0, '127.0.0.1', resolve))
+  writeFileSync(join(state, 'gateway.json'), JSON.stringify({
+    version: 1, url: `http://127.0.0.1:${(gateway.address() as AddressInfo).port}`, token: 'gateway-session',
+  }), { mode: 0o600 })
+
+  expect((await new Fleet(state).view()).deployments[0]).toMatchObject({
+    id: 'sglang',
+    remote: true,
+    canControl: true,
+    status: 'stopped',
+    detail: 'Stopped intentionally',
+    log: { path: 'journal:sglang', tail: 'stopped cleanly' },
+  })
+})
+
+it('preserves a gateway lifecycle conflict for the operator', async () => {
+  const state = workspace()
+  const gateway = createServer((request, response) => {
+    if (request.url === '/gateway/api/fleet') {
+      response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({
+        organization: 'example-org', login: 'example-user', person: true,
+        deployments: [{ id: 'sglang', profile: 'superagent-sglang', repository: 'onenexus-team/sglang',
+          capabilities: ['lifecycle', 'logs'] }],
+      }))
+      return
+    }
+    if (request.url === '/gateway/api/deployment/sglang/lifecycle') {
+      response.writeHead(409, { 'content-type': 'application/json' })
+        .end(JSON.stringify({ error: 'Another lifecycle action is already running for sglang' }))
+      return
+    }
+    response.writeHead(500).end(JSON.stringify({ error: `Unexpected gateway path: ${request.url}` }))
+  })
+  servers.push(gateway)
+  await new Promise<void>(resolve => gateway.listen(0, '127.0.0.1', resolve))
+  writeFileSync(join(state, 'gateway.json'), JSON.stringify({
+    version: 1, url: `http://127.0.0.1:${(gateway.address() as AddressInfo).port}`, token: 'gateway-session',
+  }), { mode: 0o600 })
+
+  await expect(new Fleet(state).control('sglang', 'restart')).rejects.toMatchObject({
+    status: 409,
+    message: 'Another lifecycle action is already running for sglang',
+  })
+})
+
+it('receives a Claude callback on the local listener and forwards only the one-time state and code', async () => {
+  const state = workspace()
+  const seen: unknown[] = []
+  const gateway = createServer(async (request, response) => {
+    const chunks: Buffer[] = []
+    for await (const chunk of request) chunks.push(Buffer.from(chunk))
+    if (request.url === '/gateway/api/model-proxy/claude/connect' && request.method === 'POST'
+      && request.headers['x-dsh-superagent-native'] === 'gateway-session') {
+      response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({
+        url: 'https://claude.example/authorize', expiresAt: '2099-01-01T00:05:00Z',
+      }))
+      return
+    }
+    if (request.url === '/gateway/api/model-proxy/claude/callback' && request.method === 'POST') {
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown
+      seen.push(body)
+      const item = body as { state?: string }
+      response.writeHead(item.state === 'oauth-state-value' ? 202 : 409, { 'content-type': 'application/json' })
+        .end(JSON.stringify(item.state === 'oauth-state-value' ? { accepted: true } : { error: 'state mismatch' }))
+      return
+    }
+    response.writeHead(500).end(JSON.stringify({ error: `Unexpected gateway path: ${request.url}` }))
+  })
+  servers.push(gateway)
+  await new Promise<void>(resolve => gateway.listen(0, '127.0.0.1', resolve))
+  writeFileSync(join(state, 'gateway.json'), JSON.stringify({
+    version: 1, url: `http://127.0.0.1:${(gateway.address() as AddressInfo).port}`, token: 'gateway-session',
+  }), { mode: 0o600 })
+  const callbackProbe = createServer()
+  await new Promise<void>(resolve => callbackProbe.listen(0, '127.0.0.1', resolve))
+  const callbackPort = (callbackProbe.address() as AddressInfo).port
+  await new Promise<void>(resolve => callbackProbe.close(() => resolve()))
+  const fleet = new Fleet(state, { claudeCallbackPort: callbackPort })
+  try {
+    await fleet.startClaudeLogin()
+    const success = await fetch(`http://127.0.0.1:${callbackPort}/callback?state=oauth-state-value&code=one-time-code`)
+    expect(success.status).toBe(200)
+    expect(await success.text()).toContain('Authorization received')
+    expect(seen).toEqual([{ state: 'oauth-state-value', code: 'one-time-code' }])
+    const mismatch = await fetch(`http://127.0.0.1:${callbackPort}/callback?state=wrong-state&code=one-time-code`)
+    expect(mismatch.status).toBe(400)
+  } finally {
+    fleet.dispose()
+  }
+})
+
+it('reports an occupied Claude callback port before starting a provider login', async () => {
+  const state = workspace()
+  const occupied = createServer()
+  servers.push(occupied)
+  await new Promise<void>(resolve => occupied.listen(0, '127.0.0.1', resolve))
+  const fleet = new Fleet(state, { claudeCallbackPort: (occupied.address() as AddressInfo).port })
+  await expect(fleet.startClaudeLogin()).rejects.toMatchObject({
+    status: 409,
+    message: `Port ${(occupied.address() as AddressInfo).port} is already in use. Close the other Claude sign-in window and try again.`,
+  })
+})
+
+it('refuses a Claude callback after its pending login expires', async () => {
+  const state = workspace()
+  let now = 1_000_000
+  const gateway = createServer((request, response) => {
+    if (request.url === '/gateway/api/model-proxy/claude/connect' && request.method === 'POST') {
+      response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({
+        url: 'https://claude.example/authorize', expiresAt: new Date(now + 1_000).toISOString(),
+      }))
+      return
+    }
+    response.writeHead(500).end(JSON.stringify({ error: `Unexpected gateway path: ${request.url}` }))
+  })
+  servers.push(gateway)
+  await new Promise<void>(resolve => gateway.listen(0, '127.0.0.1', resolve))
+  writeFileSync(join(state, 'gateway.json'), JSON.stringify({
+    version: 1, url: `http://127.0.0.1:${(gateway.address() as AddressInfo).port}`, token: 'gateway-session',
+  }), { mode: 0o600 })
+  const callbackProbe = createServer()
+  await new Promise<void>(resolve => callbackProbe.listen(0, '127.0.0.1', resolve))
+  const callbackPort = (callbackProbe.address() as AddressInfo).port
+  await new Promise<void>(resolve => callbackProbe.close(() => resolve()))
+  const fleet = new Fleet(state, { claudeCallbackPort: callbackPort, now: () => now })
+  try {
+    await fleet.startClaudeLogin()
+    now += 2_000
+    const expired = await fetch(`http://127.0.0.1:${callbackPort}/callback?state=oauth-state-value&code=one-time-code`)
+    expect(expired.status).toBe(410)
+    expect(await expired.text()).toContain('Sign-in expired')
+  } finally {
+    fleet.dispose()
+  }
 })

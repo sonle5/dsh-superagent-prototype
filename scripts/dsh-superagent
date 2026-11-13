@@ -8,6 +8,7 @@ and 3 when it runs and waits for setup. A restart fixes neither 2 nor 3: they ne
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -22,7 +23,7 @@ import urllib.error
 import urllib.request
 
 ROOT = Path(__file__).resolve().parent.parent
-ARTIFACTS = ROOT / '.artifacts'
+ARTIFACTS = Path(os.environ.get('DSH_SUPERAGENT_ARTIFACTS') or ROOT / '.artifacts').expanduser().absolute()
 CONTROL = ARTIFACTS / 'control'
 KEEP_LOGS = 20
 
@@ -32,6 +33,11 @@ def control(profile):
     directory = CONTROL / 'profiles' / profile
     directory.mkdir(parents=True, exist_ok=True)
     return directory
+
+
+def tmux_socket(profile):
+    """Return a short, stable tmux server socket name private to `profile`."""
+    return 'dsh-superagent-' + hashlib.sha256(profile.encode()).hexdigest()[:16]
 
 
 def private_state_overlay(profile):
@@ -84,7 +90,8 @@ def ps(*options, check=False):
 
 def is_dsh(name, args):
     """Return whether `ps` found a DSH command, including its desktop-host process."""
-    return name in ('node', 'dsh') or any('dsh-desktop-host/' in word for word in args)
+    return (name in ('node', 'dsh') or any(Path(word).name == 'dsh' for word in args[:2])
+            or any('dsh-desktop-host/' in word for word in args))
 
 
 def running(pid, profile):
@@ -102,10 +109,22 @@ def processes(profile):
     return found + [pid] if pid not in found and running(pid, profile) else found
 
 
-def state(url):
+def native_token(state_dir):
+    """Read the deployment's private management credential, returning None if absent."""
+    path = Path(state_dir) / 'native-proxy-token'
+    try:
+        value = path.read_text().strip()
+    except OSError:
+        return None
+    return value if re.fullmatch(r'[A-Za-z0-9_-]{43}', value) else None
+
+
+def state(url, state_dir):
     """Fetch health and setup status from the management API, or return None if unreachable."""
+    token = native_token(state_dir)
     request = urllib.request.Request(url.rstrip('/') + '/orchestrator/api/state',
-                                     headers={'x-orchestrator-request': '1'})
+                                     headers={'x-orchestrator-request': '1',
+                                              **({'x-dsh-superagent-native': token} if token else {})})
     try:
         with urllib.request.urlopen(request, timeout=2) as response:
             value = json.load(response)
@@ -145,7 +164,7 @@ def outcome(pids, current):
 
 def status(args):
     pids = processes(args.profile)
-    current = state(args.url) if pids else None
+    current = state(args.url, args.state_dir) if pids else None
     print(json.dumps({'pids': pids, 'cwd': str(ROOT), 'url': args.url,
                       'manually_stopped': stopped(args.profile), 'health': current and current['health'],
                       'errors': current and current['errors'], 'setup': current and current['setup'],
@@ -182,6 +201,7 @@ def prune_logs(profile):
 
 def start(args):
     session = 'dsh-' + args.profile
+    tmux = ['tmux', '-L', tmux_socket(args.profile)]
     pids = processes(args.profile)
     if len(pids) > 1:
         raise RuntimeError('Multiple dsh-superagent processes found; refusing to start another.')
@@ -189,9 +209,9 @@ def start(args):
         dsh = shutil.which('dsh')
         if not dsh or not shutil.which('tmux'):
             raise RuntimeError('Both dsh and tmux must be on PATH.')
-        exists = subprocess.run(['tmux', 'has-session', '-t', '=' + session],
+        exists = subprocess.run([*tmux, 'has-session', '-t', '=' + session],
                                 capture_output=True).returncode == 0
-        if state(args.url) is not None:
+        if state(args.url, args.state_dir) is not None:
             raise RuntimeError('An existing orchestrator answers at this URL; refusing duplicate startup.')
         stamp = time.strftime('%Y%m%d-%H%M%S')
         log = ARTIFACTS / f'dsh-superagent-{args.profile}-{stamp}-{os.getpid()}.log'
@@ -203,7 +223,9 @@ def start(args):
                    + ' >> ' + shlex.quote(str(log)) + ' 2>&1')
         # Reuse an existing tmux session without disturbing other windows.
         target = ['new-window', '-t', '=' + session + ':'] if exists else ['new-session', '-s', session]
-        pane = subprocess.run(['tmux', *target, '-d', '-P', '-F', '#{pane_pid}', '-n', 'server', '-c', str(ROOT), command],
+        # Service accounts use nologin as their login shell; tmux still needs an explicit shell for this compound command.
+        pane = subprocess.run([*tmux, *target, '-d', '-P', '-F', '#{pane_pid}', '-n', 'server', '-c', str(ROOT),
+                               '/bin/sh', '-c', command],
                               check=True, capture_output=True, text=True).stdout.strip()
         if pane.isdigit():
             (control(args.profile) / 'service.pid').write_text(pane + '\n')
@@ -214,7 +236,7 @@ def start(args):
     (control(args.profile) / 'manually-stopped').unlink(missing_ok=True)
     deadline = time.monotonic() + args.timeout
     while time.monotonic() < deadline:
-        current = state(args.url)
+        current = state(args.url, args.state_dir)
         if processes(args.profile) and runtime_up(current):
             code = status(args)
             if current['setup']:
@@ -238,6 +260,8 @@ def main():
                         help='DSH profile that loads dsh-superagent; its tmux session is dsh-<profile>.')
     parser.add_argument('--url', default=os.environ.get('DSH_SUPERAGENT_URL') or 'http://127.0.0.1:3082',
                         help='Health-check URL; override after changing the profile port.')
+    parser.add_argument('--state-dir', default=os.environ.get('DSH_SUPERAGENT_STATE_DIR'),
+                        help='Deployment state directory containing native-proxy-token.')
     parser.add_argument('--timeout', type=float, default=60, help='Startup timeout in seconds.')
     parser.add_argument('--stop-timeout', type=float, default=300,
                         help='Graceful shutdown timeout in seconds; running Executor Sessions finish their step first.')
@@ -248,6 +272,11 @@ def main():
         parser.error('--timeout and --stop-timeout must be positive')
     if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*', args.profile):
         parser.error('--profile must be a DSH profile name')
+    if args.state_dir is None:
+        home = Path(os.environ.get('DSH_HOME') or Path.home() / '.dsh').expanduser().absolute()
+        args.state_dir = str(home / 'state' / args.profile)
+    if not Path(args.state_dir).is_absolute():
+        parser.error('--state-dir must be an absolute path')
     os.umask(0o077)
     with (control(args.profile) / 'operation.lock').open('a') as lock:
         try:

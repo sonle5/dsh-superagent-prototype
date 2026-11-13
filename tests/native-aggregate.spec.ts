@@ -21,8 +21,10 @@ import {
 
 const target = (id: string, repository = `onenexus-team/${id}`): FleetNativeTarget => ({
   id,
+  remote: false,
   repository,
   url: 'http://127.0.0.1:1234',
+  nativeUrl: 'http://127.0.0.1:1234',
   profile: `superagent-${id}`,
   stateDir: `/tmp/${id}`,
   workspace: `/tmp/${id}/work`,

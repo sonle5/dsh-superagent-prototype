@@ -10,14 +10,22 @@ it('shows every peer deployment with equal lifecycle and management controls', a
   await mount()
   await click(tab(zh['tab.fleet']))
   expect(tab(zh['tab.fleet']).getAttribute('aria-selected')).toBe('true')
-  expect(all('.dt-fleet-card').map(card => card.getAttribute('data-status'))).toEqual(['ready', 'stopped'])
+  expect(all('.dt-fleet-grid .dt-fleet-card').map(card => card.getAttribute('data-status'))).toEqual(['ready', 'stopped'])
   expect(text()).toContain('onenexus-team/inference-support-loop')
   expect(text()).toContain('onenexus-team/sglang')
   expect(text()).toContain('/Users/alice/src/sglang-superagent')
-  expect([...all('.dt-fleet-card')[0]!.querySelectorAll('button')].map(button => button.textContent)).toEqual([zh.fleetStop,
+  expect([...all('.dt-fleet-grid .dt-fleet-card')[0]!.querySelectorAll('button')].map(button => button.textContent)).toEqual([zh.fleetStop,
     zh.fleetRestart, zh.fleetManage])
-  expect([...all('.dt-fleet-card')[1]!.querySelectorAll('button')].map(button => button.textContent)).toEqual([zh.fleetStart,
+  expect([...all('.dt-fleet-grid .dt-fleet-card')[1]!.querySelectorAll('button')].map(button => button.textContent)).toEqual([zh.fleetStart,
     zh.fleetManage])
+})
+
+it('does not report the selected deployment poll as a global error on the Fleet control page', async () => {
+  server.downDeployment = 'inference-support-loop'
+  await mount()
+  await click(tab(zh['tab.fleet']))
+  expect(document.querySelector('.dt-column > .dt-error')).toBeNull()
+  expect(text()).toContain('onenexus-team/inference-support-loop')
 })
 
 it('starts a stopped deployment and refreshes its aggregate state', async () => {
@@ -25,7 +33,7 @@ it('starts a stopped deployment and refreshes its aggregate state', async () => 
   await click(tab(zh['tab.fleet']))
   await click(zh.fleetStart)
   expect(server.requests).toContainEqual({ path: 'fleet/sglang/start', method: 'POST' })
-  expect(document.querySelectorAll('.dt-fleet-card')[1]?.getAttribute('data-status')).toBe('starting')
+  expect(document.querySelectorAll('.dt-fleet-grid .dt-fleet-card')[1]?.getAttribute('data-status')).toBe('starting')
   expect(document.querySelector('.dt-toast')?.textContent).toBe('Started')
 })
 
@@ -44,9 +52,27 @@ it('expands repository health, work, workspace and log details in place', async 
 it('renders the fleet in English', async () => {
   await mount(en)
   await click(tab(en['tab.fleet']))
-  expect(all('.dt-card-title').map(title => title.textContent)).toEqual(['onenexus-team/inference-support-loop',
+  expect(all('.dt-fleet-grid .dt-card-title').map(title => title.textContent)).toEqual(['onenexus-team/inference-support-loop',
     'onenexus-team/sglang'])
-  expect(all('.dt-tag').map(tag => tag.textContent)).toEqual(['Ready', 'Stopped'])
+  expect(all('.dt-fleet-grid .dt-tag').map(tag => tag.textContent)).toEqual(['Ready', 'Stopped'])
+})
+
+it('removes account creation after the signed-in person account exists', async () => {
+  server.gatewayStatus = {
+    configured: true,
+    url: 'https://superagent.example',
+    organization: 'example-org',
+    login: 'fixture-user',
+    person: false,
+  }
+  await mount()
+  await click(tab(zh['tab.fleet']))
+  expect(text()).toContain(zh.gatewayCreatePerson)
+  await click(zh.gatewayCreatePerson)
+  expect(server.gatewayStatus.person).toBe(true)
+  expect(text()).not.toContain(zh.gatewayCreatePerson)
+  expect(text()).toContain(zh.gatewayPersonReady)
+  expect(server.requests).toContainEqual({ path: 'gateway/person', method: 'POST' })
 })
 
 it('switches every management view to the selected deployment and remembers the selection', async () => {
@@ -99,7 +125,7 @@ it('migrates a stale desktop selection to the first registered deployment withou
 it('opens the selected deployment from its Fleet card', async () => {
   await mount()
   await click(tab(zh['tab.fleet']))
-  await click(all('.dt-fleet-card')[1]!.querySelector('button:last-child')!)
+  await click(all('.dt-fleet-grid .dt-fleet-card')[1]!.querySelector('button:last-child')!)
   expect(tab(zh['tab.overview']).getAttribute('aria-selected')).toBe('true')
   expect(field<HTMLSelectElement>(zh.deploymentContext).value).toBe('sglang')
   expect(server.requests.some(request => request.path === 'deployment/sglang/state')).toBe(true)

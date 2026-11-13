@@ -1,5 +1,5 @@
 /** Tests for scripts/dsh-superagent using a temporary checkout path with spaces and stubbed ps, tmux, and dsh binaries. */
-import { execFile, spawn, type ChildProcess } from 'node:child_process'
+import { execFile, execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, utimesSync,
   writeFileSync }
   from 'node:fs'
@@ -12,6 +12,7 @@ import { afterEach, beforeEach, expect, it } from 'vitest'
 let root: string
 let server: Server | undefined
 let sleepers: ChildProcess[] = []
+const cleanupDirectories: string[] = []
 const control = (profile: string) => join(root, '.artifacts', 'control', 'profiles', profile)
 const program = (name: string, body: string) => writeFileSync(join(root, 'bin', name), `#!/bin/sh\n${body}\n`, { mode: 0o755 })
 /** Spawn a dummy process whose PID can be listed by the fake ps binary; ignoreInterrupt simulates a hung graceful stop. */
@@ -27,6 +28,7 @@ const processes = (...lines: string[]) => writeFileSync(join(root, 'ps.txt'), li
 const started = (...lines: string[]) => writeFileSync(join(root, 'ps-started.txt'), lines.map(line => `${line}\n`).join(''))
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'service script '))
+  cleanupDirectories.push(root)
   mkdirSync(join(root, 'scripts')); mkdirSync(join(root, 'bin'))
   copyFileSync(join(import.meta.dirname, '..', 'scripts', 'dsh-superagent'), join(root, 'scripts', 'dsh-superagent'))
   processes()
@@ -38,7 +40,8 @@ while IFS= read -r line; do
   if [ -z "$want" ] || [ "$pid" = "$want" ]; then printf '%s\\n' "$line"; fi
 done < "$list"`)
   // Log tmux invocations and simulate session creation by outputting the pane PID.
-  program('tmux', `for a in "$@"; do printf '%s\\n' "$a"; done >> '${root}/tmux.log'; echo --- >> '${root}/tmux.log'\n`
+  program('tmux', `if [ "$1" = -L ]; then printf '%s\\n' "$2" >> '${root}/tmux-sockets.log'; shift 2; fi\n`
+    + `for a in "$@"; do printf '%s\\n' "$a"; done >> '${root}/tmux.log'; echo --- >> '${root}/tmux.log'\n`
     + `case "$1" in has-session) exit 1;; new-*) touch '${root}/launched'; cat '${root}/pane';; esac`)
   program('dsh', 'exit 0')
 })
@@ -46,7 +49,7 @@ afterEach(() => {
   server?.close(); server = undefined
   for (const child of sleepers) child.kill()
   sleepers = []
-  rmSync(root, { recursive: true, force: true })
+  for (const directory of cleanupDirectories.splice(0)) rmSync(directory, { recursive: true, force: true })
 })
 function run(...args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise(resolve => execFile('python3', [join(root, 'scripts', 'dsh-superagent'), ...args],
@@ -91,6 +94,29 @@ it('recognizes the desktop application as the service process', async () => {
   processes(`${pid} /Applications/De /Applications/DeepSeek Harness.app/Contents/Resources/app.asar/dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js --profile superagent --no-open`)
   expect(await status('superagent')).toMatchObject({ pids: [pid] })
 })
+it('recognizes a Node DSH process whose operating-system command name is not node', async () => {
+  const pid = sleeper()
+  processes(`${pid} MainThread node /usr/bin/dsh --profile superagent --no-open`)
+  expect(await status('superagent')).toMatchObject({ pids: [pid] })
+})
+it('does not take a debugger wrapper for the DSH service process', async () => {
+  const pid = sleeper()
+  processes(`${pid} strace /usr/bin/strace -ff -o /tmp/trace /usr/bin/dsh --profile superagent --no-open`)
+  expect(await status('superagent')).toMatchObject({ pids: [] })
+})
+it('gives every profile a private tmux server socket', () => {
+  const python = `import importlib.machinery, importlib.util
+loader = importlib.machinery.SourceFileLoader('service', ${JSON.stringify(join(root, 'scripts', 'dsh-superagent'))})
+spec = importlib.util.spec_from_loader(loader.name, loader)
+service = importlib.util.module_from_spec(spec)
+loader.exec_module(service)
+print(service.tmux_socket('superagent-inference-support-loop'))
+print(service.tmux_socket('superagent-sglang'))`
+  const sockets = execFileSync('python3', ['-c', python], { encoding: 'utf8' }).trim().split('\n')
+  expect(sockets[0]).toMatch(/^dsh-superagent-[a-f0-9]{16}$/)
+  expect(sockets[0]).not.toBe(sockets[1])
+  expect(sockets[1]).toMatch(/^dsh-superagent-[a-f0-9]{16}$/)
+})
 it('records the service PID at start, and still refuses a second instance the scan finds', async () => {
   const url = await answering()
   const pid = sleeper()
@@ -100,11 +126,14 @@ it('records the service PID at start, and still refuses a second instance the sc
   expect(start).toMatchObject({ code: 0, stdout: expect.stringContaining(`"pids": [\n    ${pid}\n  ]`) })
   expect(readFileSync(join(control('superagent'), 'service.pid'), 'utf8')).toBe(`${pid}\n`)
   const tmux = readFileSync(join(root, 'tmux.log'), 'utf8').split('---\n').find(call => call.startsWith('new-session'))!.split('\n')
+  expect(new Set(readFileSync(join(root, 'tmux-sockets.log'), 'utf8').trim().split('\n')))
+    .toEqual(new Set([expect.stringMatching(/^dsh-superagent-[a-f0-9]{16}$/)]))
   // The checkout's path, which has a space, is one argument, and the log path inside it is quoted for the shell.
   const checkout = realpathSync(root)
   expect(tmux).toEqual(expect.arrayContaining(['-P', '-F', '#{pane_pid}', '-c', checkout]))
   const log = new RegExp(`>> '${checkout}/\\.artifacts/dsh-superagent-superagent-\\d{8}-\\d{6}-\\d+\\.log' 2>&1$`)
-  expect(tmux.find(word => word.startsWith('umask 077; exec '))).toMatch(log)
+  expect(tmux[tmux.indexOf('/bin/sh') + 2]).toMatch(log)
+  expect(tmux.slice(tmux.indexOf('/bin/sh'), tmux.indexOf('/bin/sh') + 2)).toEqual(['/bin/sh', '-c'])
   const second = sleeper()
   started(service(pid), `${second} node node /opt/dsh --profile superagent`)
   const again = await run('start', '--url', url, '--timeout', '10')
@@ -133,7 +162,30 @@ it('starts a profile with private Session and workspace storage', async () => {
   expect(statSync(overlay).mode & 0o777).toBe(0o600)
   const tmux = readFileSync(join(root, 'tmux.log'), 'utf8').split('---\n').find(call => call.startsWith('new-session'))!.split('\n')
   const launchedOverlay = join(realpathSync(root), '.artifacts', 'control', 'profiles', 'superagent-sglang', 'dsh-home.yml')
-  expect(tmux.find(word => word.startsWith('umask 077; exec '))).toContain(`--patch '${launchedOverlay}'`)
+  expect(tmux[tmux.indexOf('/bin/sh') + 2]).toContain(`--patch '${launchedOverlay}'`)
+}, 20_000)
+
+it('authenticates health checks with the deployment native capability', async () => {
+  const stateDir = join(root, 'state', 'superagent-sglang')
+  const token = 'A'.repeat(43)
+  mkdirSync(stateDir, { recursive: true })
+  writeFileSync(join(stateDir, 'native-proxy-token'), `${token}\n`, { mode: 0o600 })
+  const pid = sleeper()
+  processes(service(pid, 'superagent-sglang'))
+  server = createServer((request, response) => {
+    if (request.url !== '/orchestrator/api/state'
+      || request.headers['x-orchestrator-request'] !== '1'
+      || request.headers['x-dsh-superagent-native'] !== token) {
+      response.writeHead(401).end()
+      return
+    }
+    response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(READY))
+  })
+  await new Promise<void>(resolve => server!.listen(0, '127.0.0.1', resolve))
+  const url = `http://127.0.0.1:${(server!.address() as AddressInfo).port}`
+
+  expect(await run('status', '--profile', 'superagent-sglang', '--url', url, '--state-dir', stateDir))
+    .toMatchObject({ code: 0 })
 }, 20_000)
 it('waits only for the process it stopped', async () => {
   const pid = sleeper()
@@ -230,8 +282,40 @@ it('refuses to start a service while no process runs it but something answers at
   expect(readFileSync(join(root, 'tmux.log'),
     'utf8').split('---\n').filter(Boolean).map(call => call.split('\n')[0])).toEqual(['has-session'])
 }, 20_000)
+
+it('restarts only the launcher status code that monitoring can recover', async () => {
+  const recoverRoot = mkdtempSync(join(tmpdir(), 'dsh recover '))
+  cleanupDirectories.push(recoverRoot)
+  mkdirSync(join(recoverRoot, 'scripts'), { recursive: true })
+  copyFileSync(join(import.meta.dirname, '..', 'scripts', 'dsh-superagent-recover'),
+    join(recoverRoot, 'scripts', 'dsh-superagent-recover'))
+  const calls = join(recoverRoot, 'calls')
+  writeFileSync(join(recoverRoot, 'scripts', 'dsh-superagent'), `#!/bin/sh
+printf '%s\\n' "$*" >> '${calls}'
+if [ "$1" = restart ]; then exit 0; fi
+exit "$DSH_RECOVER_STATUS"
+`, { mode: 0o755 })
+  const runRecover = (status: number) => new Promise<{ code: number; stdout: string; stderr: string }>(resolve => {
+    execFile(join(recoverRoot, 'scripts', 'dsh-superagent-recover'),
+      ['--profile', 'superagent-sglang', '--url', 'http://127.0.0.1:3083', '--state-dir', '/tmp/superagent-sglang'],
+      { env: { ...process.env, DSH_RECOVER_STATUS: String(status) } },
+      (error, stdout, stderr) => resolve({ code: typeof error?.code === 'number' ? error.code : 0, stdout, stderr }))
+  })
+
+  expect(await runRecover(1)).toMatchObject({ code: 0 })
+  expect(await runRecover(2)).toMatchObject({ code: 0, stderr: expect.stringContaining('needs operator action') })
+  expect(await runRecover(3)).toMatchObject({ code: 0, stderr: expect.stringContaining('needs operator action') })
+  expect(readFileSync(calls, 'utf8')).toBe([
+    'status --profile superagent-sglang --url http://127.0.0.1:3083 --state-dir /tmp/superagent-sglang',
+    'restart --respect-stop --profile superagent-sglang --url http://127.0.0.1:3083 --state-dir /tmp/superagent-sglang',
+    'status --profile superagent-sglang --url http://127.0.0.1:3083 --state-dir /tmp/superagent-sglang',
+    'status --profile superagent-sglang --url http://127.0.0.1:3083 --state-dir /tmp/superagent-sglang',
+    '',
+  ].join('\n'))
+}, 20_000)
 it('starts the service in a new window of the profile\'s tmux session when the session exists', async () => {
-  program('tmux', `for a in "$@"; do printf '%s\\n' "$a"; done >> '${root}/tmux.log'; echo --- >> '${root}/tmux.log'\n`
+  program('tmux', `if [ "$1" = -L ]; then printf '%s\\n' "$2" >> '${root}/tmux-sockets.log'; shift 2; fi\n`
+    + `for a in "$@"; do printf '%s\\n' "$a"; done >> '${root}/tmux.log'; echo --- >> '${root}/tmux.log'\n`
     + `case "$1" in has-session) exit 0;; new-*) touch '${root}/launched'; cat '${root}/pane';; esac`)
   const url = await answering()
   const pid = sleeper()
@@ -241,6 +325,8 @@ it('starts the service in a new window of the profile\'s tmux session when the s
   const calls = readFileSync(join(root, 'tmux.log'), 'utf8').split('---\n').map(call => call.split('\n'))
   expect(calls.find(call => call[0] === 'new-window')).toEqual(expect.arrayContaining(['-t', '=dsh-superagent:']))
   expect(calls.some(call => call[0] === 'new-session')).toBe(false)
+  expect(new Set(readFileSync(join(root, 'tmux-sockets.log'), 'utf8').trim().split('\n')))
+    .toEqual(new Set([expect.stringMatching(/^dsh-superagent-[a-f0-9]{16}$/)]))
 }, 20_000)
 it('exits 1 when the started service does not answer in time, and leaves its process running', async () => {
   const pid = sleeper()

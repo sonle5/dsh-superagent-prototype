@@ -3,6 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-settings'
 import { Runtime } from './app/runtime.ts'
 import { Config, machineOf, type DeploymentConfig } from './deployment.ts'
+import { registerGateway } from './app/gateway.ts'
 import { registerControlHttp } from './app/http.ts'
 import { registerNativeTransport } from './app/native-transport.ts'
 
@@ -21,6 +22,11 @@ export async function apply(ctx: Context, config: DeploymentConfig): Promise<voi
       }
     })
     ctx.logger.info('dsh-superagent control ready; the Superagent sidebar opens the repository-neutral fleet')
+    return
+  }
+  if (config.mode === 'gateway') {
+    ctx.effect(() => registerGateway(ctx, config.stateDir))
+    ctx.logger.info('dsh-superagent gateway ready; signed-in Fleet clients can use /gateway/api')
     return
   }
   const machine = machineOf(config)

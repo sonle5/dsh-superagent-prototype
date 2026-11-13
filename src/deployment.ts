@@ -13,8 +13,8 @@ const reason = (error: unknown): string => error instanceof Error ? error.messag
 const absolute = (description: string) => s.string().pattern(/^\//).description(`${description} Absolute path.`)
 /** Plugin configuration of the dsh-superagent entry. Volatile fields apply without a restart because dsh-superagent reads them on each use; changing `stateDir` remounts the plugin. */
 export const Config = s.object({
-  mode: s.string().pattern(/^(repository|control)$/).default('repository')
-    .description('repository runs one Superagent deployment; control mounts only the repository-neutral Fleet control plane.'),
+  mode: s.string().pattern(/^(repository|control|gateway)$/).default('repository')
+    .description('repository runs one Superagent deployment; control mounts only the repository-neutral Fleet control plane; gateway exposes a public Fleet to signed-in operators.'),
   stateDir: absolute('Directory for the database, locks, worker shims, the agent\'s git configuration and, by default, the ticket directories.').required(),
   promptMaxChars: s.number().min(LIMITS.promptMaxChars.min).max(LIMITS.promptMaxChars.max).step(1).default(100000)
     .description('Largest saved prompt configuration, in characters.').volatile(),

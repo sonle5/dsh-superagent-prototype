@@ -1,11 +1,12 @@
 /** Read-only GitHub repository, conversation, and CI check inspection for assessments and workers. */
 import { z } from 'zod'
 import type { ThreadFact } from '../core/index.ts'
-import { validItems, type Commands, type Tally } from '../infra/commands.ts'
+import { CliError, validItems, type Commands, type Tally } from '../infra/commands.ts'
 import { CommentSchema, IssueSchema, isHumanLogin, reviewPlace, type GithubComment } from './github-trigger.ts'
 import type { ContextMessage, ThreadContext } from './kind.ts'
 
 const CheckSchema = z.looseObject({ name: z.string(), status: z.string(), conclusion: z.string().nullable() })
+const WorkflowRunsPageSchema = z.looseObject({ workflow_runs: z.array(z.unknown()) })
 const StatusSchema = z.looseObject({ context: z.string(), state: z.string() })
 type Check = Pick<z.infer<typeof CheckSchema>, 'name' | 'status' | 'conclusion'>
 type Status = Pick<z.infer<typeof StatusSchema>, 'context' | 'state'>
@@ -59,12 +60,20 @@ export async function readRepositoryPath(commands: Commands, path: string, kind:
 /** Reads check runs and commit statuses for a commit without emitting a trigger. */
 export async function pullChecks(commands: Commands, head: string, tally?: Tally): Promise<CiSnapshot> {
   const page = z.looseObject({ check_runs: z.array(z.unknown()) })
-  const pages = await commands.api(z.array(page), `commits/${head}/check-runs?per_page=100`, '--paginate', '--slurp')
-  const runs = validItems(CheckSchema, pages.flatMap(page => page.check_runs), tally)
+  let checks: Check[]
+  try {
+    const pages = await commands.api(z.array(page), `commits/${head}/check-runs?per_page=100`, '--paginate', '--slurp')
+    checks = validItems(CheckSchema, pages.flatMap(page => page.check_runs), tally)
+  } catch (error) {
+    // Checks API requires a GitHub App token. A fine-grained PAT can read repository Actions instead.
+    if (!(error instanceof CliError) || error.code !== 403 || !error.message.includes('Resource not accessible by personal access token')) throw error
+    const pages = await commands.api(z.array(WorkflowRunsPageSchema),
+      `actions/runs?head_sha=${encodeURIComponent(head)}&per_page=100`, '--paginate', '--slurp')
+    checks = validItems(CheckSchema, pages.flatMap(page => page.workflow_runs), tally)
+  }
   const statuses = await commands.pages(StatusSchema, `commits/${head}/statuses?per_page=100`, tally)
   const latest = new Map<string, string>()
   for (const status of statuses) if (!latest.has(status.context)) latest.set(status.context, status.state)
-  const checks = runs.map(({ name, status, conclusion }) => ({ name, status, conclusion }))
   return { head, checks: checks.sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
     statuses: [...latest].map(([context, state]) => ({ context, state })).sort((a, b) => a.context.localeCompare(b.context)) }
 }

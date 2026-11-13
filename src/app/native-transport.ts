@@ -20,14 +20,16 @@ import {
   peerRequestValue,
   peerResponseValue,
   repositoryTitle,
+  requestDeployments,
   requestOwner,
 } from './native-aggregate.ts'
 import { matchesNativeToken, nativeToken } from './native-auth.ts'
 
 const NATIVE_API = '/orchestrator/native/api'
 const NATIVE_MUX = '/orchestrator/native/remote.mux'
-const INTERNAL_REQUEST_HEADER = 'x-orchestrator-request'
-const INTERNAL_HEADER = 'x-dsh-superagent-native'
+const PEER_NATIVE_MUX = 'orchestrator/native/remote.mux'
+export const INTERNAL_REQUEST_HEADER = 'x-orchestrator-request'
+export const INTERNAL_HEADER = 'x-dsh-superagent-native'
 /** Marks the controller's request to its own API; its value lives only in this process. */
 const LOCAL_HEADER = 'x-dsh-superagent-local'
 const MAX_RPC_BODY_BYTES = 300 * 1024 * 1024
@@ -70,7 +72,9 @@ const LOCAL_TARGET_ID = 'desktop.local'
 function localTarget(ctx: Context, stateDir: string): FleetNativeTarget {
   return {
     id: LOCAL_TARGET_ID,
+    remote: false,
     url: `http://127.0.0.1:${ctx.webServer.port}/`,
+    nativeUrl: `http://127.0.0.1:${ctx.webServer.port}/`,
     repository: '',
     profile: '',
     stateDir,
@@ -88,9 +92,11 @@ function peerLabel(target: FleetNativeTarget): string {
  * Whether a Desktop-profile Session or Workspace path lies under a deployment's state directory.
  * The deployment's own store is authoritative for such work; older Desktop-profile copies are hidden from the catalog.
  */
-function deploymentOwnedPath(target: FleetNativeTarget, path: unknown, targets: readonly FleetNativeTarget[]): boolean {
+export function deploymentOwnedPath(target: FleetNativeTarget, path: unknown, targets: readonly FleetNativeTarget[]): boolean {
   if (target.id !== LOCAL_TARGET_ID || typeof path !== 'string') return false
-  return targets.some(peer => peer.id !== LOCAL_TARGET_ID && (path === peer.stateDir || path.startsWith(`${peer.stateDir}/`)))
+  return targets.some(peer => peer.id !== LOCAL_TARGET_ID
+    && peer.stateDir !== ''
+    && (path === peer.stateDir || path.startsWith(`${peer.stateDir}/`)))
 }
 
 function withoutDeploymentSessions(target: FleetNativeTarget, value: unknown, targets: readonly FleetNativeTarget[]): unknown {
@@ -233,6 +239,37 @@ function webSocketUrl(base: string, path: string): string {
   return url.href
 }
 
+/**
+ * Resolve the Remote mux endpoint for a local peer or a deployment behind the cloud gateway.
+ * @param target - Authenticated native peer.
+ * @returns WebSocket URL that reaches the peer's own Remote mux.
+ */
+export function nativePeerMuxUrl(target: FleetNativeTarget): string {
+  if (!target.remote) return webSocketUrl(target.url, PEER_NATIVE_MUX)
+  const url = new URL(`${target.nativeUrl.replace(/\/$/, '')}/remote.mux`)
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+  return url.href
+}
+
+/**
+ * Resolve an HTTP RPC endpoint for a local peer or a deployment behind the cloud gateway.
+ * @param target - Authenticated native peer.
+ * @param sourcePath - Native API path beginning with `/api`.
+ * @returns URL that reaches the peer's own native API.
+ */
+export function nativePeerApiUrl(target: FleetNativeTarget, sourcePath: string): URL {
+  if (!target.remote) return new URL(`orchestrator/native${sourcePath}`, target.url)
+  return new URL(`${target.nativeUrl.replace(/\/$/, '')}${sourcePath}`)
+}
+
+/**
+ * Whether the aggregate has the controller's own authoritative Workspace/Session baseline.
+ * A remote peer may answer first; publishing only that peer would temporarily hide every Desktop Session.
+ */
+export function hasDesktopWorkspaceBaseline(targets: readonly FleetNativeTarget[], baselines: ReadonlySet<string>): boolean {
+  return targets.some(target => target.id === LOCAL_TARGET_ID && baselines.has(target.id))
+}
+
 interface ClientRpcEnvelope {
   type: 'client-request'
   rpcId: string
@@ -244,8 +281,13 @@ interface ServerRpcEnvelope {
   type: 'server-response'
   rpcId: string
   result:
-    | { ok: true; value: unknown }
+    | { ok: true; value?: unknown }
     | { ok: false; error: { code: string; message: string; details: object } }
+}
+
+/** A deployment's native RPC refusal, preserving its wire code for management adapters. */
+export class NativePeerRpcError extends Error {
+  constructor(readonly code: string, message: string, readonly details: object) { super(message) }
 }
 
 interface NativeControllerState {
@@ -308,7 +350,7 @@ function clientEnvelope(value: unknown): ClientRpcEnvelope | undefined {
 function serverEnvelope(value: unknown, rpcId: string): ServerRpcEnvelope | undefined {
   if (!isRecord(value) || value.type !== 'server-response' || value.rpcId !== rpcId || !isRecord(value.result)) return undefined
   const result = value.result
-  if (result.ok === true && Object.hasOwn(result, 'value')) {
+  if (result.ok === true) {
     return value as unknown as ServerRpcEnvelope
   }
   if (result.ok === false
@@ -385,7 +427,7 @@ async function callPeer(
   envelope: ClientRpcEnvelope,
   signal: AbortSignal,
 ): Promise<ServerRpcEnvelope> {
-  const targetUrl = new URL(`/orchestrator/native${sourcePath}`, target.url)
+  const targetUrl = nativePeerApiUrl(target, sourcePath)
   const payload = outboundPeerPayload(target, envelope.method, envelope.payload)
   const response = await fetch(targetUrl, {
     method: 'POST',
@@ -401,6 +443,34 @@ async function callPeer(
   const parsed = serverEnvelope(await response.json() as unknown, envelope.rpcId)
   if (parsed === undefined) throw new Error(`Invalid native response from ${peerLabel(target)}`)
   return parsed
+}
+
+/**
+ * Invoke one unary deployment-owned DSH Remote method.
+ * @param target - Authenticated native peer.
+ * @param method - DSH Remote method such as `settings/describe`.
+ * @param args - Wire argument object for that method.
+ * @param signal - Caller cancellation, combined with the peer request timeout.
+ * @returns The method's successful value.
+ * @throws NativePeerRpcError when the deployment refuses the method.
+ */
+export async function nativePeerRpc(
+  target: FleetNativeTarget,
+  method: string,
+  args: Record<string, unknown>,
+  signal = new AbortController().signal,
+): Promise<unknown> {
+  const rpcId = randomUUID()
+  const response = await callPeer(target, `/api/${method}`, {
+    type: 'client-request',
+    rpcId,
+    method,
+    payload: { args },
+  }, signal)
+  if (!response.result.ok) {
+    throw new NativePeerRpcError(response.result.error.code, response.result.error.message, response.result.error.details)
+  }
+  return response.result.value
 }
 
 function aggregateFailure(rpcId: string, message: string, code = 'gateway/internal'): ServerRpcEnvelope {
@@ -542,6 +612,8 @@ interface RemoteStreamFailure {
 interface OpenUpstreamOptions {
   onItem(value: unknown): void
   onError(error: RemoteStreamFailure): void
+  /** Physical loss of the upstream carrier, as distinct from a protocol error or an orderly end. */
+  onCarrierLoss?(error: RemoteStreamFailure): void
   onEnd(): void
   onReady?(): void
 }
@@ -559,7 +631,7 @@ function openUpstreamStream(
   options: OpenUpstreamOptions,
 ): UpstreamStream {
   const streamId = randomUUID()
-  const socket = new WebSocket(webSocketUrl(target.url, NATIVE_MUX), { headers: nativeHeaders(target) })
+  const socket = new WebSocket(nativePeerMuxUrl(target), { headers: nativeHeaders(target) })
   let closed = false
   let ended = false
   let opened = false
@@ -576,6 +648,12 @@ function openUpstreamStream(
     if (ended) return
     ended = true
     options.onError(error)
+  }
+  const carrierLoss = (error: RemoteStreamFailure): void => {
+    if (ended) return
+    ended = true
+    if (options.onCarrierLoss) options.onCarrierLoss(error)
+    else options.onError(error)
   }
   const openTimer = setTimeout(() => {
     failure({ code: 'gateway/service-unavailable', message: `${peerLabel(target)} Remote stream did not open`, details: {} })
@@ -615,11 +693,11 @@ function openUpstreamStream(
   })
   socket.on('error', () => {
     clearTimeout(openTimer)
-    if (!closed) failure({ code: 'gateway/internal', message: `${peerLabel(target)} Remote stream failed`, details: {} })
+    if (!closed) carrierLoss({ code: 'gateway/internal', message: `${peerLabel(target)} Remote stream failed`, details: {} })
   })
   socket.on('close', () => {
     clearTimeout(openTimer)
-    if (!closed) failure({ code: 'gateway/internal', message: `${peerLabel(target)} Remote stream closed`, details: {} })
+    if (!closed) carrierLoss({ code: 'gateway/internal', message: `${peerLabel(target)} Remote stream closed`, details: {} })
   })
   return {
     send(value) {
@@ -771,7 +849,11 @@ function aggregateWorkspaceStream(
   const handles: UpstreamStream[] = []
   let ready = false
   let closed = false
-  const timer = addTimeout(() => { flush() }, STREAM_BASELINE_TIMEOUT_MS)
+  let baselineDeadlineReached = false
+  const timer = addTimeout(() => {
+    baselineDeadlineReached = true
+    maybeFlush()
+  }, STREAM_BASELINE_TIMEOUT_MS)
   const unique = (values: readonly unknown[]): unknown[] => [...new Set(values)]
   const items = (): unknown[] => targets.flatMap(target => {
     const peer = peers.get(target.id)!
@@ -813,8 +895,11 @@ function aggregateWorkspaceStream(
   }
   const flush = (): void => {
     if (ready || closed) return
-    const available = targets.some(target => peers.get(target.id)?.baseline === true)
-    if (!available) {
+    const baselines = new Set(targets
+      .filter(target => peers.get(target.id)?.baseline === true)
+      .map(target => target.id))
+    if (!hasDesktopWorkspaceBaseline(targets, baselines)) {
+      if (!targets.every(target => peers.get(target.id)?.ended === true)) return
       sendMuxError(client, streamId, {
         code: 'gateway/service-unavailable',
         message: 'No deployment is available for Workspace state',
@@ -829,7 +914,11 @@ function aggregateWorkspaceStream(
     sendMuxItem(client, streamId, { type: 'baseline', value: baselineValue() })
   }
   const maybeFlush = (): void => {
-    if (targets.every(target => peers.get(target.id)?.baseline || peers.get(target.id)?.ended)) flush()
+    const baselines = new Set(targets
+      .filter(target => peers.get(target.id)?.baseline === true)
+      .map(target => target.id))
+    if (targets.every(target => peers.get(target.id)?.baseline || peers.get(target.id)?.ended)
+      || baselineDeadlineReached && hasDesktopWorkspaceBaseline(targets, baselines)) flush()
   }
   const maybeEnd = (): void => {
     if (!closed && ready && targets.every(target => peers.get(target.id)?.ended)) {
@@ -931,14 +1020,19 @@ function aggregateControlStream(
   const handles: UpstreamStream[] = []
   let ready = false
   let closed = false
-  const timer = addTimeout(() => { flush() }, STREAM_BASELINE_TIMEOUT_MS)
+  let baselineDeadlineReached = false
+  const timer = addTimeout(() => {
+    baselineDeadlineReached = true
+    maybeFlush()
+  }, STREAM_BASELINE_TIMEOUT_MS)
   const run = (operation: () => void): void => {
     if (!ready) pending.push(operation)
     else if (!closed) operation()
   }
   const flush = (): void => {
     if (ready || closed) return
-    if (baselines.size === 0) {
+    if (!hasDesktopWorkspaceBaseline(targets, new Set(baselines.keys()))) {
+      if (!targets.every(target => ended.has(target.id))) return
       sendMuxError(client, streamId, {
         code: 'gateway/service-unavailable',
         message: 'No deployment is available for Session control state',
@@ -954,7 +1048,8 @@ function aggregateControlStream(
     for (const operation of pending.splice(0)) operation()
   }
   const maybeFlush = (): void => {
-    if (targets.every(target => baselines.has(target.id) || ended.has(target.id))) flush()
+    if (targets.every(target => baselines.has(target.id) || ended.has(target.id))
+      || baselineDeadlineReached && hasDesktopWorkspaceBaseline(targets, new Set(baselines.keys()))) flush()
   }
   const maybeEnd = (): void => {
     if (!closed && ready && targets.every(target => ended.has(target.id))) {
@@ -1136,7 +1231,7 @@ function controllerUpgrade(ctx: Context, stateDir: string, server: WebSocketServ
         if (routes.get(streamId) === route) routes.delete(streamId)
       }
       const warn = (message: string): void => { ctx.logger.warn(redactSensitive(message)) }
-      client.on('message', data => {
+      client.on('message', async data => {
         const message = muxClientMessage(data)
         if (message === undefined) {
           client.close(1003, 'Invalid Remote mux frame')
@@ -1171,7 +1266,7 @@ function controllerUpgrade(ctx: Context, stateDir: string, server: WebSocketServ
         let fallback: FleetNativeTarget
         try {
           fallback = localTarget(ctx, stateDir)
-          targets = [fallback, ...fleet.nativeTargets()]
+          targets = [fallback, ...await fleet.nativeTargets()]
         } catch (error) {
           sendMuxError(client, message.streamId, {
             code: 'gateway/service-unavailable',
@@ -1196,13 +1291,41 @@ function controllerUpgrade(ctx: Context, stateDir: string, server: WebSocketServ
             stream: aggregateEventsStream(client, message.streamId, targets, state, warn, closed),
           }
         } else {
-          let target: FleetNativeTarget
+          let target: FleetNativeTarget | undefined
           try {
             target = requestOwner(message.payload, targets, fallback)
-          } catch (error) {
+          } catch (ownerError) {
+            const named = requestDeployments(message.payload)
+            if (named.length !== 1) {
+              sendMuxError(client, message.streamId, {
+                code: 'gateway/bad-request',
+                message: redactSensitive(ownerError instanceof Error ? ownerError.message : String(ownerError)),
+                details: {},
+              })
+              sendMuxEnd(client, message.streamId)
+              return
+            }
+            try {
+              target = await fleet.managementTarget(named[0]!)
+            } catch (lookupError) {
+              // Gateway unavailability is transient. Preserve DSH's carrier-recovery signal until the peer returns.
+              if (lookupError instanceof FleetControlError && lookupError.status === 502) {
+                client.close(1012, 'Deployment is reconnecting')
+                return
+              }
+              sendMuxError(client, message.streamId, {
+                code: 'gateway/bad-request',
+                message: redactSensitive(lookupError instanceof Error ? lookupError.message : String(lookupError)),
+                details: {},
+              })
+              sendMuxEnd(client, message.streamId)
+              return
+            }
+          }
+          if (target === undefined) {
             sendMuxError(client, message.streamId, {
-              code: 'gateway/bad-request',
-              message: redactSensitive(error instanceof Error ? error.message : String(error)),
+              code: 'gateway/service-unavailable',
+              message: 'No deployment is available for this request',
               details: {},
             })
             sendMuxEnd(client, message.streamId)
@@ -1213,27 +1336,103 @@ function controllerUpgrade(ctx: Context, stateDir: string, server: WebSocketServ
             target,
             stream: undefined as unknown as UpstreamStream,
           }
-          pending.stream = openUpstreamStream(
-            target,
-            message.endpoint,
-            outboundPeerPayload(target, message.endpoint, message.payload),
-            {
-              onItem(value) { sendMuxItem(client, message.streamId, responseValue(target, message.endpoint, value)) },
+          let received = false
+          let stopped = false
+          let retryTimer: ReturnType<typeof setTimeout> | undefined
+          let retryDelay = PEER_RETRY_INITIAL_MS
+          let upstream: UpstreamStream | undefined
+          const pendingItems: (
+            | { type: 'item'; value?: unknown }
+            | { type: 'end' }
+          )[] = []
+          const stop = (): void => {
+            stopped = true
+            clearTimeout(retryTimer)
+          }
+          const fail = (error: RemoteStreamFailure): void => {
+            stop()
+            sendMuxError(client, message.streamId, {
+              ...error,
+              message: redactSensitive(error.message),
+              details: peerResponseValue(error.details, target.id) as Record<string, unknown>,
+            })
+            sendMuxEnd(client, message.streamId)
+            remove(message.streamId, pending)
+          }
+          const retryPreSnapshot = (): void => {
+            retryTimer = addTimeout(connect, retryDelay)
+            retryDelay = Math.min(retryDelay * 2, PEER_RETRY_MAX_MS)
+          }
+          const connect = (): void => {
+            if (stopped) return
+            upstream = openUpstreamStream(target, message.endpoint,
+              outboundPeerPayload(target, message.endpoint, message.payload), {
+              onItem(value) {
+                received = true
+                retryDelay = PEER_RETRY_INITIAL_MS
+                sendMuxItem(client, message.streamId, responseValue(target, message.endpoint, value))
+              },
               onError(error) {
-                sendMuxError(client, message.streamId, {
-                  ...error,
-                  message: redactSensitive(error.message),
-                  details: peerResponseValue(error.details, target.id) as Record<string, unknown>,
-                })
-                sendMuxEnd(client, message.streamId)
-                remove(message.streamId, pending)
+                upstream = undefined
+                if (target.id !== LOCAL_TARGET_ID
+                  && message.endpoint === 'session/follow'
+                  && !received
+                  && error.code === 'gateway/service-unavailable') {
+                  // The deployment can reject an otherwise healthy mux connection while it is still restarting.
+                  // Retry only service-unavailable failures before any snapshot; protocol and authorization errors remain
+                  // terminal so a malformed request cannot be retried indefinitely.
+                  retryPreSnapshot()
+                  return
+                }
+                fail(error)
+              },
+              onCarrierLoss(error) {
+                upstream = undefined
+                if (target.id !== LOCAL_TARGET_ID && message.endpoint === 'session/follow' && !received) {
+                  // The peer can accept the mux connection while its deployment is still restarting. No history was
+                  // delivered yet, so reopening cannot duplicate a snapshot or resume an already-consumed stream.
+                  retryPreSnapshot()
+                  return
+                }
+                // Session history has no safe mid-stream resubscribe. Drop the aggregate carrier so DSH's generation
+                // recovery opens it again and replaces the history with a fresh snapshot.
+                if (target.id !== LOCAL_TARGET_ID && message.endpoint === 'session/follow') {
+                  client.close(1012, 'Deployment Session stream lost')
+                  stop()
+                  return
+                }
+                fail(error)
               },
               onEnd() {
+                stop()
+                upstream = undefined
                 sendMuxEnd(client, message.streamId)
                 remove(message.streamId, pending)
               },
+            })
+            for (const item of pendingItems.splice(0)) {
+              if (item.type === 'end') upstream.end()
+              else upstream.send(item.value)
+            }
+          }
+          pending.stream = {
+            send(value) {
+              if (stopped) return
+              if (upstream === undefined) pendingItems.push({ type: 'item', value })
+              else upstream.send(value)
             },
-          )
+            end() {
+              if (stopped) return
+              if (upstream === undefined) pendingItems.push({ type: 'end' })
+              else upstream.end()
+            },
+            close() {
+              if (stopped) return
+              stop()
+              upstream?.close()
+            },
+          }
+          connect()
           route = pending
         }
         routes.set(message.streamId, route)
@@ -1404,7 +1603,7 @@ function controlHttp(ctx: Context, stateDir: string, state: NativeControllerStat
     let fallback: FleetNativeTarget
     try {
       fallback = localTarget(ctx, stateDir)
-      targets = [fallback, ...fleet.nativeTargets()]
+      targets = [fallback, ...await fleet.nativeTargets()]
     } catch (error) {
       response.writeHead(503, { 'content-type': 'text/plain; charset=utf-8' })
       response.end(redactSensitive(error instanceof Error ? error.message : String(error)))
@@ -1471,6 +1670,8 @@ function controlHttp(ctx: Context, stateDir: string, state: NativeControllerStat
  */
 export function registerNativeTransport(ctx: Context, stateDir: string, role: NativeRole): () => void {
   if (!isLoopbackHost(ctx.webServer.host)) throw new Error('Native Session routing requires a loopback Web server')
+  // The process that owns the state directory creates the capability; the controller and service script only read it.
+  nativeToken(stateDir)
   const server = new WebSocketServer({ noServer: true, perMessageDeflate: false })
   const disposers: (() => void)[] = []
   const eventCookies: EventCookies = new Map()

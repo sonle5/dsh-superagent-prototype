@@ -1,12 +1,12 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { gzipSync } from 'node:zlib'
 import { afterEach, expect, it, vi } from 'vitest'
 import WebSocket, { WebSocketServer } from 'ws'
-import { registerNativeTransport } from '../src/app/native-transport.ts'
+import { nativePeerRpc, registerNativeTransport } from '../src/app/native-transport.ts'
 import { nativeEventId, nativeSessionId, nativeWorkspaceId } from '../src/app/native-aggregate.ts'
 import { nativeToken } from '../src/app/native-auth.ts'
 
@@ -19,7 +19,7 @@ type RpcEnvelope = {
   payload: unknown
 }
 type PeerReply =
-  | { ok: true; value: unknown }
+  | { ok: true; value?: unknown }
   | { ok: false; error: { code: string; message: string; details: object } }
 type StreamRequest = {
   type: 'open'
@@ -62,6 +62,14 @@ function emptyDesktopStream(request: StreamRequest, send: (value: unknown) => vo
   }
 }
 
+/** Provision the native capabilities that each fixture deployment would create during its own startup. */
+function provisionFleet(state: string): void {
+  try {
+    const registry = JSON.parse(readFileSync(join(state, 'fleet.json'), 'utf8')) as { deployments?: { stateDir: string }[] }
+    for (const deployment of registry.deployments ?? []) nativeToken(deployment.stateDir)
+  } catch { /* The controller can also start with no registry. */ }
+}
+
 type LocalDesktop = {
   onHttp?: (envelope: RpcEnvelope) => PeerReply | Promise<PeerReply>
   onStream?: (request: StreamRequest, send: (value: unknown) => void) => void | Promise<void>
@@ -69,6 +77,7 @@ type LocalDesktop = {
 
 /** A controller profile whose own Desktop API answers through `local`, as the Desktop Host does behind the controller. */
 async function controllerHarness(state: string, local: LocalDesktop = {}): Promise<string> {
+  provisionFleet(state)
   let connectionRequest: ((request: IncomingMessage, response: ServerResponse, next: () => Promise<void>) => Promise<void>) | undefined
   let controllerUpgrade: UpgradeHandler | undefined
   let localNative: Handler | undefined
@@ -162,7 +171,11 @@ async function peerHarness(options: {
   stateDir: string
   port?: number
   onHttp?: (envelope: RpcEnvelope) => PeerReply | Promise<PeerReply>
-  onStream?: (request: StreamRequest, send: (value: unknown) => void) => void | Promise<void>
+  onStream?: (
+    request: StreamRequest,
+    send: (value: unknown) => void,
+    fail: (error: { code: string; message: string; details: object }) => void,
+  ) => void | Promise<void>
 }): Promise<{
   url: string
   calls: RpcEnvelope[]
@@ -211,7 +224,12 @@ async function peerHarness(options: {
               client.send(JSON.stringify({ type: 'item', streamId: frame.streamId, value }))
             }
           }
-          void options.onStream?.(frame, send)
+          const fail = (error: { code: string; message: string; details: object }): void => {
+            if (client.readyState === WebSocket.OPEN) {
+              client.send(JSON.stringify({ type: 'error', streamId: frame.streamId, error }))
+            }
+          }
+          void options.onStream?.(frame, send, fail)
           return
         }
         uplinks.push(frame)
@@ -269,6 +287,31 @@ async function nativeCall(url: string, method: string, payload: unknown, rpcId =
   expect(response.status).toBe(200)
   return await response.json() as Record<string, unknown>
 }
+
+it('accepts a successful unary RPC that has no value', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'dsh-native-rpc-void-'))
+  cleanup.push(() => rmSync(state, { recursive: true, force: true }))
+  const peer = await peerHarness({
+    stateDir: state,
+    onHttp: () => ({ ok: true }),
+  })
+  const target = {
+    id: 'sglang',
+    remote: false,
+    repository: 'onenexus-team/sglang',
+    url: peer.url,
+    nativeUrl: peer.url,
+    profile: 'superagent-sglang',
+    stateDir: state,
+    workspace: '/tmp/sglang',
+    token: nativeToken(state)!,
+  }
+
+  await expect(nativePeerRpc(target, 'credentials/set', {
+    ref: 'EXAMPLE_API_KEY',
+    value: 'not-returned',
+  })).resolves.toBeUndefined()
+})
 
 function socketOpen(socket: WebSocket): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -521,6 +564,7 @@ it('aggregates native Sessions across every registered deployment', async () => 
       workspace: `/Users/alice/src/${item.id}`,
     })),
   }))
+  provisionFleet(state)
 
   let connectionRequest: ((request: IncomingMessage, response: ServerResponse, next: () => Promise<void>) => Promise<void>) | undefined
   const controllerCtx = {
@@ -1582,6 +1626,268 @@ it('merges Session events, takes global events only from the Desktop profile, an
       },
     })
   })
+})
+
+it('reconnects the aggregate carrier when a remote Session history stream restarts', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'dsh-native-session-restart-'))
+  cleanup.push(() => rmSync(state, { recursive: true, force: true }))
+  const sglang = await peerHarness({
+    stateDir: join(state, 'sglang'),
+    onStream(request, send) {
+      if (request.endpoint !== 'session/follow') return
+      send({
+        type: 'snapshot',
+        header: { version: 1, id: 'sglang-session', createdAt: 1, isSeeded: false },
+        cursor: 1,
+        records: [],
+        hasMore: false,
+        projections: { asOfSeq: 1, values: { title: 'SGLang history' } },
+      })
+    },
+  })
+  writeFileSync(join(state, 'fleet.json'), JSON.stringify({
+    version: 1,
+    controlScript: '/usr/bin/true',
+    logDir: state,
+    deployments: [{
+      id: 'sglang',
+      profile: 'superagent-sglang',
+      repository: 'onenexus-team/sglang',
+      url: sglang.url,
+      stateDir: join(state, 'sglang'),
+      workspace: '/tmp/sglang',
+    }],
+  }))
+  const controller = await controllerHarness(state)
+  const { socket, next } = await openMux(controller)
+  socket.send(JSON.stringify({
+    type: 'open',
+    streamId: 'history',
+    endpoint: 'session/follow',
+    payload: {
+      args: [{
+        address: { kind: 'session', sessionId: nativeSessionId('sglang', 'sglang-session') },
+        assistantStream: true,
+      }],
+    },
+  }))
+  expect(await next()).toMatchObject({
+    type: 'item',
+    streamId: 'history',
+    value: { type: 'snapshot', header: { id: nativeSessionId('sglang', 'sglang-session') } },
+  })
+
+  const closed = new Promise<{ code: number; reason: string }>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Controller carrier remained open')), 3_000)
+    socket.once('close', (code, reason) => {
+      clearTimeout(timer)
+      resolve({ code, reason: reason.toString() })
+    })
+  })
+  await sglang.stop()
+  expect(await closed).toEqual({ code: 1012, reason: 'Deployment Session stream lost' })
+})
+
+it('reopens a remote Session history stream that loses its carrier before the first snapshot', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'dsh-native-session-initial-retry-'))
+  cleanup.push(() => rmSync(state, { recursive: true, force: true }))
+  const port = await freePort()
+  const initialOpen = Promise.withResolvers<void>()
+  const sglang = await peerHarness({
+    stateDir: join(state, 'sglang'),
+    port,
+    onStream(request) {
+      if (request.endpoint === 'session/follow') initialOpen.resolve()
+    },
+  })
+  writeFileSync(join(state, 'fleet.json'), JSON.stringify({
+    version: 1,
+    controlScript: '/usr/bin/true',
+    logDir: state,
+    deployments: [{
+      id: 'sglang',
+      profile: 'superagent-sglang',
+      repository: 'onenexus-team/sglang',
+      url: sglang.url,
+      stateDir: join(state, 'sglang'),
+      workspace: '/tmp/sglang',
+    }],
+  }))
+  const controller = await controllerHarness(state)
+  const { socket, next } = await openMux(controller)
+  socket.send(JSON.stringify({
+    type: 'open',
+    streamId: 'history',
+    endpoint: 'session/follow',
+    payload: {
+      args: [{
+        address: { kind: 'session', sessionId: nativeSessionId('sglang', 'sglang-session') },
+        assistantStream: true,
+      }],
+    },
+  }))
+  await initialOpen.promise
+  await sglang.stop()
+
+  await peerHarness({
+    stateDir: join(state, 'sglang'),
+    port,
+    onStream(request, send) {
+      if (request.endpoint !== 'session/follow') return
+      send({
+        type: 'snapshot',
+        header: { version: 1, id: 'sglang-session', createdAt: 1, isSeeded: false },
+        cursor: 1,
+        records: [],
+        hasMore: false,
+        projections: { asOfSeq: 1, values: { title: 'SGLang history' } },
+      })
+    },
+  })
+
+  expect(await next()).toMatchObject({
+    type: 'item',
+    streamId: 'history',
+    value: { type: 'snapshot', header: { id: nativeSessionId('sglang', 'sglang-session') } },
+  })
+})
+
+it('reopens a remote Session history stream that reports service unavailable before its first snapshot', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'dsh-native-session-open-retry-'))
+  cleanup.push(() => rmSync(state, { recursive: true, force: true }))
+  let attempts = 0
+  const sglang = await peerHarness({
+    stateDir: join(state, 'sglang'),
+    onStream(request, send, fail) {
+      if (request.endpoint !== 'session/follow') return
+      attempts += 1
+      if (attempts === 1) {
+        fail({ code: 'gateway/service-unavailable', message: 'Deployment is restarting', details: {} })
+        return
+      }
+      send({
+        type: 'snapshot',
+        header: { version: 1, id: 'sglang-session', createdAt: 1, isSeeded: false },
+        cursor: 1,
+        records: [],
+        hasMore: false,
+        projections: { asOfSeq: 1, values: { title: 'SGLang history' } },
+      })
+    },
+  })
+  writeFileSync(join(state, 'fleet.json'), JSON.stringify({
+    version: 1,
+    controlScript: '/usr/bin/true',
+    logDir: state,
+    deployments: [{
+      id: 'sglang',
+      profile: 'superagent-sglang',
+      repository: 'onenexus-team/sglang',
+      url: sglang.url,
+      stateDir: join(state, 'sglang'),
+      workspace: '/tmp/sglang',
+    }],
+  }))
+  const controller = await controllerHarness(state)
+  const { socket, next } = await openMux(controller)
+  socket.send(JSON.stringify({
+    type: 'open',
+    streamId: 'history',
+    endpoint: 'session/follow',
+    payload: {
+      args: [{
+        address: { kind: 'session', sessionId: nativeSessionId('sglang', 'sglang-session') },
+        assistantStream: true,
+      }],
+    },
+  }))
+
+  expect(await next()).toMatchObject({
+    type: 'item',
+    streamId: 'history',
+    value: { type: 'snapshot', header: { id: nativeSessionId('sglang', 'sglang-session') } },
+  })
+  expect(attempts).toBe(2)
+})
+
+it('does not retry a terminal error while opening a remote Session history stream', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'dsh-native-session-open-error-'))
+  cleanup.push(() => rmSync(state, { recursive: true, force: true }))
+  let attempts = 0
+  const sglang = await peerHarness({
+    stateDir: join(state, 'sglang'),
+    onStream(request, _send, fail) {
+      if (request.endpoint !== 'session/follow') return
+      attempts += 1
+      fail({ code: 'gateway/bad-request', message: 'Session does not belong to this deployment', details: {} })
+    },
+  })
+  writeFileSync(join(state, 'fleet.json'), JSON.stringify({
+    version: 1,
+    controlScript: '/usr/bin/true',
+    logDir: state,
+    deployments: [{
+      id: 'sglang',
+      profile: 'superagent-sglang',
+      repository: 'onenexus-team/sglang',
+      url: sglang.url,
+      stateDir: join(state, 'sglang'),
+      workspace: '/tmp/sglang',
+    }],
+  }))
+  const controller = await controllerHarness(state)
+  const { socket, next } = await openMux(controller)
+  socket.send(JSON.stringify({
+    type: 'open',
+    streamId: 'history',
+    endpoint: 'session/follow',
+    payload: {
+      args: [{
+        address: { kind: 'session', sessionId: nativeSessionId('sglang', 'sglang-session') },
+        assistantStream: true,
+      }],
+    },
+  }))
+
+  expect(await next()).toMatchObject({
+    type: 'error',
+    streamId: 'history',
+    error: { code: 'gateway/bad-request', message: 'Session does not belong to this deployment' },
+  })
+  expect(await next()).toMatchObject({ type: 'end', streamId: 'history' })
+  expect(attempts).toBe(1)
+})
+
+it('keeps carrier recovery open while a scoped deployment is temporarily unavailable', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'dsh-native-session-reconnect-'))
+  cleanup.push(() => rmSync(state, { recursive: true, force: true }))
+  writeFileSync(join(state, 'fleet.json'), JSON.stringify({ version: 1, deployments: [] }))
+  writeFileSync(join(state, 'gateway.json'), JSON.stringify({
+    version: 1,
+    url: 'http://127.0.0.1:9',
+    token: 'gateway-session',
+  }))
+  const controller = await controllerHarness(state)
+  const { socket } = await openMux(controller)
+  const closed = new Promise<{ code: number; reason: string }>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Controller carrier remained open')), 3_000)
+    socket.once('close', (code, reason) => {
+      clearTimeout(timer)
+      resolve({ code, reason: reason.toString() })
+    })
+  })
+  socket.send(JSON.stringify({
+    type: 'open',
+    streamId: 'history',
+    endpoint: 'session/follow',
+    payload: {
+      args: [{
+        address: { kind: 'session', sessionId: nativeSessionId('sglang', 'sglang-session') },
+        assistantStream: true,
+      }],
+    },
+  }))
+  expect(await closed).toEqual({ code: 1012, reason: 'Deployment is reconnecting' })
 })
 
 it('keeps Desktop Workspace, control, and event streams open when every deployment is offline', async () => {

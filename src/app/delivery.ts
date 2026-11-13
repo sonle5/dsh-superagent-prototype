@@ -14,6 +14,12 @@ declare module '@deepseek-ai/dsh-llm' {
 type Seen = { ids: Set<string>; loaded?: Promise<void> }
 /** The id of the message delivered under `requestId`, the same on every retry. */
 export const messageId = (requestId: string) => MessageId(`dsh-superagent:${requestId}`)
+/** Whether a message is a relay that must eventually wake its agent rather than wait for unrelated input. */
+function isRelay(message: UserMessage): boolean {
+  const source: { kind: string; plugin?: unknown; form?: unknown } = message.source
+  const producer = source.kind === 'dsh-superagent' || source.kind === 'plugin' && source.plugin === 'dsh-superagent'
+  return producer && source.form === 'relay'
+}
 /** Extracts the idempotency key from current or legacy plugin message sources. */
 function deliveryId(message: UserMessage): string | undefined {
   // Persisted sources may predate the current producer-specific source map.
@@ -30,12 +36,25 @@ function deliveryId(message: UserMessage): string | undefined {
  */
 export class AgentDelivery {
   private readonly seen = new WeakMap<Session, Seen>()
-  constructor(private readonly ctx: Context) {
+  constructor(private readonly ctx: Context, private readonly wakeId: string) {
+    // A steer can race the end of its turn and remain in next-step after the driver becomes idle.
+    // Promote relays at that boundary so a queued report cannot disappear without an unrelated wake.
+    ctx.on('agent/status', ({ agent, status }) => {
+      if (status === 'idle') queueMicrotask(() => this.wakePendingRelays(agent))
+    })
     ctx.on('session/event', (session, event) => {
       if (event.type !== 'user/message') return
       const id = deliveryId(event.data)
       if (id) this.seen.get(session)?.ids.add(id)
     })
+  }
+  /** Promotes relays left in next-step by an earlier process, after the Session has finished resuming. */
+  recover(agent: Agent): void { this.wakePendingRelays(agent) }
+  private wakePendingRelays(agent: Agent): void {
+    if (agent.id !== this.wakeId || agent.status !== 'idle') return
+    for (const message of [...agent.inbox.nextStep]) {
+      if (isRelay(message) && agent.inbox.remove(message.id)) agent.followup(message)
+    }
   }
   private async history(agent: Agent): Promise<Seen> {
     let seen = this.seen.get(agent.session)
@@ -77,7 +96,9 @@ export class AgentDelivery {
         : { kind: 'dsh-superagent' as const, form: 'relay' as const }
       const message = freezeMessage({ id, role: 'user' as const, content: [{ type: 'text' as const, text }], source })
       if (typeof mode === 'object') { agent.inject(message); seen.ids.add(id) }
-      else if (mode === 'steer') agent.steer(message)
+      else if (mode === 'steer' && agent.status === 'running') agent.steer(message)
+      // Steering cannot start an idle turn, so a relay queued after the main Session finishes must wake it.
+      else if (mode === 'steer') agent.followup(message)
       else agent.followup(message)
     }
     accepted?.()

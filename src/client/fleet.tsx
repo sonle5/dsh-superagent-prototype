@@ -1,4 +1,5 @@
 /** Native fleet overview: aggregate health, work, Triggers, workspaces, logs, and lifecycle actions per deployment. */
+import { useState, type FormEvent } from 'react'
 import { usePoll, type FleetView } from './api.ts'
 import { Button, Dot, Icon, Tag, type DotState, type TagTone } from './controls.tsx'
 import { useAction, usePanel } from './provider.tsx'
@@ -6,6 +7,11 @@ import { Hint, LoadState, Section, When } from './widgets.tsx'
 
 type Action = 'start' | 'stop' | 'restart'
 type Deployment = FleetView['deployments'][number]
+type DeviceView = {
+  device_code: string
+  user_code: string
+  verification_uri: string
+}
 
 const dot = (status: Deployment['status']): DotState => status === 'ready' ? 'done'
   : status === 'starting' ? 'ongoing' : status === 'error' || status === 'unreachable' ? 'error'
@@ -27,6 +33,86 @@ function Controls({ deployment, run, busy }: { deployment: Deployment; run: (id:
     <Button variant="outline" size="sm" icon={<Icon name="refresh" size={14} />} disabled={busy}
       onClick={() => { void run(deployment.id, 'restart') }}>{t('fleetRestart')}</Button>
   </>
+}
+
+function CloudGateway({ reload }: { reload: () => Promise<void> }) {
+  const { t, call, notify } = usePanel()
+  const gateway = usePoll(() => call('GET gateway/status'), [], 15_000)
+  const [device, setDevice] = useState<DeviceView>()
+  const [id, setId] = useState('')
+  const [repository, setRepository] = useState('')
+  const start = useAction(async () => setDevice(await call('POST gateway/device')))
+  const complete = useAction(async () => {
+    const current = device
+    if (current === undefined) return
+    await call('POST gateway/session', { body: { device_code: current.device_code } })
+    setDevice(undefined)
+    await reload()
+    await gateway.reload()
+  })
+  const person = useAction(async () => {
+    const result = await call('POST gateway/person')
+    notify(result.created ? t('gatewayPersonCreated') : t('gatewayPersonReady'))
+    await gateway.reload()
+  })
+  const deployment = useAction(async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const result = await call('POST gateway/deployment', { body: { id, repository } })
+    notify(t('gatewayDeploymentCreated', { repository: result.deployment.repository }))
+    setId('')
+    setRepository('')
+    await reload()
+    await gateway.reload()
+  })
+  const status = gateway.data
+  return <article className="dt-card dt-fleet-card">
+    <div className="dt-card-head">
+      <div className="dt-row-main">
+        <div className="dt-row-title"><span className="dt-card-title">{t('gatewayTitle')}</span></div>
+        <div className="dt-row-meta">
+          {status?.url && <span className="dt-mono">{status.url}</span>}
+          {status?.login && <span>{t('gatewaySignedIn', { login: status.login, organization: status.organization ?? '' })}</span>}
+        </div>
+      </div>
+      <Tag tone={status?.login ? 'success' : 'quiet'}>{status?.login ? status.login : t('gatewaySignedOut')}</Tag>
+    </div>
+    <p className="dt-fleet-detail">{t('gatewayIntro')}</p>
+    {status?.error && <p className="dt-error">{status.error}</p>}
+    {!status?.configured && <Hint>{t('gatewayNotConfigured')}</Hint>}
+    {status?.configured && !status.login && <div className="dt-row-buttons">
+      <Button variant="outline" size="sm" icon={<Icon name="play" size={14} />} disabled={start.busy}
+        onClick={() => { void start.run() }}>{t('gatewaySignIn')}</Button>
+    </div>}
+    {device && <div className="dt-fleet-detail-grid">
+      <section>
+        <h3>{t('gatewayUserCode')}</h3>
+        <p className="dt-fleet-detail"><strong>{device.user_code}</strong></p>
+        <a className="dt-inline-link" href={device.verification_uri} target="_blank" rel="noopener noreferrer">
+          {device.verification_uri}</a>
+        <div className="dt-row-buttons">
+          <Button variant="outline" size="sm" disabled={complete.busy}
+            onClick={() => { void complete.run() }}>{t('gatewayCompleteSignIn')}</Button>
+        </div>
+      </section>
+    </div>}
+    {status?.login && status.person === false && <div className="dt-field">
+      <span className="dt-field-head">{t('gatewayPerson')}</span>
+      <Button variant="outline" size="sm" disabled={person.busy}
+        onClick={() => { void person.run() }}>{t('gatewayCreatePerson')}</Button>
+    </div>}
+    {status?.login && status.person && <Hint>{t('gatewayPersonReady')}</Hint>}
+    {status?.login && <form className="dt-form dt-block" onSubmit={event => { void deployment.run(event) }}>
+      <div className="dt-field">
+        <span className="dt-field-head">{t('gatewayDeploymentId')}</span>
+        <span className="dt-input"><input value={id} onChange={event => setId(event.target.value)} required /></span>
+      </div>
+      <div className="dt-field">
+        <span className="dt-field-head">{t('gatewayRepository')}</span>
+        <span className="dt-input"><input value={repository} onChange={event => setRepository(event.target.value)} required /></span>
+      </div>
+      <Button type="submit" disabled={deployment.busy}>{t('gatewayCreateDeployment')}</Button>
+    </form>}
+  </article>
 }
 
 function DeploymentCard({ deployment, run, busy }: { deployment: Deployment; run: (id: string, action: Action) => Promise<unknown>
@@ -111,6 +197,7 @@ export function FleetPage() {
     {error && <LoadState error={error} loading={false} />}
     <Section title={t('fleetTitle')} count={data.deployments.length} hint={t('fleetIntro')}>
       {data.error && <p className="dt-error">{data.error}</p>}
+      <CloudGateway reload={reload} />
       <div className="dt-fleet-grid">
         {data.deployments.map(deployment => <DeploymentCard key={deployment.id} deployment={deployment} run={act.run} busy={act.busy} />)}
       </div>

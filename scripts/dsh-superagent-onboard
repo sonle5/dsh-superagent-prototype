@@ -1,0 +1,1037 @@
+#!/usr/bin/env python3
+"""Manage fixed self-service Superagent server resources from JSON input.
+
+Run as root through a sudoers rule that names this file. The gateway supplies JSON on stdin;
+this helper never accepts an arbitrary command, unit name, credential, profile name, or path.
+"""
+
+import argparse
+from contextlib import nullcontext
+from datetime import datetime, timezone
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import secrets
+import shlex
+import shutil
+import hashlib
+import socket
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+import yaml
+
+LOGIN = re.compile(r"^[A-Za-z0-9-]+$")
+ID = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+NAME = re.compile(r"^[a-z_][a-z0-9-]*$")
+GITHUB_TOKEN = re.compile(r"^[A-Za-z0-9_-]{20,255}$")
+PORT_RANGE = range(3082, 4000)
+PROFILE_TEMPLATE = "web"
+WEB_APP_BUNDLE = "@deepseek-ai/dsh-web-app"
+ACTIONS = {"start", "stop", "restart"}
+MODEL_PROXY_PROVIDERS = {"one-nexus", "openai"}
+MODEL_PROXY_PROVIDER_MODELS = {
+    "one-nexus": [
+        {"name": "glm-5.3-sontinh", "alias": "glm-5.3-sontinh"},
+        {"name": "dsv41f-thuytinh", "alias": "dsv41f-thuytinh"},
+    ],
+    "openai": [
+        {"name": "gpt-6.1-terra", "alias": "gpt-6.1-terra"},
+        {"name": "gpt-6.1-sol", "alias": "gpt-6.1-sol"},
+        {"name": "gpt-5.6-sol", "alias": "gpt-5.6-sol"},
+    ],
+}
+MAX_LOG_LINES = 80
+MAX_OUTPUT = 64 * 1024
+GRACEFUL_STOP_SECONDS = 300
+SYSTEMD_STOP_TIMEOUT_SECONDS = 330
+SYSTEMCTL_STOP_TIMEOUT_SECONDS = 340
+MODEL_PROXY_KEY = re.compile(r"^[A-Za-z0-9_-]{16,256}$")
+
+
+class OnboardingError(Exception):
+    pass
+
+
+def require(value, pattern, name):
+    if not isinstance(value, str) or pattern.fullmatch(value) is None:
+        raise OnboardingError(f"invalid {name}")
+    return value
+
+
+def absolute(value, name):
+    if not isinstance(value, str) or not Path(value).is_absolute():
+        raise OnboardingError(f"{name} must be an absolute path")
+    return value
+
+
+def config(request):
+    required = ["gatewayUser", "gatewayGroup", "checkout", "baseDir"]
+    missing = [name for name in required if name not in request]
+    if missing:
+        raise OnboardingError(f"missing configuration: {', '.join(missing)}")
+    require(request["gatewayUser"], NAME, "gatewayUser")
+    require(request["gatewayGroup"], NAME, "gatewayGroup")
+    checkout = absolute(request["checkout"], "checkout")
+    base = absolute(request["baseDir"], "baseDir")
+    return request["gatewayUser"], request["gatewayGroup"], Path(checkout), Path(base)
+
+
+def person_plan(login, base):
+    safe = login.lower()
+    user = f"dsh-{safe}" if len(safe) <= 28 else (
+        f"dsh-{safe[:19]}-{hashlib.sha256(safe.encode()).hexdigest()[:8]}")
+    home = base / "people" / login
+    return user, home, {
+        "user": user,
+        "home": str(home),
+        "dshHome": str(home / "dsh-home"),
+    }
+
+
+def model_proxy_plan(login, base):
+    safe = login.lower()
+    candidate = f"dsh-{safe}-models"
+    user = candidate if len(candidate) <= 32 else f"dsh-m-{hashlib.sha256(safe.encode()).hexdigest()[:16]}"
+    state = base / "model-proxies" / login
+    legacy = base / "people" / login / "model-proxy"
+    return user, state, legacy, {
+        "user": user,
+        "stateDir": str(state),
+        "legacyStateDir": str(legacy),
+        "config": str(state / "config.yaml"),
+        "authDir": str(state / "auth"),
+        "managementSecret": str(state / "management-secret"),
+        "unit": f"dsh-superagent-person-{login}-model-proxy.service",
+    }
+
+
+def model_proxy_config(request):
+    value = request.get("modelProxy")
+    if not isinstance(value, dict):
+        raise OnboardingError("modelProxy configuration is required")
+    binary = absolute(value.get("binary"), "modelProxy.binary")
+    port_range = value.get("portRange")
+    if not isinstance(port_range, dict):
+        raise OnboardingError("modelProxy.portRange is required")
+    start = port_range.get("start")
+    end = port_range.get("end")
+    if isinstance(start, bool) or not isinstance(start, int) or not 1024 <= start <= 65535:
+        raise OnboardingError("modelProxy.portRange.start must be between 1024 and 65535")
+    if isinstance(end, bool) or not isinstance(end, int) or not start <= end <= 65535:
+        raise OnboardingError("modelProxy.portRange.end must be between start and 65535")
+    if end - start + 1 > 1000:
+        raise OnboardingError("modelProxy.portRange may contain at most 1000 ports")
+    return Path(binary), start, end
+
+
+def used_port(values):
+    ports = set()
+    if not isinstance(values, list):
+        raise OnboardingError("usedPorts must be a list")
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        match = re.search(r":(\d+)$", value)
+        if match is not None:
+            ports.add(int(match.group(1)))
+    for port in PORT_RANGE:
+        if port not in ports:
+            return port
+    raise OnboardingError("no deployment port is available")
+
+
+def configured_model_proxy_port(state):
+    path = state / "config.yaml"
+    if not path.is_file():
+        return None
+    try:
+        data = yaml.safe_load(path.read_text())
+    except (OSError, yaml.YAMLError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    server = data.get("server")
+    for port in (
+        server.get("port") if isinstance(server, dict) else None,
+        data.get("port"),
+    ):
+        if isinstance(port, int) and not isinstance(port, bool):
+            return port
+    return None
+
+
+def port_is_available(port):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            listener.bind(("127.0.0.1", port))
+        except OSError:
+            return False
+    return True
+
+
+def allocate_model_proxy_port(login, state, start, end):
+    current = configured_model_proxy_port(state)
+    if current is not None and start <= current <= end:
+        return current
+    occupied = set()
+    root = state.parent
+    if root.exists():
+        for candidate in root.glob("*/config.yaml"):
+            if candidate == state / "config.yaml":
+                continue
+            port = configured_model_proxy_port(candidate.parent)
+            if port is not None:
+                occupied.add(port)
+    count = end - start + 1
+    offset = int(hashlib.sha256(login.lower().encode()).hexdigest()[:8], 16) % count
+    for index in range(count):
+        port = start + ((offset + index) % count)
+        if port not in occupied and port_is_available(port):
+            return port
+    raise OnboardingError("no protected model-proxy port is available")
+
+
+def model_proxy_lock(base):
+    path = base / "model-proxies.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    handle = os.fdopen(descriptor, "a+")
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    return handle
+
+
+def write(path, content, mode=0o600, user=None, group=None):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(content)
+    os.chmod(temporary, mode)
+    if user is not None:
+        shutil.chown(temporary, user=user, group=group or user)
+    os.replace(temporary, path)
+
+
+def run_checked(command):
+    subprocess.run(command, check=True, stdout=subprocess.DEVNULL)
+
+
+def deployment_unit(login, deployment_id):
+    return f"dsh-superagent-person-{login}-{deployment_id}.service"
+
+
+def systemctl_state(unit):
+    result = subprocess.run(
+        ["systemctl", "is-active", unit],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    state = (result.stdout or result.stderr).strip().splitlines()
+    return state[-1] if state else "unknown"
+
+
+def systemctl_action(login, deployment_id, action, dry):
+    unit = deployment_unit(login, deployment_id)
+    if dry:
+        return {"id": deployment_id, "action": action, "state": "unchanged", "unit": unit, "output": ""}
+    timeout = SYSTEMCTL_STOP_TIMEOUT_SECONDS if action in {"stop", "restart"} else 300
+    try:
+        result = subprocess.run(
+            ["systemctl", action, unit],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise OnboardingError(f"systemctl {action} timed out") from error
+    output = "\n".join(value.strip() for value in (result.stdout, result.stderr) if value.strip())
+    if result.returncode != 0:
+        raise OnboardingError(output[-MAX_OUTPUT:] or f"systemctl {action} exited {result.returncode}")
+    return {
+        "id": deployment_id,
+        "action": action,
+        "state": systemctl_state(unit),
+        "unit": unit,
+        "output": output[-MAX_OUTPUT:],
+    }
+
+
+def systemctl_status(login, deployment_id, dry):
+    unit = deployment_unit(login, deployment_id)
+    return {"id": deployment_id, "state": "unchanged" if dry else systemctl_state(unit), "unit": unit}
+
+
+def journal_logs(login, deployment_id, lines, dry):
+    if isinstance(lines, bool) or not isinstance(lines, int) or not 1 <= lines <= MAX_LOG_LINES:
+        raise OnboardingError(f"lines must be between 1 and {MAX_LOG_LINES}")
+    unit = deployment_unit(login, deployment_id)
+    if dry:
+        return {"id": deployment_id, "state": "unchanged", "unit": unit, "tail": ""}
+    try:
+        result = subprocess.run(
+            ["journalctl", "-u", unit, "-n", str(lines), "--no-pager", "-o", "cat"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise OnboardingError("journal read timed out") from error
+    if result.returncode != 0:
+        raise OnboardingError(result.stderr.strip()[-MAX_OUTPUT:] or f"journalctl exited {result.returncode}")
+    return {
+        "id": deployment_id,
+        "state": systemctl_state(unit),
+        "unit": unit,
+        "tail": result.stdout[-MAX_OUTPUT:],
+    }
+
+
+def profile_patch(state_dir, port):
+    return f"""- id: webserver
+  config:
+    host: 127.0.0.1
+    port: {port}
+- id: dsh-superagent
+  config:
+    stateDir: {json.dumps(str(state_dir))}
+"""
+
+
+def profile_has_bundle(profile_dir, bundle):
+    try:
+        manifest = json.loads((profile_dir / "package.json").read_text())
+        return bundle in manifest["dsh"]["profile"]["bundles"]
+    except (FileNotFoundError, KeyError, TypeError, json.JSONDecodeError):
+        return False
+
+
+def env_content(profile, url, state_dir, artifacts, dsh_home):
+    return f"""DSH_HOME={dsh_home}
+DSH_SUPERAGENT_PROFILE={profile}
+DSH_SUPERAGENT_URL={url}
+DSH_SUPERAGENT_STATE_DIR={state_dir}
+DSH_SUPERAGENT_ARTIFACTS={artifacts}
+"""
+
+
+def unit_content(user, checkout, env_path, profile, url, state_dir):
+    return f"""[Unit]
+Description=DeepSeek Harness Superagent deployment for {user} {profile}
+After=network-online.target dsh-superagent-gateway.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User={user}
+Group={user}
+EnvironmentFile={env_path}
+WorkingDirectory={checkout}
+ExecStart={checkout}/scripts/dsh-superagent start --profile {profile} --url {url} --state-dir {state_dir}
+ExecStop={checkout}/scripts/dsh-superagent stop --profile {profile} --url {url} --state-dir {state_dir} --stop-timeout {GRACEFUL_STOP_SECONDS}
+TimeoutStopSec={SYSTEMD_STOP_TIMEOUT_SECONDS}
+SuccessExitStatus=2 3
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
+def model_proxy_unit_content(user, binary, state_dir, port):
+    return f"""[Unit]
+Description=Per-person protected model proxy for {user}
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={user}
+Group={user}
+WorkingDirectory={state_dir}
+Environment=HOME={state_dir}
+Environment=DSH_MODEL_PROXY_PORT={port}
+UMask=0077
+ExecStart={binary} -config {state_dir}/config.yaml
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=yes
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+ReadWritePaths={state_dir}
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
+def health_unit_content(user, checkout, env_path, profile, url, state_dir, unit_name, recover_unit_name):
+    return f"""[Unit]
+Description=DeepSeek Harness Superagent health check for {unit_name}
+After={unit_name}
+OnFailure={recover_unit_name}
+
+[Service]
+Type=oneshot
+User={user}
+Group={user}
+EnvironmentFile={env_path}
+WorkingDirectory={checkout}
+ExecStart={checkout}/scripts/dsh-superagent status --profile {profile} --url {url} --state-dir {state_dir}
+"""
+
+
+def recover_unit_content(user, checkout, env_path, profile, url, state_dir):
+    return f"""[Unit]
+Description=DeepSeek Harness Superagent automatic recovery for {profile}
+
+[Service]
+Type=oneshot
+KillMode=process
+User={user}
+Group={user}
+EnvironmentFile={env_path}
+WorkingDirectory={checkout}
+ExecStart={checkout}/scripts/dsh-superagent-recover --profile {profile} --url {url} --state-dir {state_dir}
+"""
+
+
+def timer_unit_content(health_unit_name):
+    return f"""[Unit]
+Description=DeepSeek Harness Superagent health timer for {health_unit_name}
+
+[Timer]
+OnCalendar=*-*-* *:0/5
+RandomizedDelaySec=30s
+Persistent=true
+Unit={health_unit_name}
+
+[Install]
+WantedBy=timers.target
+"""
+
+
+def agent_wrapper(person_home, deployment_id, token, gh):
+    path = person_home / "bin" / f"agent-{deployment_id}"
+    return path, f"""#!/bin/sh
+exec env GH_TOKEN={shlex.quote(token)} {shlex.quote(gh)} "$@"
+"""
+
+
+def create_person(login, base, dry):
+    user, home, result = person_plan(login, base)
+    if not dry:
+        if subprocess.run(["getent", "passwd", user], capture_output=True).returncode != 0:
+            run_checked(["useradd", "--system", "--user-group", "--home-dir", str(home), "--create-home",
+                         "--shell", "/usr/sbin/nologin", user])
+        for path in [home, home / "dsh-home", home / "deployments", home / "worktrees", home / "artifacts"]:
+            path.mkdir(parents=True, exist_ok=True)
+            shutil.chown(path, user=user, group=user)
+        os.chmod(home, 0o700)
+    return result
+
+
+def create_model_proxy_user(login, base, dry):
+    user, state, legacy, result = model_proxy_plan(login, base)
+    if not dry:
+        if subprocess.run(["getent", "passwd", user], capture_output=True).returncode != 0:
+            run_checked(["useradd", "--system", "--user-group", "--home-dir", str(state), "--no-create-home",
+                         "--shell", "/usr/sbin/nologin", user])
+        state.mkdir(parents=True, exist_ok=True)
+        shutil.chown(state, user=user, group=user)
+        os.chmod(state, 0o700)
+    return result
+
+
+def chown_proxy_tree(root, user):
+    for current, directories, files in os.walk(root):
+        shutil.chown(current, user=user, group=user)
+        os.chmod(current, 0o700)
+        for name in directories:
+            path = Path(current) / name
+            shutil.chown(path, user=user, group=user)
+            os.chmod(path, 0o700)
+        for name in files:
+            path = Path(current) / name
+            shutil.chown(path, user=user, group=user)
+            os.chmod(path, 0o600)
+
+
+def backup_proxy_state(base, login, source):
+    root = base / "backups" / "model-proxies"
+    root.mkdir(parents=True, exist_ok=True)
+    os.chmod(root, 0o700)
+    shutil.chown(root, user="root", group="root")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    target = root / f"{login}-{stamp}"
+    target.mkdir(mode=0o700)
+    if source.exists():
+        shutil.copytree(source, target / "state", symlinks=True)
+    return target
+
+
+def ensure_model_proxy(request, dry):
+    login = require(request.get("login"), LOGIN, "login")
+    _gateway_user, _gateway_group, _checkout, base = config(request)
+    binary, start, end = model_proxy_config(request)
+    user, state, legacy, plan = model_proxy_plan(login, base)
+    unit_path = Path("/etc/systemd/system") / plan["unit"]
+    lock = None if dry else model_proxy_lock(base)
+    with nullcontext() if lock is None else lock:
+        port = allocate_model_proxy_port(login, state, start, end)
+        if dry:
+            return {
+                **plan,
+                "port": port,
+                "binary": str(binary),
+                "unitContent": model_proxy_unit_content(user, binary, state, port),
+            }
+
+        create_model_proxy_user(login, base, False)
+        if not binary.is_file() or not os.access(binary, os.X_OK):
+            raise OnboardingError("model proxy binary is not executable")
+
+        previous_unit = unit_path.read_bytes() if unit_path.exists() else None
+        previous_active = subprocess.run(["systemctl", "is-active", plan["unit"]], capture_output=True).stdout.strip()
+        backup = None
+        migrated = False
+        try:
+            subprocess.run(["systemctl", "stop", plan["unit"]], check=False, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL)
+            if legacy.exists() and legacy != state:
+                backup = backup_proxy_state(base, login, legacy)
+                if state.exists():
+                    state_backup = backup / "existing-state"
+                    shutil.copytree(state, state_backup, symlinks=True)
+                    shutil.rmtree(state)
+                shutil.move(str(legacy), str(state))
+                migrated = True
+            elif state.exists():
+                backup = backup_proxy_state(base, login, state)
+
+            state.mkdir(parents=True, exist_ok=True)
+            (state / "auth").mkdir(parents=True, exist_ok=True)
+            chown_proxy_tree(state, user)
+
+            config_path = state / "config.yaml"
+            if config_path.exists():
+                data = yaml.safe_load(config_path.read_text()) or {}
+                if not isinstance(data, dict):
+                    raise OnboardingError("model proxy config must be a YAML mapping")
+            else:
+                data = {}
+            management_secret_path = state / "management-secret"
+            if management_secret_path.exists():
+                management_secret = management_secret_path.read_text().strip()
+            else:
+                management_secret = secrets.token_urlsafe(48)
+            remote = data.get("remote-management")
+            if not isinstance(remote, dict):
+                remote = {}
+            remote.update({
+                "allow-remote": False,
+                "disable-control-panel": True,
+                "secret-key": management_secret,
+            })
+            data.update({
+                "host": "127.0.0.1",
+                "port": port,
+                "tls": {"enable": False, "cert": ""},
+                "remote-management": remote,
+                "auth-dir": str(state / "auth"),
+            })
+            data.setdefault("api-keys", [])
+            write(config_path, yaml.safe_dump(data, sort_keys=False), user=user, group=user)
+            write(management_secret_path, f"{management_secret}\n", mode=0o600, user="root", group="root")
+            write(unit_path, model_proxy_unit_content(user, binary, state, port), mode=0o644)
+            run_checked(["systemctl", "daemon-reload"])
+            run_checked(["systemctl", "enable", "--now", plan["unit"]])
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                try:
+                    management_request(state, "GET", "/config/access/api-keys", secret=management_secret)
+                    break
+                except OnboardingError:
+                    time.sleep(0.5)
+            else:
+                raise OnboardingError("model proxy did not become healthy in time")
+            return {**plan, "port": port, "binary": str(binary), "status": "ready",
+                    "backup": str(backup) if backup is not None else None}
+        except Exception:
+            subprocess.run(["systemctl", "stop", plan["unit"]], check=False, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL)
+            if backup is not None:
+                if state.exists():
+                    shutil.rmtree(state, ignore_errors=True)
+                restored = backup / "state"
+                if restored.exists():
+                    destination = legacy if migrated else state
+                    shutil.copytree(restored, destination, symlinks=True)
+            if previous_unit is None:
+                unit_path.unlink(missing_ok=True)
+            else:
+                unit_path.write_bytes(previous_unit)
+                os.chmod(unit_path, 0o644)
+            run_checked(["systemctl", "daemon-reload"])
+            if previous_active == b"active":
+                subprocess.run(["systemctl", "start", plan["unit"]], check=False, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL)
+            raise
+
+
+def management_request(state, method, suffix, body=None, secret=None):
+    secret = secret or (state / "management-secret").read_text().strip()
+    port = configured_model_proxy_port(state)
+    if port is None:
+        raise OnboardingError("model proxy config has no valid port")
+    data = None if body is None else json.dumps(body).encode()
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/v8/management{suffix}",
+        data=data,
+        method=method,
+        headers={
+            "Authorization": f"Bearer {secret}",
+            **({"Content-Type": "application/json"} if data is not None else {}),
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            payload = response.read()
+    except urllib.error.HTTPError as error:
+        raise OnboardingError(f"model proxy management request failed with HTTP {error.code}") from error
+    except (urllib.error.URLError, TimeoutError) as error:
+        raise OnboardingError("model proxy management API is unavailable") from error
+    if not payload:
+        return None
+    try:
+        return json.loads(payload)
+    except json.JSONDecodeError as error:
+        raise OnboardingError("model proxy management API returned invalid JSON") from error
+
+
+def model_proxy_status(request, dry):
+    login = require(request.get("login"), LOGIN, "login")
+    _gateway_user, _gateway_group, _checkout, base = config(request)
+    _binary, start, end = model_proxy_config(request)
+    _user, state, _legacy, plan = model_proxy_plan(login, base)
+    port = allocate_model_proxy_port(login, state, start, end)
+    if dry:
+        return {**plan, "status": "unchanged", "baseURL": f"http://127.0.0.1:{port}/v1",
+                "providers": [], "deployments": []}
+    active = systemctl_state(plan["unit"])
+    if active != "active":
+        return {**plan, "status": active, "baseURL": f"http://127.0.0.1:{port}/v1",
+                "providers": [], "deployments": []}
+    keys = management_request(state, "GET", "/config/access/api-keys")
+    providers = management_request(state, "GET", "/config/api-keys/openai-compatibility") or []
+    provider_names = {
+        item.get("name"): bool(item.get("keys"))
+        for item in providers
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    }
+    statuses = [
+        {"id": "one-nexus", "label": "OneNexus",
+         "state": "configured" if provider_names.get("one-nexus") else "missing"},
+        {"id": "openai", "label": "OpenAI",
+         "state": "configured" if provider_names.get("openai") else "missing"},
+    ]
+    auth_dir = state / "auth"
+    auth = []
+    if auth_dir.exists():
+        for path in auth_dir.glob("*.json"):
+            if path.name.startswith("._"):
+                continue
+            try:
+                item = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            if item.get("type") != "claude" or item.get("disabled") is True:
+                continue
+            prefix = item.get("prefix")
+            connected = bool(item.get("access_token"))
+            if prefix == "nexus13":
+                statuses.append({"id": "nexus13", "label": "Nexus13",
+                                 "state": "connected" if connected else "sign-in-required"})
+            else:
+                statuses.append({"id": "claude", "label": "Claude",
+                                 "state": "connected" if connected else "sign-in-required"})
+            auth.append({"name": path.name, "provider": "nexus13" if prefix == "nexus13" else "claude",
+                         "connected": connected})
+    for provider in ("claude", "nexus13"):
+        if not any(item["id"] == provider for item in statuses):
+            statuses.append({"id": provider, "label": "Claude" if provider == "claude" else "Nexus13",
+                             "state": "missing"})
+    raw_ids = request.get("deploymentIds", [])
+    if not isinstance(raw_ids, list):
+        raise OnboardingError("deploymentIds must be a list")
+    deployment_ids = sorted(
+        deployment_id
+        for deployment_id in raw_ids
+        if isinstance(deployment_id, str)
+        and ID.fullmatch(deployment_id) is not None
+        and any(isinstance(key, str) and key.startswith(f"dsh-{deployment_id}-") for key in keys)
+    )
+    return {**plan, "status": "ready", "baseURL": f"http://127.0.0.1:{port}/v1", "providers": statuses,
+            "deployments": [{"id": item, "keyConfigured": True} for item in deployment_ids],
+            "authFiles": auth}
+
+
+def claude_start(request, dry):
+    login = require(request.get("login"), LOGIN, "login")
+    _gateway_user, _gateway_group, _checkout, base = config(request)
+    _user, state, _legacy, _plan = model_proxy_plan(login, base)
+    if dry:
+        return {"status": "unchanged", "url": "https://claude.example/authorize", "state": "dry-state",
+                "expiresAt": "2099-01-01T00:00:00Z"}
+    response = management_request(state, "GET", "/oauth/auth-url?provider=claude")
+    if not isinstance(response, dict) or response.get("status") != "ok" \
+            or not isinstance(response.get("url"), str) or not isinstance(response.get("state"), str):
+        raise OnboardingError("model proxy did not return a Claude login URL")
+    return {"url": response["url"], "state": response["state"],
+            "expiresAt": response.get("expires_at") or response.get("expiresAt")}
+
+
+def claude_callback(request, dry):
+    login = require(request.get("login"), LOGIN, "login")
+    state_token = require(request.get("state"), MODEL_PROXY_KEY, "OAuth state")
+    code = request.get("code")
+    error = request.get("error")
+    if code is None and error is None:
+        raise OnboardingError("OAuth callback needs code or error")
+    if code is not None and (not isinstance(code, str) or not 1 <= len(code) <= 16_384):
+        raise OnboardingError("invalid OAuth code")
+    if error is not None and (not isinstance(error, str) or not 1 <= len(error) <= 1024):
+        raise OnboardingError("invalid OAuth error")
+    _gateway_user, _gateway_group, _checkout, base = config(request)
+    _user, state, _legacy, _plan = model_proxy_plan(login, base)
+    if dry:
+        return {"accepted": True}
+    body = {"provider": "claude", "state": state_token}
+    if code is not None:
+        body["code"] = code
+    else:
+        body["error"] = error
+    management_request(state, "POST", "/oauth/callback", body)
+    return {"accepted": True}
+
+
+def claude_status(request, dry):
+    login = require(request.get("login"), LOGIN, "login")
+    state_token = require(request.get("state"), MODEL_PROXY_KEY, "OAuth state")
+    _gateway_user, _gateway_group, _checkout, base = config(request)
+    _user, state, _legacy, _plan = model_proxy_plan(login, base)
+    if dry:
+        return {"status": "wait"}
+    response = management_request(state, "GET", f"/oauth/status?{urllib.parse.urlencode({'state': state_token})}")
+    if not isinstance(response, dict):
+        raise OnboardingError("model proxy returned an invalid OAuth status")
+    return response
+
+
+def claude_cancel(request, dry):
+    login = require(request.get("login"), LOGIN, "login")
+    state_token = require(request.get("state"), MODEL_PROXY_KEY, "OAuth state")
+    _gateway_user, _gateway_group, _checkout, base = config(request)
+    _user, state, _legacy, _plan = model_proxy_plan(login, base)
+    if dry:
+        return {"cancelled": True}
+    response = management_request(
+        state, "DELETE", f"/oauth/session?{urllib.parse.urlencode({'state': state_token})}")
+    return {"cancelled": bool(response.get("cancelled", True)) if isinstance(response, dict) else True}
+
+
+def deployment_key_create(request, dry):
+    login = require(request.get("login"), LOGIN, "login")
+    deployment_id = require(request.get("id"), ID, "deployment id")
+    _gateway_user, _gateway_group, _checkout, base = config(request)
+    _user, state, _legacy, _plan = model_proxy_plan(login, base)
+    value = f"dsh-{deployment_id}-{secrets.token_urlsafe(24)}"
+    if dry:
+        return {"id": deployment_id, "value": "dsh-widgets-dry-run"}
+    keys = management_request(state, "GET", "/config/access/api-keys")
+    if not isinstance(keys, list) or any(not isinstance(item, str) for item in keys):
+        raise OnboardingError("model proxy returned an invalid client-key list")
+    management_request(state, "PATCH", "/config/access/api-keys", [*keys, value])
+    return {"id": deployment_id, "value": value}
+
+
+def deployment_key_revoke(request, dry):
+    login = require(request.get("login"), LOGIN, "login")
+    deployment_id = require(request.get("id"), ID, "deployment id")
+    value = require(request.get("value"), MODEL_PROXY_KEY, "proxy key")
+    if not value.startswith(f"dsh-{deployment_id}-"):
+        raise OnboardingError("proxy key does not belong to the deployment")
+    _gateway_user, _gateway_group, _checkout, base = config(request)
+    _user, state, _legacy, _plan = model_proxy_plan(login, base)
+    if dry:
+        return {"id": deployment_id, "revoked": True}
+    keys = management_request(state, "GET", "/config/access/api-keys")
+    if not isinstance(keys, list) or any(not isinstance(item, str) for item in keys):
+        raise OnboardingError("model proxy returned an invalid client-key list")
+    management_request(state, "PATCH", "/config/access/api-keys", [item for item in keys if item != value])
+    return {"id": deployment_id, "revoked": True}
+
+
+def deployment_key_prune(request, dry):
+    login = require(request.get("login"), LOGIN, "login")
+    deployment_id = require(request.get("id"), ID, "deployment id")
+    keep = require(request.get("keep"), MODEL_PROXY_KEY, "proxy key")
+    if not keep.startswith(f"dsh-{deployment_id}-"):
+        raise OnboardingError("proxy key does not belong to the deployment")
+    _gateway_user, _gateway_group, _checkout, base = config(request)
+    _user, state, _legacy, _plan = model_proxy_plan(login, base)
+    if dry:
+        return {"id": deployment_id, "pruned": True}
+    keys = management_request(state, "GET", "/config/access/api-keys")
+    if not isinstance(keys, list) or any(not isinstance(item, str) for item in keys):
+        raise OnboardingError("model proxy returned an invalid client-key list")
+    if keep not in keys:
+        raise OnboardingError("new deployment proxy key is not active")
+    prefix = f"dsh-{deployment_id}-"
+    remaining = [item for item in keys if not item.startswith(prefix)] + [keep]
+    management_request(state, "PATCH", "/config/access/api-keys", remaining)
+    return {"id": deployment_id, "pruned": True}
+
+
+def provider_key_set(request, dry):
+    login = require(request.get("login"), LOGIN, "login")
+    provider = request.get("provider")
+    if provider not in MODEL_PROXY_PROVIDERS:
+        raise OnboardingError("provider must be one-nexus or openai")
+    api_key = request.get("apiKey")
+    if not isinstance(api_key, str) or not 1 <= len(api_key) <= 16_384:
+        raise OnboardingError("invalid provider API key")
+    _gateway_user, _gateway_group, _checkout, base = config(request)
+    _user, state, _legacy, _plan = model_proxy_plan(login, base)
+    if dry:
+        return {"provider": provider, "configured": True}
+    providers = management_request(state, "GET", "/config/api-keys/openai-compatibility") or []
+    if not isinstance(providers, list) or any(not isinstance(item, dict) for item in providers):
+        raise OnboardingError("model proxy returned an invalid provider list")
+    updated = []
+    found = False
+    for item in providers:
+        if item.get("name") == provider:
+            models = item.get("models") if isinstance(item.get("models"), list) else []
+            known_models = {
+                model.get("name")
+                for model in models
+                if isinstance(model, dict) and isinstance(model.get("name"), str)
+            }
+            item = {
+                **item,
+                "keys": [{"api-key": api_key}],
+                "models": [
+                    *models,
+                    *(model for model in MODEL_PROXY_PROVIDER_MODELS[provider]
+                      if model["name"] not in known_models),
+                ],
+            }
+            found = True
+        updated.append(item)
+    if not found:
+        if provider == "one-nexus":
+            updated.append({
+                "name": "one-nexus",
+                "base-url": "https://onenexus-ws.onenexus.cloud/v1",
+                "keys": [{"api-key": api_key}],
+                "models": MODEL_PROXY_PROVIDER_MODELS["one-nexus"],
+            })
+        else:
+            updated.append({
+                "name": "openai",
+                "base-url": "https://api.openai.com/v1",
+                "keys": [{"api-key": api_key}],
+                "models": MODEL_PROXY_PROVIDER_MODELS["openai"],
+            })
+    management_request(state, "PATCH", "/config/api-keys/openai-compatibility", updated)
+    return {"provider": provider, "configured": True}
+
+
+def model_proxy(request, dry):
+    action = request.get("action")
+    if action in {"ensure", "status-ensure"}:
+        return ensure_model_proxy(request, dry)
+    handlers = {
+        "status": model_proxy_status,
+        "claude-start": claude_start,
+        "claude-callback": claude_callback,
+        "claude-status": claude_status,
+        "claude-cancel": claude_cancel,
+        "deployment-key-create": deployment_key_create,
+        "deployment-key-revoke": deployment_key_revoke,
+        "deployment-key-prune": deployment_key_prune,
+        "provider-key-set": provider_key_set,
+    }
+    handler = handlers.get(action)
+    if handler is None:
+        raise OnboardingError("unknown model proxy action")
+    return handler(request, dry)
+
+
+def person(request, dry):
+    login = require(request.get("login"), LOGIN, "login")
+    _gateway_user, _gateway_group, _checkout, base = config(request)
+    return create_person(login, base, dry)
+
+
+def deployment(request, dry):
+    login = require(request.get("login"), LOGIN, "login")
+    deployment_id = require(request.get("id"), ID, "deployment id")
+    repository = require(request.get("repository"), REPOSITORY, "repository")
+    gateway_user, gateway_group, checkout, base = config(request)
+    person_user, person_home, person_result = person_plan(login, base)
+    port = used_port(request.get("usedPorts", []))
+    profile = f"superagent-{deployment_id}"
+    state_dir = person_home / "deployments" / deployment_id
+    workspace = person_home / "worktrees" / deployment_id
+    artifacts = person_home / "artifacts"
+    token_dir = base / "gateway" / "tokens" / deployment_id
+    unit_name = f"dsh-superagent-person-{login}-{deployment_id}.service"
+    health_unit_name = f"dsh-superagent-person-{login}-{deployment_id}-health.service"
+    recover_unit_name = f"dsh-superagent-person-{login}-{deployment_id}-recover.service"
+    health_timer_name = f"dsh-superagent-person-{login}-{deployment_id}-health.timer"
+    unit_path = Path("/etc/systemd/system") / unit_name
+    health_unit_path = Path("/etc/systemd/system") / health_unit_name
+    recover_unit_path = Path("/etc/systemd/system") / recover_unit_name
+    health_timer_path = Path("/etc/systemd/system") / health_timer_name
+    env_path = Path("/etc/dsh-superagent/deployments") / f"person-{login}-{deployment_id}.env"
+    patch_path = person_home / "dsh-home" / "profiles" / profile / "cordis.patch.yml"
+    url = f"http://127.0.0.1:{port}"
+    if dry:
+        return {
+            **person_result, "id": deployment_id, "profile": profile, "repository": repository, "url": url,
+            "profileTemplate": PROFILE_TEMPLATE,
+            "stateDir": str(state_dir), "workspace": str(workspace), "tokenDir": str(token_dir), "unit": str(unit_path),
+        "healthUnit": str(health_unit_path), "recoverUnit": str(recover_unit_path), "healthTimer": str(health_timer_path),
+        }
+    create_person(login, base, False)
+    for path in [state_dir, workspace, artifacts]:
+        path.mkdir(parents=True, exist_ok=True)
+        shutil.chown(path, user=person_user, group=person_user)
+    profile_dir = person_home / "dsh-home" / "profiles" / profile
+    profile_command = ["runuser", "-u", person_user, "--", "env",
+                       f"HOME={person_home}", f"XDG_DATA_HOME={person_home / '.local' / 'share'}",
+                       f"DSH_HOME={person_home / 'dsh-home'}"]
+    if not profile_has_bundle(profile_dir, WEB_APP_BUNDLE):
+        run_checked([*profile_command, "dsh", "--profile", profile,
+                     "--from-default-profile", PROFILE_TEMPLATE, "--dump-config"])
+    run_checked([*profile_command, "dsh", "plugin", "--profile", profile, "add", f"link:{checkout}"])
+    write(patch_path, profile_patch(state_dir, port), user=person_user, group=person_user)
+    write(env_path, env_content(profile, url, state_dir, artifacts, person_home / "dsh-home"))
+    write(unit_path, unit_content(person_user, checkout, env_path, profile, url, state_dir), mode=0o644)
+    write(health_unit_path,
+          health_unit_content(person_user, checkout, env_path, profile, url, state_dir, unit_name, recover_unit_name),
+          mode=0o644)
+    write(recover_unit_path, recover_unit_content(person_user, checkout, env_path, profile, url, state_dir), mode=0o644)
+    write(health_timer_path, timer_unit_content(health_unit_name), mode=0o644)
+    run_checked(["systemctl", "daemon-reload"])
+    run_checked(["systemctl", "enable", "--now", unit_name])
+    run_checked(["systemctl", "enable", "--now", health_timer_name])
+    token = state_dir / "native-proxy-token"
+    deadline = time.monotonic() + 120
+    while not token.exists():
+        if time.monotonic() >= deadline:
+            raise OnboardingError("deployment did not create its native token in time")
+        time.sleep(1)
+    write(token_dir / "native-proxy-token", token.read_text(), user=gateway_user, group=gateway_group)
+    return {
+        "id": deployment_id, "profile": profile, "repository": repository, "url": url,
+        "stateDir": str(state_dir), "workspace": str(workspace), "tokenDir": str(token_dir),
+    }
+
+
+def credentials(request, dry):
+    login = require(request.get("login"), LOGIN, "login")
+    deployment_id = require(request.get("id"), ID, "deployment id")
+    token = require(request.get("githubToken"), GITHUB_TOKEN, "GitHub token")
+    _gateway_user, _gateway_group, _checkout, base = config(request)
+    person_user, person_home, _person_result = person_plan(login, base)
+    path, content = agent_wrapper(person_home, deployment_id, token, shutil.which("gh") or "/usr/bin/gh")
+    if dry:
+        return {"id": deployment_id, "cli": str(path)}
+    create_person(login, base, False)
+    write(path, content, mode=0o700, user=person_user, group=person_user)
+    return {"id": deployment_id, "cli": str(path)}
+
+
+def lifecycle(request, dry):
+    login = require(request.get("login"), LOGIN, "login")
+    deployment_id = require(request.get("id"), ID, "deployment id")
+    action = request.get("action")
+    if action not in ACTIONS:
+        raise OnboardingError("action must be start, stop, or restart")
+    config(request)
+    return systemctl_action(login, deployment_id, action, dry)
+
+
+def status(request, dry):
+    login = require(request.get("login"), LOGIN, "login")
+    deployment_id = require(request.get("id"), ID, "deployment id")
+    config(request)
+    return systemctl_status(login, deployment_id, dry)
+
+
+def logs(request, dry):
+    login = require(request.get("login"), LOGIN, "login")
+    deployment_id = require(request.get("id"), ID, "deployment id")
+    config(request)
+    return journal_logs(login, deployment_id, request.get("lines"), dry)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dry-run", action="store_true", help="print the fixed plan without changing the server")
+    args = parser.parse_args()
+    try:
+        request = json.loads(sys.stdin.read())
+        operation = request.get("operation")
+        if operation == "person":
+            result = person(request, args.dry_run)
+        elif operation == "deployment":
+            result = deployment(request, args.dry_run)
+        elif operation == "credentials":
+            result = credentials(request, args.dry_run)
+        elif operation == "lifecycle":
+            result = lifecycle(request, args.dry_run)
+        elif operation == "status":
+            result = status(request, args.dry_run)
+        elif operation == "logs":
+            result = logs(request, args.dry_run)
+        elif operation == "model-proxy":
+            result = model_proxy(request, args.dry_run)
+        else:
+            raise OnboardingError("unknown operation")
+    except (json.JSONDecodeError, OnboardingError, subprocess.SubprocessError) as error:
+        print(str(error), file=sys.stderr)
+        return 1
+    print(json.dumps(result))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
