@@ -30,7 +30,8 @@ import { executorLoad, ticketDetail, ticketList } from './views/tickets.ts'
 import { Fleet, FleetControlError, managementApi, redactSensitive, type FleetAction, type FleetNativeTarget } from './fleet.ts'
 import { INTERNAL_HEADER } from './native-transport.ts'
 import { matchesNativeToken } from './native-auth.ts'
-import { ProviderControlError, providerControl, resetProvider, saveProvider, setProviderCredential } from './providers.ts'
+import { ProviderControlError, configureDeploymentModelProxy, providerControl, resetProvider, saveProvider,
+  setProviderCredential } from './providers.ts'
 import { LIMITS } from '../limits.ts'
 
 export interface HttpHost {
@@ -146,10 +147,12 @@ export type PromptsView = ReturnType<typeof promptsView>
 interface Input<K extends keyof Api> {
   params: RouteParams<K>; query: Record<string, string>; body: (maxBytes?: number) => Promise<unknown>
 }
-type GatewayRouteKey = 'GET gateway/status' | 'POST gateway/device' | 'POST gateway/session'
+type GatewayRouteKey = 'GET gateway/status' | 'POST gateway/device' | 'POST gateway/session' | 'DELETE gateway/session'
+  | 'GET gateway/model-proxy' | 'POST gateway/model-proxy/claude/connect' | 'GET gateway/model-proxy/claude/status'
+  | 'DELETE gateway/model-proxy/claude/session' | 'PUT gateway/model-proxy/provider/:provider'
   | 'POST gateway/person' | 'POST gateway/deployment' | 'POST gateway/deployment/:id/credentials'
 type FleetRouteKey = 'GET fleet' | 'POST deployments/:id/select' | 'POST fleet/:id/start' | 'POST fleet/:id/stop'
-  | 'POST fleet/:id/restart'
+  | 'POST fleet/:id/restart' | 'POST fleet/:id/model-proxy'
 type ControllerRouteKey = GatewayRouteKey | FleetRouteKey
 type ProviderRouteKey = 'GET fleet/:id/providers' | 'PUT fleet/:id/providers/:provider'
   | 'POST fleet/:id/providers/:provider/credential' | 'DELETE fleet/:id/providers/:provider'
@@ -157,6 +160,15 @@ type RouteHandler<K extends keyof Api> = (input: Input<K>) => ApiResponse<K> | P
 type Routes = { [K in Exclude<keyof Api, GatewayRouteKey | ProviderRouteKey>]: RouteHandler<K> }
 type ControllerRoutes = { [K in ControllerRouteKey | ProviderRouteKey]: RouteHandler<K> }
 type RouteTable = { [K in keyof Api]?: RouteHandler<K> }
+const NATIVE_CONTROLLER_ROUTES = new Set<keyof Api>([
+  'GET gateway/model-proxy',
+  'POST gateway/model-proxy/claude/connect',
+  'GET gateway/model-proxy/claude/status',
+  'DELETE gateway/model-proxy/claude/session',
+  'PUT gateway/model-proxy/provider/:provider',
+  'POST gateway/deployment/:id/credentials',
+  'POST fleet/:id/model-proxy',
+])
 const offset = z.coerce.number().int().nonnegative().catch(0)
 const limit = (fallback: number, max: number) => z.coerce.number().int().positive().catch(fallback).transform(value => Math.min(max, value))
 const TicketsQuery = z.object({ state: z.enum(TICKET_FILTERS).catch('open'), offset, limit: limit(20, 1000) })
@@ -194,6 +206,7 @@ function routes(runtime: HttpHost, fleet: Fleet): Routes {
     'POST fleet/:id/start': ({ params }) => control(params.id, 'start'),
     'POST fleet/:id/stop': ({ params }) => control(params.id, 'stop'),
     'POST fleet/:id/restart': ({ params }) => control(params.id, 'restart'),
+    'POST fleet/:id/model-proxy': ({ params }) => configureDeploymentModelProxy(fleet, params.id),
     'GET state': () => stateView(runtime),
     'GET overview': () => overview(views(runtime), runtime.health, policyVersion(store.settings()),
       executorLoad(store, runtime.executor.activeCount()), runtime.setupProblem ?? runtime.feishuProblem),
@@ -283,6 +296,16 @@ function controllerRoutes(fleet: Fleet): ControllerRoutes {
       const request = z.object({ device_code: z.string().min(1) }).parse(await body())
       return fleet.completeGatewaySession(request.device_code)
     }),
+    'DELETE gateway/session': () => gateway(() => fleet.signOutGateway()),
+    'GET gateway/model-proxy': () => gateway(() => fleet.modelProxyStatus()),
+    'POST gateway/model-proxy/claude/connect': () => gateway(() => fleet.startClaudeLogin()),
+    'GET gateway/model-proxy/claude/status': () => gateway(() => fleet.claudeLoginStatus()),
+    'DELETE gateway/model-proxy/claude/session': () => gateway(() => fleet.cancelClaudeLogin()),
+    'PUT gateway/model-proxy/provider/:provider': async ({ params, body }) => gateway(async () => {
+      const provider = z.enum(['one-nexus', 'openai']).parse(params.provider)
+      const request = z.object({ apiKey: z.string().min(1).max(16_384) }).parse(await body())
+      return fleet.setModelProviderKey(provider, request.apiKey)
+    }),
     'POST gateway/person': () => gateway(() => fleet.createGatewayPerson()),
     'POST gateway/deployment': async ({ body }) => gateway(async () => {
       const request = z.object({
@@ -300,6 +323,7 @@ function controllerRoutes(fleet: Fleet): ControllerRoutes {
     'POST fleet/:id/start': ({ params }) => control(params.id, 'start'),
     'POST fleet/:id/stop': ({ params }) => control(params.id, 'stop'),
     'POST fleet/:id/restart': ({ params }) => control(params.id, 'restart'),
+    'POST fleet/:id/model-proxy': ({ params }) => configureDeploymentModelProxy(fleet, params.id),
     'GET fleet/:id/providers': ({ params }) => providerControl(fleet, params.id),
     'PUT fleet/:id/providers/:provider': async ({ params, body }) =>
       saveProvider(fleet, params.id, params.provider, await body()),
@@ -320,7 +344,7 @@ function match(table: RouteTable, method: string, segments: string[]) {
     if (verb !== method || !fits) continue
     const params: Record<string, string> = {}
     pattern.forEach((part, index) => { if (part.startsWith(':')) params[part.slice(1)] = decoded(segments[index]!) })
-    return { run: run as (input: Input<keyof Api>) => unknown, params }
+    return { key: route as keyof Api, run: run as (input: Input<keyof Api>) => unknown, params }
   }
   return undefined
 }
@@ -367,7 +391,8 @@ function registerManagement(ctx: Context, stateDir: string, runtime?: HttpHost):
       const url = new URL(req.url ?? '/', 'http://localhost')
       if (!url.pathname.startsWith('/orchestrator/api/')) { res.writeHead(404); res.end(); return }
       if (!sameOrigin(req, ctx.webServer.port)) { json(res, 403, { error: 'Same-origin management request required' }); return }
-      if (!matchesNativeToken(stateDir, req.headers[INTERNAL_HEADER])) {
+      const native = matchesNativeToken(stateDir, req.headers[INTERNAL_HEADER])
+      if (!native) {
         const rejection = ctx.connection.requestRejection(req)
         if (rejection !== undefined) {
           json(res, rejection, { error: rejection === 401
@@ -385,11 +410,18 @@ function registerManagement(ctx: Context, stateDir: string, runtime?: HttpHost):
         }
         const route = match(table, req.method ?? 'GET', url.pathname.slice('/orchestrator/api/'.length).split('/'))
         if (!route) throw new RouteError(404, 'Unknown operation')
+        if (NATIVE_CONTROLLER_ROUTES.has(route.key) && !native) {
+          json(res, 403, { error: 'Trusted controller request required' })
+          return
+        }
         const query = Object.fromEntries(url.searchParams)
         json(res, 200, await route.run({ params: route.params as never, query, body: maxBytes => readBody(req, maxBytes) }))
       } catch (error) { json(res, ...failure(error)) }
     } })]
-  return () => { for (const dispose of disposers) dispose() }
+  return () => {
+    for (const dispose of disposers) dispose()
+    fleet.dispose()
+  }
 }
 /** Register only Fleet lifecycle and the fixed deployment-management proxy. No repository runtime is created. */
 export function registerControlHttp(ctx: Context, stateDir: string): () => void {

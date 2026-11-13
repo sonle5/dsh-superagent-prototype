@@ -1,4 +1,5 @@
 /** Deployment-scoped provider, credential, and model-catalog control over DSH's native settings APIs. */
+import { randomBytes } from 'node:crypto'
 import { z } from 'zod'
 import type { ModelCatalog } from '@deepseek-ai/dsh-api-session-controller/types'
 import { redactSensitive, type Fleet, type FleetNativeTarget } from './fleet.ts'
@@ -192,6 +193,31 @@ function profileFor(input: ProviderInput, existing: JsonRecord | undefined): Jso
   }
 }
 
+function protectedProfile(id: string, profile: JsonRecord, credentialRef: string, baseURL: string): JsonRecord {
+  const compat = profile.api === 'openai-completions'
+    ? {
+        ...isRecord(profile.compat) ? profile.compat : {},
+        maxTokensField: 'max_tokens',
+        supportsReasoningEffort: Array.isArray(profile.models)
+          && profile.models.some(model => isRecord(model) && isRecord(model.reasoningEfforts)),
+        thinkingFormat: isRecord(profile.compat) && typeof profile.compat.thinkingFormat === 'string'
+          ? profile.compat.thinkingFormat
+          : id === 'one-nexus' ? 'qwen' : 'openai',
+      }
+    : undefined
+  return {
+    ...profile,
+    baseURL,
+    apiKeyEnv: credentialRef,
+    ...compat === undefined ? {} : { compat },
+  }
+}
+
+function proxyCredentialRef(id: string): string {
+  const normalized = id.toUpperCase().replace(/[^A-Z0-9]+/g, '_')
+  return `DSH_MODEL_PROXY_${normalized}_${randomBytes(4).toString('hex').toUpperCase()}`
+}
+
 async function readView(target: FleetNativeTarget): Promise<ProviderControlView> {
   const [described, registeredRaw, configurableRaw, catalogRaw] = await Promise.all([
     settings(target),
@@ -286,6 +312,76 @@ export async function setProviderCredential(fleet: Fleet, deployment: string, pr
   if (!current.credentialRef) throw new ProviderControlError(400, `Provider ${provider} has no credential reference`)
   await rpc(target, 'credentials/set', { ref: current.credentialRef, value: input.value })
   return readView(target)
+}
+
+/**
+ * Move every provider profile in one deployment behind the protected loopback model proxy.
+ * The new key is rolled back if either the credential write or configuration transition fails.
+ */
+export async function configureDeploymentModelProxy(fleet: Fleet, deployment: string): Promise<ProviderControlView> {
+  const target = await targetOf(fleet, deployment)
+  const proxy = await fleet.modelProxyStatus()
+  if (proxy.status !== 'ready') {
+    throw new ProviderControlError(409, `The protected model proxy is ${proxy.status}`)
+  }
+  const described = await settings(target)
+  const namespace = described.namespaces.find(item => item.ns === 'llm-pi-ai')
+  if (!namespace) throw new ProviderControlError(502, 'This deployment has no llm-pi-ai settings namespace')
+  const profiles = providerProfiles(namespace.value)
+  if (Object.keys(profiles).length === 0) {
+    throw new ProviderControlError(409, 'This deployment has no provider profiles to move behind the model proxy')
+  }
+
+  const created = await fleet.createModelProxyKey(deployment)
+  const credentialRef = proxyCredentialRef(deployment)
+  let credentialWritten = false
+  let settingsChanged = false
+  let settingsRevision: number | undefined
+  const oldRefs = [...new Set(Object.values(profiles).flatMap(profile =>
+    typeof profile.apiKeyEnv === 'string' && profile.apiKeyEnv !== '' ? [profile.apiKeyEnv] : []))]
+  try {
+    await rpc(target, 'credentials/set', { ref: credentialRef, value: created.value })
+    credentialWritten = true
+    const mutated = await rpc(target, 'settings/mutate', {
+      ns: 'llm-pi-ai',
+      ops: Object.entries(profiles).map(([id, profile]) => ({
+        op: 'set',
+        path: ['providers', id],
+        value: protectedProfile(id, profile, credentialRef, proxy.baseURL),
+      })),
+      expectedRevision: namespace.revision,
+    })
+    settingsChanged = true
+    const mutation = z.object({ revision: z.number().int().nonnegative() }).parse(mutated)
+    settingsRevision = mutation.revision
+    const view = await readView(target)
+    const missing = view.providers.filter(provider =>
+      provider.baseURL !== proxy.baseURL || provider.credentialRef !== credentialRef)
+    if (missing.length > 0) {
+      throw new ProviderControlError(502, `Provider transition could not be verified: ${missing.map(item => item.id).join(', ')}`)
+    }
+    await fleet.finalizeModelProxyKey(deployment, created.value)
+    for (const ref of oldRefs) {
+      if (ref !== credentialRef) await rpc(target, 'credentials/unset', { ref }).catch(() => undefined)
+    }
+    return view
+  } catch (error) {
+    if (settingsChanged) {
+      const revision = settingsRevision ?? (await readView(target).catch(() => undefined))?.revision
+      if (revision !== undefined) await rpc(target, 'settings/mutate', {
+        ns: 'llm-pi-ai',
+        ops: Object.entries(profiles).map(([id, profile]) => ({
+          op: 'set',
+          path: ['providers', id],
+          value: profile,
+        })),
+        expectedRevision: revision,
+      }).catch(() => undefined)
+    }
+    if (credentialWritten) await rpc(target, 'credentials/unset', { ref: credentialRef }).catch(() => undefined)
+    await fleet.revokeModelProxyKey(deployment, created.value).catch(() => undefined)
+    throw error
+  }
 }
 
 /** Remove this deployment's user-layer provider override; a composition base profile remains effective. */

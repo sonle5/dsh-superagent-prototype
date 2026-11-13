@@ -60,7 +60,8 @@ Desktop stores no Superagent state for server deployments. It loads a snapshot a
 
 ## Trust boundaries
 
-- **One Linux user per person.** It owns that person's deployments, agent GitHub login, model credentials and worktrees. Permissions and isolation in 006 Deployment still apply inside one user: workers run with `danger-full-access` as that user.
+- **One Linux user per person.** It owns that person's deployments, agent GitHub login and worktrees. Permissions and isolation in 006 Deployment still apply inside one user: workers run with `danger-full-access` as that user.
+- **A separate protected user owns model-provider credentials.** For each person, the helper runs the compatible model proxy as `dsh-<login>-models`, or a short derived name when GitHub's login is long. Its state is under `/var/lib/dsh-superagent/model-proxies/<login>` with mode `0700`; configuration and authentication files are mode `0600`. The repository worker cannot read that directory. The proxy management secret is mode `0600` and readable only by root, while the management API remains bound to a stable per-person loopback port allocated from the configured `portRange`. The helper serializes allocation so protected people on one Droplet receive distinct ports.
 - **Loopback is shared by every Linux user on the server.** Each deployment's management API admits the signed DSH panel session or its own native capability. The deployment creates `native-proxy-token`; the controller and service script only read it, and native Session routing uses the same credential. This closes the path where one local worker could call another person's deployment by sending only the request marker.
 - **Deployment tokens stay on the server.** Desktop holds only its gateway session.
 - **The controller's gateway state is local to the controller profile.** Before sign-in, `<control stateDir>/gateway.json` contains only the gateway URL. After sign-in it also contains the gateway's opaque session token; it never contains the GitHub access token.
@@ -69,6 +70,7 @@ Desktop stores no Superagent state for server deployments. It loads a snapshot a
 - **Remote logs are bounded.** Log responses contain at most 80 journal lines and 64 KiB, and both the gateway and controller redact token-like values and authorization headers.
 - **Legacy shared deployments are owner-scoped.** An entry in `deployments` is visible only to the `ownerLogin` named on it. New self-service deployments live under `people` and are visible only to that person.
 - **Self-service GitHub credentials use one fixed operation.** Desktop sends the agent GitHub PAT to the gateway once. The gateway passes it to the helper, which writes a `0700` wrapper owned by that person’s Linux user and updates the deployment’s GitHub Source. The token is not stored in the registry, returned by the API or committed.
+- **Repository workers receive only a deployment-scoped proxy key.** The protected proxy owns the Claude login, Nexus13 login, OneNexus API key and OpenAI API key. Provider profiles for every deployment point at the loopback model proxy and reference a versioned deployment key. The key can authenticate only through that proxy.
 
 ## Sign-in
 
@@ -97,15 +99,18 @@ The Fleet controller's `<stateDir>/gateway.json` is different from the gateway's
 
 ### Credentials
 
-Each person brings an agent GitHub account and model credentials.
+Each person brings an agent GitHub account and model-provider access.
 
 1. Create a fine-grained agent GitHub PAT with only the repository access that deployment needs.
-2. In Desktop, sign in to Cloud Fleet, create the cloud account and deployment, then paste the PAT into **Configure agent credentials**. The helper writes a per-deployment `gh` wrapper and saves that wrapper in the GitHub Source; it never stores the PAT in the gateway registry.
-3. Configure model providers through the connected deployment's normal DSH provider settings. Those credentials belong to that person's Linux user and profile, not to the gateway.
+2. In Desktop, sign in to Cloud Fleet, create the cloud account and deployment, then enter the PAT under **Settings → Access → Agent GitHub identity**. The helper writes a per-deployment `gh` wrapper and saves that wrapper in the GitHub Source; it never stores the PAT in the gateway registry.
+3. In **Settings → Access → Model gateway**, write the OneNexus or OpenAI key, or select **Connect Claude** for the one-click Claude login. The Mac opens the provider page and runs only a temporary `127.0.0.1:54545` callback listener; the OAuth tokens land in the Droplet's protected proxy user, never in Mac Keychain or browser state.
+4. Select **Protect this deployment**. The controller issues a new deployment key, writes it under a fresh credential reference, repoints every provider profile to `http://127.0.0.1:8317/v1`, verifies the resulting catalog, then revokes the previous deployment-prefixed proxy key and unsets the old worker-readable upstream credentials. A failure rolls the new key and provider configuration back.
 
 Grant the PAT Contents, Issues and Pull requests read/write; Actions and Commit statuses read-only; and Metadata read. GitHub does not expose the account notification inbox or the Checks API to fine-grained PATs, so set the GitHub Source's **Read the account notification inbox** off and enable **Receive new Issues** and **Receive comments**. DSH reads check runs when the token supports them and otherwise falls back to repository Actions workflow runs plus Commit statuses. Repository polling therefore remains least-privilege; do not replace the PAT with an over-broad classic token merely to make notification or CI polling succeed.
 
 Token-based agent credentials are still reachable by that person's worker because the worker runs as that Linux user. That is the intended agent-account boundary, not an isolation boundary against prompt injection; use a dedicated agent GitHub account with least-privilege access.
+
+The protected proxy reduces model-key exposure but does not make workers read-only. Workers can still read the deployment PAT, sibling worktrees under the same person's Linux identity, and any other data that identity can access. Kernel-enforced per-Ticket filesystem and egress isolation remains deferred.
 
 ## Address
 

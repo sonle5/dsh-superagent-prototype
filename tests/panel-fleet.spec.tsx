@@ -75,22 +75,6 @@ it('removes account creation after the signed-in person account exists', async (
   expect(server.requests).toContainEqual({ path: 'gateway/person', method: 'POST' })
 })
 
-it('keeps remote deployments in the credential selector when lifecycle support is unavailable', async () => {
-  server.gatewayStatus = {
-    configured: true,
-    url: 'https://superagent.example',
-    organization: 'example-org',
-    login: 'fixture-user',
-    person: true,
-  }
-  server.fleet.deployments[1]!.canControl = false
-  await mount()
-  await click(tab(zh['tab.fleet']))
-  const credential = all('select').map(select => select as HTMLSelectElement)
-    .find(select => select.options.length === 1 && select.options[0]?.value === 'sglang')
-  expect(credential).not.toBeUndefined()
-})
-
 it('switches every management view to the selected deployment and remembers the selection', async () => {
   await mount()
   const selector = field<HTMLSelectElement>(zh.deploymentContext)

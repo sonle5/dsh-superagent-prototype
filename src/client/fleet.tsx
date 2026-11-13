@@ -35,20 +35,12 @@ function Controls({ deployment, run, busy }: { deployment: Deployment; run: (id:
   </>
 }
 
-function CloudGateway({ reload, deployments, selected }: {
-  reload: () => Promise<void>
-  deployments: Deployment[]
-  selected?: string
-}) {
+function CloudGateway({ reload }: { reload: () => Promise<void> }) {
   const { t, call, notify } = usePanel()
   const gateway = usePoll(() => call('GET gateway/status'), [], 15_000)
   const [device, setDevice] = useState<DeviceView>()
   const [id, setId] = useState('')
   const [repository, setRepository] = useState('')
-  const [credentialId, setCredentialId] = useState('')
-  const [githubToken, setGithubToken] = useState('')
-  const remote = deployments.filter(deployment => deployment.remote)
-  const activeCredentialId = credentialId || selected && remote.some(deployment => deployment.id === selected) ? selected : remote[0]?.id
   const start = useAction(async () => setDevice(await call('POST gateway/device')))
   const complete = useAction(async () => {
     const current = device
@@ -71,16 +63,6 @@ function CloudGateway({ reload, deployments, selected }: {
     setRepository('')
     await reload()
     await gateway.reload()
-  })
-  const credentials = useAction(async () => {
-    if (activeCredentialId === undefined) return
-    await call('POST gateway/deployment/:id/credentials', {
-      id: activeCredentialId,
-      body: { githubToken },
-    })
-    setGithubToken('')
-    notify(t('gatewayCredentialsSaved'))
-    await reload()
   })
   const status = gateway.data
   return <article className="dt-card dt-fleet-card">
@@ -129,21 +111,6 @@ function CloudGateway({ reload, deployments, selected }: {
         <span className="dt-input"><input value={repository} onChange={event => setRepository(event.target.value)} required /></span>
       </div>
       <Button type="submit" disabled={deployment.busy}>{t('gatewayCreateDeployment')}</Button>
-    </form>}
-    {status?.login && remote.length > 0 && <form className="dt-form dt-block"
-      onSubmit={event => { event.preventDefault(); void credentials.run() }}>
-      <div className="dt-field">
-        <span className="dt-field-head">{t('gatewayCredentialsDeployment')}</span>
-        <span className="dt-input"><select value={activeCredentialId} onChange={event => setCredentialId(event.target.value)}>
-          {remote.map(deployment => <option key={deployment.id} value={deployment.id}>{deployment.id}</option>)}
-        </select></span>
-      </div>
-      <div className="dt-field">
-        <span className="dt-field-head">{t('gatewayAgentToken')}</span>
-        <span className="dt-input"><input type="password" value={githubToken}
-          onChange={event => setGithubToken(event.target.value)} required autoComplete="new-password" /></span>
-      </div>
-      <Button type="submit" disabled={credentials.busy}>{t('gatewayConfigureCredentials')}</Button>
     </form>}
   </article>
 }
@@ -230,7 +197,7 @@ export function FleetPage() {
     {error && <LoadState error={error} loading={false} />}
     <Section title={t('fleetTitle')} count={data.deployments.length} hint={t('fleetIntro')}>
       {data.error && <p className="dt-error">{data.error}</p>}
-      <CloudGateway reload={reload} deployments={data.deployments} selected={data.selected} />
+      <CloudGateway reload={reload} />
       <div className="dt-fleet-grid">
         {data.deployments.map(deployment => <DeploymentCard key={deployment.id} deployment={deployment} run={act.run} busy={act.busy} />)}
       </div>

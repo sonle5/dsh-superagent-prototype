@@ -18,6 +18,20 @@ export type ThreadFilter = typeof THREAD_FILTERS[number]
 interface Paged { offset?: number; limit?: number }
 /** Whether a context update was already injected into the main Session or is still pending delivery. */
 type Delivery = 'injected' | 'pending'
+export type ModelProxyProviderId = 'claude' | 'nexus13' | 'one-nexus' | 'openai'
+export interface ModelProxyView {
+  status: string
+  baseURL: string
+  providers: {
+    id: ModelProxyProviderId
+    label: string
+    state: 'connected' | 'configured' | 'sign-in-required' | 'missing' | 'error'
+  }[]
+  deployments: {
+    id: string
+    keyConfigured: boolean
+  }[]
+}
 
 export interface Api {
   'GET fleet': { response: FleetView }
@@ -59,6 +73,19 @@ export interface Api {
     revision: number
     restarting: boolean
   } }
+  'DELETE gateway/session': { response: { signedOut: true } }
+  'GET gateway/model-proxy': { response: ModelProxyView }
+  'POST gateway/model-proxy/claude/connect': { response: { url: string; expiresAt: string } }
+  'GET gateway/model-proxy/claude/status': { response: {
+    state: 'idle' | 'waiting' | 'connected' | 'error'
+    error?: string
+  } }
+  'DELETE gateway/model-proxy/claude/session': { response: { cancelled: boolean } }
+  'PUT gateway/model-proxy/provider/:provider': { body: { apiKey: string }; response: {
+    provider: 'one-nexus' | 'openai'
+    configured: true
+  } }
+  'POST fleet/:id/model-proxy': { response: ProviderControlView }
   'POST deployments/:id/select': { response: { selected: string } }
   'POST fleet/:id/start': { response: { id: string; action: 'start'; code: number; output: string } }
   'POST fleet/:id/stop': { response: { id: string; action: 'stop'; code: number; output: string } }
@@ -116,6 +143,13 @@ export const FLEET_ROUTES = [
   'POST gateway/person',
   'POST gateway/deployment',
   'POST gateway/deployment/:id/credentials',
+  'DELETE gateway/session',
+  'GET gateway/model-proxy',
+  'POST gateway/model-proxy/claude/connect',
+  'GET gateway/model-proxy/claude/status',
+  'DELETE gateway/model-proxy/claude/session',
+  'PUT gateway/model-proxy/provider/:provider',
+  'POST fleet/:id/model-proxy',
   'POST deployments/:id/select',
   'POST fleet/:id/start',
   'POST fleet/:id/stop',

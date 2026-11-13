@@ -12,7 +12,7 @@ const native = vi.hoisted(() => {
 vi.mock('../src/app/native-transport.ts', () => native)
 
 import {
-  providerControl, resetProvider, saveProvider, setProviderCredential,
+  configureDeploymentModelProxy, providerControl, resetProvider, saveProvider, setProviderCredential,
 } from '../src/app/providers.ts'
 
 const target = {
@@ -27,7 +27,19 @@ const target = {
   token: 'native-test-token',
 }
 const managementTarget = vi.fn(async () => target)
-const fleet = { managementTarget } as unknown as Fleet
+const modelProxyStatus = vi.fn(async () => ({
+  status: 'ready',
+  baseURL: 'http://127.0.0.1:8317/v1',
+  providers: [],
+  deployments: [{ id: 'inference-support-loop', keyConfigured: true }],
+}))
+const createModelProxyKey = vi.fn(async () => ({
+  id: 'inference-support-loop',
+  value: 'dsh-inference-support-loop-a-new-private-proxy-key',
+}))
+const revokeModelProxyKey = vi.fn(async () => undefined)
+const finalizeModelProxyKey = vi.fn(async () => undefined)
+const fleet = { managementTarget, modelProxyStatus, createModelProxyKey, revokeModelProxyKey, finalizeModelProxyKey } as unknown as Fleet
 const catalog = {
   default: { provider: 'one-nexus', model: 'glm-5.3-sontinh', reasoningEffort: 'max' },
   routableProviders: ['one-nexus'],
@@ -47,6 +59,10 @@ let described: Record<string, unknown>
 beforeEach(() => {
   native.nativePeerRpc.mockReset()
   managementTarget.mockClear()
+  modelProxyStatus.mockClear()
+  createModelProxyKey.mockClear()
+  revokeModelProxyKey.mockClear()
+  finalizeModelProxyKey.mockClear()
   described = {
     writable: true,
     namespaces: [{ ns: 'llm-pi-ai', value: { providers: { 'one-nexus': structuredClone(profile) } },
@@ -157,4 +173,48 @@ it('rotates the existing credential reference and resets only a user-layer overr
     ops: [{ op: 'unset', path: ['providers', 'one-nexus'] }],
     expectedRevision: 4,
   })
+})
+
+it('moves every provider behind the protected proxy and retires old worker-readable credentials', async () => {
+  const view = await configureDeploymentModelProxy(fleet, 'inference-support-loop')
+  const set = native.nativePeerRpc.mock.calls.find(([, method]) => method === 'credentials/set')
+  const mutate = native.nativePeerRpc.mock.calls.find(([, method]) => method === 'settings/mutate')
+  const ref = (set?.[2] as { ref: string }).ref
+  expect(ref).toMatch(/^DSH_MODEL_PROXY_INFERENCE_SUPPORT_LOOP_[A-F0-9]{8}$/)
+  expect(set?.[2]).toEqual({ ref, value: 'dsh-inference-support-loop-a-new-private-proxy-key' })
+  expect(mutate?.[2]).toMatchObject({
+    ns: 'llm-pi-ai',
+    expectedRevision: 4,
+    ops: [{ op: 'set', path: ['providers', 'one-nexus'], value: {
+      baseURL: 'http://127.0.0.1:8317/v1',
+      apiKeyEnv: ref,
+      compat: { maxTokensField: 'max_tokens', supportsReasoningEffort: true, thinkingFormat: 'qwen' },
+    } }],
+  })
+  expect(native.nativePeerRpc).toHaveBeenCalledWith(target, 'credentials/unset', { ref: 'ONENEXUS_API_KEY' })
+  expect(view.providers).toEqual([expect.objectContaining({ baseURL: 'http://127.0.0.1:8317/v1', credentialRef: ref })])
+  expect(JSON.stringify(view)).not.toContain('dsh-inference-support-loop-a-new-private-proxy-key')
+  expect(revokeModelProxyKey).not.toHaveBeenCalled()
+  expect(finalizeModelProxyKey).toHaveBeenCalledWith('inference-support-loop', 'dsh-inference-support-loop-a-new-private-proxy-key')
+})
+
+it('rolls provider configuration and the new credential back when migration cannot be finalized', async () => {
+  finalizeModelProxyKey.mockRejectedValueOnce(new Error('proxy key finalization failed'))
+  await expect(configureDeploymentModelProxy(fleet, 'inference-support-loop')).rejects.toThrow('proxy key finalization failed')
+
+  const set = native.nativePeerRpc.mock.calls.find(([, method]) => method === 'credentials/set')
+  const ref = (set?.[2] as { ref: string }).ref
+  const mutations = native.nativePeerRpc.mock.calls.filter(([, method]) => method === 'settings/mutate')
+  expect(mutations).toHaveLength(2)
+  expect(mutations[0]?.[2]).toMatchObject({
+    ops: [{ path: ['providers', 'one-nexus'], value: { baseURL: 'http://127.0.0.1:8317/v1', apiKeyEnv: ref } }],
+  })
+  expect(mutations[1]?.[2]).toEqual({
+    ns: 'llm-pi-ai',
+    ops: [{ op: 'set', path: ['providers', 'one-nexus'], value: profile }],
+    expectedRevision: 5,
+  })
+  expect(native.nativePeerRpc).toHaveBeenCalledWith(target, 'credentials/unset', { ref })
+  expect(revokeModelProxyKey).toHaveBeenCalledWith('inference-support-loop', 'dsh-inference-support-loop-a-new-private-proxy-key')
+  expect(native.nativePeerRpc).not.toHaveBeenCalledWith(target, 'credentials/unset', { ref: 'ONENEXUS_API_KEY' })
 })

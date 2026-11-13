@@ -89,6 +89,7 @@ function onboardingRegistry(stateDir: string, helper: string, legacyUrl: string)
     onboarding: {
       command: [helper], gatewayUser: 'gateway-user', gatewayGroup: 'gateway-group',
       checkout: '/opt/dsh-superagent', baseDir: '/var/lib/dsh-superagent',
+      modelProxy: { binary: '/opt/cliproxyapi/cli-proxy-api', portRange: { start: 8317, end: 9316 } },
     },
     deployments: [{ id: 'legacy', profile: 'superagent-legacy', repository: 'example-org/legacy', url: legacyUrl,
       stateDir: join(stateDir, 'legacy-state'), workspace: '/srv/work/legacy', ownerLogin: 'other-owner' }],
@@ -131,6 +132,38 @@ elif request['operation'] == 'logs':
         'tail': 'last line\\nAuthorization: ' + 'Bearer ' + ${JSON.stringify(PRIVATE_LOG_VALUE)}
           + '\\nhttps://example.test/?token=' + ${JSON.stringify(PRIVATE_QUERY_VALUE)},
     }))
+elif request['operation'] == 'model-proxy':
+    action = request['action']
+    if action == 'status':
+        print(json.dumps({
+            'status': 'ready', 'baseURL': 'http://127.0.0.1:8317/v1',
+            'providers': [
+                {'id': 'claude', 'label': 'Claude', 'state': 'connected'},
+                {'id': 'one-nexus', 'label': 'OneNexus', 'state': 'configured'},
+            ],
+            'deployments': [{'id': item, 'keyConfigured': True} for item in request['deploymentIds']],
+        }))
+    elif action == 'claude-start':
+        print(json.dumps({
+            'url': 'https://claude.example/authorize', 'state': 'a' * 24,
+            'expiresAt': '2099-01-01T00:05:00Z',
+        }))
+    elif action == 'claude-status':
+        print(json.dumps({'status': 'ok'}))
+    elif action == 'claude-callback':
+        print(json.dumps({'accepted': True}))
+    elif action == 'claude-cancel':
+        print(json.dumps({'cancelled': True}))
+    elif action == 'provider-key-set':
+        print(json.dumps({'provider': request['provider'], 'configured': True}))
+    elif action == 'deployment-key-create':
+        print(json.dumps({'id': request['id'], 'value': 'dsh-' + request['id'] + '-private-proxy-key'}))
+    elif action == 'deployment-key-revoke':
+        print(json.dumps({'id': request['id'], 'revoked': True}))
+    elif action == 'deployment-key-prune':
+        print(json.dumps({'id': request['id'], 'pruned': True}))
+    else:
+        print(json.dumps({'status': 'accepted'}))
 `, { mode: 0o755 })
   return path
 }
@@ -259,6 +292,48 @@ it('refuses a GitHub account outside the configured organization without a sessi
   await gateway.call('POST', '/gateway/api/device')
   const session = await gateway.call('POST', '/gateway/api/session', { device_code: 'device-code' })
   expect(session).toMatchObject({ status: 403, setCookie: null, body: { error: 'GitHub account is not a member of example-org' } })
+})
+
+it('keeps model-provider operations behind the trusted controller and never returns write-only secrets', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'dsh-gateway-model-proxy-'))
+  cleanup.push(() => rmSync(state, { recursive: true, force: true }))
+  const helper = onboardingHelper(state, 'http://127.0.0.1:10')
+  onboardingRegistry(state, helper, 'http://127.0.0.1:9')
+  const gateway = await serveGateway(state, gatewayFetch())
+  await gateway.call('POST', '/gateway/api/device')
+  const session = await gateway.call('POST', '/gateway/api/session', { device_code: 'device-code' })
+  const cookie = session.setCookie!.split(';', 1)[0]!
+  await gateway.call('POST', '/gateway/api/person', undefined, { cookie })
+  const deployment = await gateway.call('POST', '/gateway/api/deployment', {
+    id: 'widgets', repository: 'example-org/widgets',
+  }, { cookie })
+  expect(deployment.status).toBe(201)
+  expect(await gateway.call('GET', '/gateway/api/model-proxy', undefined, { cookie })).toMatchObject({
+    status: 403, body: { error: 'Trusted controller request required' },
+  })
+  const native = session.body.nativeToken as string
+  const status = await gateway.call('GET', '/gateway/api/model-proxy', undefined, { cookie, 'x-dsh-superagent-native': native })
+  expect(status).toMatchObject({ status: 200, body: { baseURL: 'http://127.0.0.1:8317/v1',
+    deployments: [{ id: 'widgets', keyConfigured: true }] } })
+  expect(JSON.stringify(status.body)).not.toContain('private-proxy-key')
+
+  const key = await gateway.call('PUT', '/gateway/api/model-proxy/provider/one-nexus', {
+    apiKey: 'sk-one-nexus-write-only',
+  }, { cookie, 'x-dsh-superagent-native': native })
+  expect(key).toMatchObject({ status: 200, body: { provider: 'one-nexus', configured: true } })
+  expect(JSON.stringify(key.body)).not.toContain('sk-one-nexus-write-only')
+  expect(JSON.stringify(JSON.parse(readFileSync(join(state, 'gateway.json'), 'utf8')))).not.toContain('sk-one-nexus-write-only')
+
+  const created = await gateway.call('POST', '/gateway/api/model-proxy/deployment/widgets/key', undefined,
+    { cookie, 'x-dsh-superagent-native': native })
+  expect(created).toMatchObject({ status: 201, body: { id: 'widgets', value: 'dsh-widgets-private-proxy-key' } })
+  expect(await gateway.call('DELETE', '/gateway/api/model-proxy/deployment/widgets/key',
+    { value: created.body.value }, { cookie, 'x-dsh-superagent-native': native }))
+    .toMatchObject({ status: 200, body: { id: 'widgets', revoked: true } })
+  expect(await gateway.call('POST', '/gateway/api/model-proxy/deployment/widgets/key/finalize',
+    { keep: 'dsh-widgets-new-private-proxy-key' }, { cookie, 'x-dsh-superagent-native': native }))
+    .toMatchObject({ status: 200, body: { id: 'widgets', pruned: true } })
+  expect(JSON.stringify(JSON.parse(readFileSync(join(state, 'gateway.json'), 'utf8')))).not.toContain('dsh-widgets-private-proxy-key')
 })
 
 it('onboards a person and deployment without exposing another person’s registry', async () => {

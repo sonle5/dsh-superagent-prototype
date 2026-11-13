@@ -1,11 +1,14 @@
 /** Read-only aggregation and fixed-profile lifecycle control for independent Superagent deployments. */
 import { spawn } from 'node:child_process'
+import { createServer, type Server, type ServerResponse } from 'node:http'
 import {
   accessSync, closeSync, constants, existsSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, writeFileSync,
 } from 'node:fs'
+import type { AddressInfo } from 'node:net'
 import { isAbsolute, join } from 'node:path'
 import { z } from 'zod'
 import { nativeToken } from './native-auth.ts'
+import type { ModelProxyView } from './api.ts'
 
 const profile = z.string().regex(/^[A-Za-z0-9_][A-Za-z0-9_.-]*$/, 'DSH profile name')
 const absolute = z.string().refine(isAbsolute, 'Absolute path')
@@ -126,6 +129,35 @@ const RemoteLogs = z.object({
   id: z.string().min(1),
   state: z.string().min(1),
   tail: z.string(),
+})
+const ModelProxy = z.object({
+  status: z.string().min(1),
+  baseURL: z.string().url().refine(value => {
+    const url = new URL(value)
+    return url.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)
+      && url.pathname === '/v1' && !url.search && !url.hash
+  }, 'Loopback model proxy URL'),
+  providers: z.array(z.object({
+    id: z.enum(['claude', 'nexus13', 'one-nexus', 'openai']),
+    label: z.string().min(1),
+    state: z.enum(['connected', 'configured', 'sign-in-required', 'missing', 'error']),
+  })),
+  deployments: z.array(z.object({
+    id: z.string().min(1),
+    keyConfigured: z.boolean(),
+  })),
+})
+const ClaudeConnect = z.object({
+  url: z.string().url(),
+  expiresAt: z.string().datetime(),
+})
+const ClaudeStatus = z.object({
+  state: z.enum(['idle', 'waiting', 'connected', 'error']),
+  error: z.string().optional(),
+})
+const ModelProxyKey = z.object({
+  id: z.string().min(1),
+  value: z.string().regex(/^[A-Za-z0-9_-]{16,256}$/),
 })
 
 const Health = z.object({ state: z.string(), detail: z.string().default('') }).passthrough()
@@ -292,12 +324,13 @@ async function json<T extends z.ZodType>(url: string, schema: T, token: string, 
   return schema.parse(await response.json() as unknown)
 }
 
-async function requestJson<T extends z.ZodType>(url: string, schema: T, init: RequestInit): Promise<z.infer<T>> {
+async function requestJson<T extends z.ZodType>(url: string, schema: T, init: RequestInit,
+  acceptedStatuses: readonly number[] = []): Promise<z.infer<T>> {
   const response = await fetch(url, { ...init, signal: init.signal ?? AbortSignal.timeout(10_000) })
   const value = await response.json().catch(() => {
     throw new JsonRequestError(response.status, `${response.status} from ${new URL(url).pathname}`)
   })
-  if (!response.ok || response.status === 202) {
+  if (!response.ok || response.status === 202 && !acceptedStatuses.includes(202)) {
     const problem = z.object({ error: z.string().optional(), status: z.string().optional() }).safeParse(value)
     throw new JsonRequestError(response.status, problem.success && problem.data.error ? problem.data.error
       : problem.success && problem.data.status ? problem.data.status
@@ -440,7 +473,15 @@ export class Fleet {
   readonly gatewaySessionPath: string
   private readonly selectionPath: string
   private readonly busy = new Set<string>()
-  constructor(readonly stateDir: string) {
+  private claude?: {
+    server: Server
+    port: number
+    expiresAt: number
+    url: string
+    timer: ReturnType<typeof setTimeout>
+  }
+  constructor(readonly stateDir: string,
+    private readonly options: { claudeCallbackPort?: number; now?: () => number } = {}) {
     this.registryPath = join(stateDir, 'fleet.json')
     this.gatewaySessionPath = join(stateDir, 'gateway.json')
     this.selectionPath = join(stateDir, 'native-deployment.json')
@@ -717,6 +758,227 @@ export class Fleet {
     }
   }
 
+  async signOutGateway(): Promise<{ signedOut: true }> {
+    const loaded = loadGatewaySession(this.gatewaySessionPath)
+    if (loaded.error) throw new FleetControlError(400, loaded.error)
+    if (loaded.value !== undefined) {
+      const temporary = `${this.gatewaySessionPath}.${process.pid}.tmp`
+      writeFileSync(temporary, `${JSON.stringify({ version: 1, url: loaded.value.url })}\n`, { mode: 0o600 })
+      renameSync(temporary, this.gatewaySessionPath)
+    }
+    return { signedOut: true }
+  }
+
+  async modelProxyStatus(): Promise<ModelProxyView> {
+    const session = this.authenticatedGatewaySession()
+    try {
+      return await requestJson(gatewayApi(session.url, 'model-proxy'), ModelProxy, {
+        headers: { accept: 'application/json', 'x-orchestrator-request': '1',
+          'x-dsh-superagent-native': session.token },
+      })
+    } catch (error) {
+      throw new FleetControlError(502, `Model proxy status is unavailable: ${reason(error)}`)
+    }
+  }
+
+  async setModelProviderKey(provider: 'one-nexus' | 'openai', apiKey: string):
+  Promise<{ provider: 'one-nexus' | 'openai'; configured: true }> {
+    const session = this.authenticatedGatewaySession()
+    try {
+      return await requestJson(gatewayApi(session.url, `model-proxy/provider/${provider}`), z.object({
+        provider: z.enum(['one-nexus', 'openai']), configured: z.literal(true),
+      }), {
+        method: 'PUT',
+        headers: { accept: 'application/json', 'content-type': 'application/json',
+          'x-orchestrator-request': '1', 'x-dsh-superagent-native': session.token },
+        body: JSON.stringify({ apiKey }),
+      })
+    } catch (error) {
+      throw new FleetControlError(502, `Model provider setup failed: ${reason(error)}`)
+    }
+  }
+
+  async createModelProxyKey(id: string): Promise<z.infer<typeof ModelProxyKey>> {
+    const session = this.authenticatedGatewaySession()
+    try {
+      const value = await requestJson(gatewayApi(session.url, `model-proxy/deployment/${id}/key`), ModelProxyKey, {
+        method: 'POST',
+        headers: { accept: 'application/json', 'x-orchestrator-request': '1',
+          'x-dsh-superagent-native': session.token },
+      })
+      if (value.id !== id) throw new Error('Gateway returned a key for a different deployment')
+      return value
+    } catch (error) {
+      if (error instanceof FleetControlError) throw error
+      throw new FleetControlError(502, `Model proxy key creation failed: ${reason(error)}`)
+    }
+  }
+
+  async revokeModelProxyKey(id: string, value: string): Promise<void> {
+    const session = this.authenticatedGatewaySession()
+    try {
+      await requestJson(gatewayApi(session.url, `model-proxy/deployment/${id}/key`), z.object({
+        id: z.string(), revoked: z.literal(true),
+      }), {
+        method: 'DELETE',
+        headers: { accept: 'application/json', 'content-type': 'application/json',
+          'x-orchestrator-request': '1', 'x-dsh-superagent-native': session.token },
+        body: JSON.stringify({ value }),
+      })
+    } catch (error) {
+      throw new FleetControlError(502, `Model proxy key rollback failed: ${reason(error)}`)
+    }
+  }
+
+  async finalizeModelProxyKey(id: string, keep: string): Promise<void> {
+    const session = this.authenticatedGatewaySession()
+    try {
+      await requestJson(gatewayApi(session.url, `model-proxy/deployment/${id}/key/finalize`), z.object({
+        id: z.string(), pruned: z.literal(true),
+      }), {
+        method: 'POST',
+        headers: { accept: 'application/json', 'content-type': 'application/json',
+          'x-orchestrator-request': '1', 'x-dsh-superagent-native': session.token },
+        body: JSON.stringify({ keep }),
+      })
+    } catch (error) {
+      throw new FleetControlError(502, `Model proxy key finalization failed: ${reason(error)}`)
+    }
+  }
+
+  async startClaudeLogin(): Promise<{ url: string; expiresAt: string }> {
+    if (this.claude !== undefined && this.claude.expiresAt > this.now()) {
+      return { url: this.claude.url, expiresAt: new Date(this.claude.expiresAt).toISOString() }
+    }
+    this.closeClaude()
+    const server = await this.bindClaudeCallback()
+    const address = server.address() as AddressInfo
+    const session = this.authenticatedGatewaySession()
+    try {
+      const value = await requestJson(gatewayApi(session.url, 'model-proxy/claude/connect'), ClaudeConnect, {
+        method: 'POST',
+        headers: { accept: 'application/json', 'x-orchestrator-request': '1',
+          'x-dsh-superagent-native': session.token },
+      })
+      const expiresAt = Date.parse(value.expiresAt)
+      const timer = setTimeout(() => this.closeClaude(), Math.min(2_147_483_647, Math.max(0, expiresAt - this.now())))
+      this.claude = { server, port: address.port, expiresAt, url: value.url, timer }
+      return { url: value.url, expiresAt: value.expiresAt }
+    } catch (error) {
+      server.close()
+      if (error instanceof FleetControlError) throw error
+      throw new FleetControlError(502, `Claude login could not start: ${reason(error)}`)
+    }
+  }
+
+  async claudeLoginStatus(): Promise<z.infer<typeof ClaudeStatus>> {
+    if (this.claude === undefined) return { state: 'idle' }
+    const session = this.authenticatedGatewaySession()
+    try {
+      const value = await requestJson(gatewayApi(session.url, 'model-proxy/claude/status'), ClaudeStatus, {
+        headers: { accept: 'application/json', 'x-orchestrator-request': '1',
+          'x-dsh-superagent-native': session.token },
+      })
+      if (value.state === 'connected' || value.state === 'error' || value.state === 'idle') this.closeClaude()
+      return value
+    } catch (error) {
+      throw new FleetControlError(502, `Claude login status is unavailable: ${reason(error)}`)
+    }
+  }
+
+  async cancelClaudeLogin(): Promise<{ cancelled: boolean }> {
+    if (this.claude === undefined) return { cancelled: false }
+    const session = this.authenticatedGatewaySession()
+    try {
+      const value = await requestJson(gatewayApi(session.url, 'model-proxy/claude/session'), z.object({
+        cancelled: z.boolean(),
+      }), {
+        method: 'DELETE',
+        headers: { accept: 'application/json', 'x-orchestrator-request': '1',
+          'x-dsh-superagent-native': session.token },
+      })
+      this.closeClaude()
+      return value
+    } catch (error) {
+      throw new FleetControlError(502, `Claude login cancellation failed: ${reason(error)}`)
+    }
+  }
+
+  dispose(): void {
+    this.closeClaude()
+  }
+
+  private async bindClaudeCallback(): Promise<Server> {
+    const server = createServer((request, response) => {
+      void this.handleClaudeCallback(request.url ?? '/', response)
+    })
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const failure = (error: NodeJS.ErrnoException): void => reject(error)
+        server.once('error', failure)
+        server.listen(this.options.claudeCallbackPort ?? 54_545, '127.0.0.1', () => {
+          server.off('error', failure)
+          resolve()
+        })
+      })
+      return server
+    } catch (error) {
+      server.close()
+      const code = (error as NodeJS.ErrnoException).code
+      const port = this.options.claudeCallbackPort ?? 54_545
+      throw new FleetControlError(409, code === 'EADDRINUSE'
+        ? `Port ${port} is already in use. Close the other Claude sign-in window and try again.`
+        : `Could not open the Claude callback listener: ${reason(error)}`)
+    }
+  }
+
+  private async handleClaudeCallback(raw: string, response: ServerResponse): Promise<void> {
+    const url = new URL(raw, 'http://127.0.0.1')
+    if (url.pathname !== '/callback') {
+      claudePage(response, 404, 'Not found', 'This is not a Claude authorization callback.')
+      return
+    }
+    if (this.claude === undefined || this.claude.expiresAt <= this.now()) {
+      claudePage(response, 410, 'Sign-in expired', 'Return to DeepSeek Harness and start again.')
+      this.closeClaude()
+      return
+    }
+    const code = url.searchParams.get('code') ?? undefined
+    const error = url.searchParams.get('error') ?? undefined
+    const state = url.searchParams.get('state') ?? undefined
+    if (state === undefined || code === undefined && error === undefined) {
+      claudePage(response, 400, 'Incomplete authorization', 'Return to DeepSeek Harness and start again.')
+      return
+    }
+    const session = this.authenticatedGatewaySession()
+    try {
+      await requestJson(gatewayApi(session.url, 'model-proxy/claude/callback'), z.object({
+        accepted: z.literal(true),
+      }), {
+        method: 'POST',
+        headers: { accept: 'application/json', 'content-type': 'application/json',
+          'x-orchestrator-request': '1', 'x-dsh-superagent-native': session.token },
+        body: JSON.stringify({ state, ...code === undefined ? {} : { code }, ...error === undefined ? {} : { error } }),
+      }, [202])
+      claudePage(response, 200, 'Authorization received',
+        'Return to DeepSeek Harness. The connection will finish automatically; you can close this tab.')
+    } catch {
+      claudePage(response, 400, 'Authorization could not be completed',
+        'Return to DeepSeek Harness, check the connection state, and start again.')
+    }
+  }
+
+  private closeClaude(): void {
+    if (this.claude === undefined) return
+    clearTimeout(this.claude.timer)
+    this.claude.server.close()
+    this.claude = undefined
+  }
+
+  private now(): number {
+    return this.options.now?.() ?? Date.now()
+  }
+
   /** Select the deployment whose native DSH state and streams the Desktop controller serves. */
   async select(id: string): Promise<{ selected: string }> {
     await this.managementTarget(id)
@@ -756,6 +1018,21 @@ export class Fleet {
       throw new FleetControlError(400, `Invalid native deployment selection: ${reason(error)}`)
     }
   }
+}
+
+function claudePage(response: ServerResponse, status: number, heading: string, detail: string): void {
+  const escape = (value: string): string => value.replace(/[&<>"']/g, character => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[character]!)
+  response.writeHead(status, {
+    'content-type': 'text/html; charset=utf-8',
+    'cache-control': 'no-store',
+    'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
+    'x-content-type-options': 'nosniff',
+  })
+  response.end(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>${escape(heading)}</title><style>body{font:16px/1.5 system-ui,sans-serif;max-width:38rem;margin:12vh auto;padding:2rem;color:#172019}
+h1{font-size:1.6rem;margin:0 0 .75rem}p{color:#52605a}</style><h1>${escape(heading)}</h1><p>${escape(detail)}</p></html>`)
 }
 
 function run(script: string, args: string[]): Promise<{ code: number; output: string }> {

@@ -6,7 +6,7 @@ This guide installs a self-service cloud fleet on a Linux server. The gateway us
 
 Use a General Purpose Droplet with at least 2 dedicated vCPUs and 8 GB RAM. Attach a 50 GB volume for `/var/lib/dsh-superagent`, enable weekly backups, and reserve a public IP. The examples assume Ubuntu or another Linux distribution with systemd.
 
-SSH in, add a non-root gateway user, and install Node.js 22.19+ or 24, pnpm, Python 3.8+, tmux, git, `gh`, `sudo`, and the `dsh` command.
+SSH in, add a non-root gateway user, and install Node.js 22.19+ or 24, pnpm, Python 3.8+ with PyYAML (`python3-yaml`), tmux, git, `gh`, `sudo`, and the `dsh` command.
 Install `gh` from GitHub's official package repository and verify `gh --version` reports 2.48 or later; the version packaged by older Ubuntu releases cannot read paginated API responses as DSH requires.
 
 ```sh
@@ -55,7 +55,7 @@ DSH_HOME=/var/lib/dsh-superagent/dsh-home \
   dsh plugin --profile superagent-gateway add "link:/opt/dsh-superagent"
 ```
 
-Create `/var/lib/dsh-superagent/gateway/gateway.json` from [examples/cloud/registry.example.json](../examples/cloud/registry.example.json). The `url`, `stateDir`, and `workspace` values must be absolute server paths. Each repository deployment is bound to loopback; the gateway is the only public listener.
+Create `/var/lib/dsh-superagent/gateway/gateway.json` from [examples/cloud/registry.example.json](../examples/cloud/registry.example.json). The `url`, `stateDir`, and `workspace` values must be absolute server paths. Set `onboarding.modelProxy.binary` to the CLIProxyAPI executable and `onboarding.modelProxy.portRange` to a private loopback range of at most 1,000 ports. The helper assigns one stable port per person and serializes allocation, so two protected people on one Droplet cannot share a proxy port. Each repository deployment is bound to loopback; the gateway is the only public listener.
 
 For a fresh self-service fleet, use an empty `deployments` list and fill in `people`/`onboarding` only. A shared entry in `deployments` is a migration record and must name `ownerLogin`; it is visible only to that GitHub login.
 
@@ -74,7 +74,9 @@ Allow only the gateway user to run exactly that file as root:
 <gateway-user> ALL=(root) NOPASSWD: /opt/dsh-superagent/scripts/dsh-superagent-onboard
 ```
 
-The helper accepts only six JSON operations on standard input: `person`, `deployment`, `credentials`, `status`, `lifecycle`, and `logs`. It never accepts a shell command, profile name from the request, arbitrary path, unit name, or model credential. It creates `dsh-<github-login>`, derives a safe Linux username when GitHub’s login is long, creates that person’s directories, initializes the deployment profile from DSH's shipped `web` template, installs the Superagent bundle, writes a root-owned environment file, enables a per-person unit, waits for the deployment native token, and copies that token into a gateway-readable directory owned by the gateway user.
+The helper accepts only seven JSON operations on standard input: `person`, `deployment`, `credentials`, `status`, `lifecycle`, `logs`, and `model-proxy`. It never accepts a shell command, profile name from the request, arbitrary path, unit name, or arbitrary command. It creates `dsh-<github-login>`, derives a safe Linux username when GitHub’s login is long, creates that person’s directories, initializes the deployment profile from DSH's shipped `web` template, installs the Superagent bundle, writes a root-owned environment file, enables a per-person unit, waits for the deployment native token, and copies that token into a gateway-readable directory owned by the gateway user.
+
+The `model-proxy` operation has a fixed action allowlist: `ensure`, `status`, `claude-start`, `claude-callback`, `claude-status`, `claude-cancel`, `deployment-key-create`, `deployment-key-prune`, `deployment-key-revoke`, and `provider-key-set`. It migrates the legacy proxy directory with a root-owned backup before changing ownership, installs a hardened systemd unit as `dsh-<login>-models`, writes the management secret as root-only `0600`, keeps the management API loopback-only, and never returns provider credentials or active client keys.
 
 The generated unit name is:
 
@@ -94,8 +96,9 @@ Start Desktop with the controller profile, then use the Cloud Fleet card:
 1. Sign in with GitHub device flow.
 2. Select **Create my cloud account**. This creates the person entry and Linux user.
 3. Enter a lowercase deployment id and `owner/repository`, then create the deployment. The gateway calls the fixed helper and returns only non-secret metadata.
-4. Paste that deployment agent GitHub account’s PAT into **Configure agent credentials**. The helper writes a `0700` `gh` wrapper owned by that person and saves it in the GitHub Source. The PAT is not written to the gateway registry or returned by the API. Grant Contents, Issues and Pull requests read/write; Actions and Commit statuses read-only; and Metadata read. Turn off **Read the account notification inbox**, and enable repository Issue/comment polling; fine-grained PATs can read neither the notification inbox nor the Checks API. DSH falls back to repository Actions workflow runs and Commit statuses for CI.
-5. Configure model credentials through the connected deployment’s normal DSH provider settings. They stay under that person’s Linux user and profile.
+4. Open **Settings → Access** and enter the deployment agent GitHub account’s PAT under **Agent GitHub identity**. The helper writes a `0700` `gh` wrapper owned by that person and saves it in the GitHub Source. The PAT is not written to the gateway registry or returned by the API. Grant Contents, Issues and Pull requests read/write; Actions and Commit statuses read-only; and Metadata read. Turn off **Read the account notification inbox**, and enable repository Issue/comment polling; fine-grained PATs can read neither the notification inbox nor the Checks API. DSH falls back to repository Actions workflow runs and Commit statuses for CI.
+5. In the same **Access** page, configure the protected model gateway. **Connect Claude** opens the provider page in a new tab while the Mac listens only on `127.0.0.1:54545` for the one-time callback. Write OneNexus or OpenAI API keys through the write-only forms.
+6. Select **Protect this deployment** to rotate its proxy key and move every provider profile behind the protected loopback proxy. Verify **Models** and the Eval/Executor routes shown on the Access page before retiring the legacy shared proxy key.
 
 The generated deployment card also exposes Start, Stop, Restart, and a journal tail. These calls remain HTTPS requests to the same gateway. The gateway checks ownership, rejects overlapping lifecycle actions for that deployment with HTTP `409`, and writes attempt/result records to `/var/lib/dsh-superagent/gateway/audit.jsonl` with mode `0600`. The journal tail is limited to 80 lines and 64 KiB and redacts authorization headers, bearer tokens, API keys, and URL query tokens.
 
@@ -111,10 +114,11 @@ The self-service deployment’s state paths are:
 /var/lib/dsh-superagent/people/<login>/deployments/<deployment-id>
 /var/lib/dsh-superagent/people/<login>/worktrees/<deployment-id>
 /var/lib/dsh-superagent/people/<login>/artifacts
+/var/lib/dsh-superagent/model-proxies/<login>
 /var/lib/dsh-superagent/gateway/tokens/<deployment-id>
 ```
 
-The gateway can read the copied native token but cannot read the person’s home state or OS keychain.
+The gateway can read the copied native token but cannot read the person’s home state, protected proxy state, or OS keychain. The repository worker runs as `dsh-<login>` and cannot read the `0700` protected-proxy directory owned by `dsh-<login>-models`.
 
 ## 5. Optional: migrate an existing deployment
 
@@ -231,5 +235,5 @@ Remote lifecycle and log controls were accepted on 2026-11-13 against deployed c
 
 - Stop the Mac-local deployment before starting its server copy; two running deployments polling one GitHub account duplicate work.
 - Copy each deployment's database, lock files, Session catalog, worktrees, and `native-proxy-token` while it is stopped, keeping absolute paths unchanged.
-- Recreate model credentials through the connected deployment’s DSH settings. For agent GitHub credentials, use the Desktop Cloud Fleet credential form; OS keychain credentials do not migrate.
+- Recreate model access in **Settings → Access → Model gateway**. Complete the provider sign-in or write the API key on the Droplet-side proxy. For agent GitHub credentials, use **Settings → Access → Agent GitHub identity**; OS keychain credentials do not migrate.
 - Before upgrading, stop the deployment unit, snapshot `/var/lib/dsh-superagent`, pull this repository, run `pnpm install && pnpm build`, and restart the gateway and deployments.

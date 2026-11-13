@@ -12,7 +12,14 @@
     "gatewayUser": "<gateway-user>",
     "gatewayGroup": "<gateway-group>",
     "checkout": "/opt/dsh-superagent",
-    "baseDir": "/var/lib/dsh-superagent"
+    "baseDir": "/var/lib/dsh-superagent",
+    "modelProxy": {
+      "binary": "/opt/cliproxyapi/cli-proxy-api",
+      "portRange": {
+        "start": 8317,
+        "end": 9316
+      }
+    }
   },
   "deployments": [
     {

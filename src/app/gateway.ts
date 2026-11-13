@@ -49,6 +49,14 @@ const Onboarding = z.object({
   gatewayGroup: z.string().regex(/^[a-z_][a-z0-9-]*$/, 'Linux group name'),
   checkout: z.string().refine(isAbsolute, 'Absolute path'),
   baseDir: z.string().refine(isAbsolute, 'Absolute path'),
+  modelProxy: z.object({
+    binary: z.string().refine(isAbsolute, 'Absolute path'),
+    portRange: z.object({
+      start: z.number().int().min(1024).max(65_535),
+      end: z.number().int().min(1024).max(65_535),
+    }).refine(range => range.end >= range.start, 'Model proxy port range must be ascending')
+      .refine(range => range.end - range.start < 1_000, 'Model proxy port range may contain at most 1000 ports'),
+  }).optional(),
 })
 const Registry = z.object({
   version: z.literal(1),
@@ -131,6 +139,33 @@ const DeploymentLogs = z.object({
   state: z.string().min(1),
   tail: z.string(),
 })
+const ModelProxyProvider = z.object({
+  id: z.enum(['claude', 'nexus13', 'one-nexus', 'openai']),
+  label: z.string().min(1),
+  state: z.enum(['connected', 'configured', 'sign-in-required', 'missing', 'error']),
+})
+const ModelProxyStatus = z.object({
+  status: z.string().min(1),
+  baseURL: z.string().url(),
+  providers: z.array(ModelProxyProvider).default([]),
+  deployments: z.array(z.object({
+    id: z.string().min(1),
+    keyConfigured: z.boolean(),
+  })).default([]),
+}).passthrough()
+const ClaudeLoginStart = z.object({
+  url: z.string().url().refine(value => new URL(value).protocol === 'https:', 'HTTPS URL'),
+  state: z.string().regex(/^[A-Za-z0-9_-]{16,256}$/),
+  expiresAt: z.string().datetime().optional(),
+})
+const ClaudeLoginStatus = z.object({
+  status: z.enum(['ok', 'wait', 'error']),
+  error: z.string().optional(),
+}).passthrough()
+const ProxyKey = z.object({
+  id: z.string().min(1),
+  value: z.string().regex(/^[A-Za-z0-9_-]{16,256}$/),
+})
 type LifecycleAction = z.infer<typeof LifecycleAction>
 
 /** A client-facing refusal with the HTTP status the gateway should return. */
@@ -160,6 +195,10 @@ async function jsonBody(req: IncomingMessage): Promise<Record<string, unknown>> 
     if (error instanceof GatewayError) throw error
     throw new GatewayError(400, 'The request body is not JSON')
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function loadRegistry(stateDir: string): RegistryConfig {
@@ -237,10 +276,7 @@ function sessionValue(stateDir: string, login: string, expiresAt: number): strin
   return `${message}.${createHmac('sha256', sessionSecret(stateDir)).update(message).digest('base64url')}`
 }
 
-function sessionLogin(stateDir: string, request: IncomingMessage): string | undefined {
-  const header = request.headers[INTERNAL_HEADER]
-  const value = typeof header === 'string' ? header
-    : new RegExp(`(?:^|;\\s*)${COOKIE}=([^;]+)`).exec(request.headers.cookie ?? '')?.[1]
+function sessionTokenLogin(stateDir: string, value: string | undefined): string | undefined {
   if (value === undefined) return undefined
   const parts = value.split('.')
   if (parts.length !== 3) return undefined
@@ -249,6 +285,18 @@ function sessionLogin(stateDir: string, request: IncomingMessage): string | unde
   const expected = createHmac('sha256', sessionSecret(stateDir)).update(`${login}.${expires}`).digest()
   const actual = Buffer.from(signature, 'base64url')
   return actual.byteLength === expected.byteLength && timingSafeEqual(actual, expected) ? login : undefined
+}
+
+function nativeSessionLogin(stateDir: string, request: IncomingMessage): string | undefined {
+  const header = request.headers[INTERNAL_HEADER]
+  return sessionTokenLogin(stateDir, typeof header === 'string' ? header : undefined)
+}
+
+function sessionLogin(stateDir: string, request: IncomingMessage): string | undefined {
+  const header = request.headers[INTERNAL_HEADER]
+  const value = typeof header === 'string' ? header
+    : new RegExp(`(?:^|;\\s*)${COOKIE}=([^;]+)`).exec(request.headers.cookie ?? '')?.[1]
+  return sessionTokenLogin(stateDir, value)
 }
 
 function setSession(res: ServerResponse, stateDir: string, login: string, secure: boolean): { expiresAt: number; nativeToken: string } {
@@ -366,6 +414,24 @@ async function issueSession(
   const session = setSession(res, stateDir, user.login, secure)
   json(res, 200, { login: user.login, organization: registry.organization,
     expiresAt: String(session.expiresAt), nativeToken: session.nativeToken })
+}
+
+async function modelProxyOperation(
+  registry: RegistryConfig,
+  login: string,
+  action: string,
+  extra: Record<string, unknown> = {},
+): Promise<unknown> {
+  if (registry.onboarding?.modelProxy === undefined) {
+    throw new GatewayError(501, 'The protected model proxy is not configured')
+  }
+  return runOnboarding(registry.onboarding, {
+    operation: 'model-proxy',
+    action,
+    login,
+    ...registry.onboarding,
+    ...extra,
+  })
 }
 
 async function forward(
@@ -534,6 +600,9 @@ function proxyNativeMux(
 /** Register the gateway API on DSH's configured public Web server. */
 export function registerGateway(ctx: Context, stateDir: string, fetcher: FetchLike = fetch): () => void {
   const deploymentPath = /^\/gateway\/api\/deployment\/([a-z0-9][a-z0-9-]*)\/(.+)$/
+  const proxyDeploymentPath = /^\/gateway\/api\/model-proxy\/deployment\/([a-z0-9][a-z0-9-]*)\/key$/
+  const proxyDeploymentFinalizePath = /^\/gateway\/api\/model-proxy\/deployment\/([a-z0-9][a-z0-9-]*)\/key\/finalize$/
+  const proxyProviderPath = /^\/gateway\/api\/model-proxy\/provider\/([a-z0-9-]+)$/
   const lifecyclePath = /^\/gateway\/api\/deployment\/([a-z0-9][a-z0-9-]*)\/lifecycle$/
   const logsPath = /^\/gateway\/api\/deployment\/([a-z0-9][a-z0-9-]*)\/logs$/
   const statusPath = /^\/gateway\/api\/deployment\/([a-z0-9][a-z0-9-]*)\/status$/
@@ -550,6 +619,7 @@ export function registerGateway(ctx: Context, stateDir: string, fetcher: FetchLi
   }
   let onboardingBusy = false
   const lifecycleBusy = new Set<string>()
+  const pendingClaude = new Map<string, { login: string; state: string; url: string; expiresAt: number }>()
   const disposeHttp = ctx.webServer.register({ kind: 'prefix', path: '/gateway', handler: async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://dsh.internal')
     try {
@@ -573,6 +643,156 @@ export function registerGateway(ctx: Context, stateDir: string, fetcher: FetchLi
       }
       const login = sessionLogin(stateDir, req)
       if (login === undefined) throw new GatewayError(401, 'Gateway sign-in required')
+      const nativeLogin = nativeSessionLogin(stateDir, req)
+      const requireNativeLogin = (): string => {
+        if (nativeLogin === undefined) throw new GatewayError(403, 'Trusted controller request required')
+        return nativeLogin
+      }
+      if (url.pathname === `${PREFIX}/model-proxy` && req.method === 'GET') {
+        const controllerLogin = requireNativeLogin()
+        const status = ModelProxyStatus.parse(await modelProxyOperation(registry, controllerLogin, 'status', {
+          deploymentIds: personDeployments(registry, controllerLogin).map(deployment => deployment.id),
+        }))
+        json(res, 200, {
+          status: status.status,
+          baseURL: status.baseURL,
+          providers: status.providers,
+          deployments: status.deployments,
+        })
+        return
+      }
+      if (url.pathname === `${PREFIX}/model-proxy/claude/connect` && req.method === 'POST') {
+        const controllerLogin = requireNativeLogin()
+        const current = pendingClaude.get(controllerLogin)
+        if (current !== undefined && current.expiresAt > Date.now()) {
+          json(res, 200, { url: current.url, expiresAt: new Date(current.expiresAt).toISOString() })
+          return
+        }
+        await modelProxyOperation(registry, controllerLogin, 'ensure')
+        const started = ClaudeLoginStart.parse(await modelProxyOperation(registry, controllerLogin, 'claude-start'))
+        const expiresAt = started.expiresAt === undefined ? Date.now() + 5 * 60_000 : Date.parse(started.expiresAt)
+        if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+          throw new GatewayError(502, 'The model proxy returned an expired Claude login')
+        }
+        pendingClaude.set(controllerLogin, {
+          login: controllerLogin,
+          state: started.state,
+          url: started.url,
+          expiresAt,
+        })
+        json(res, 200, { url: started.url, expiresAt: new Date(expiresAt).toISOString() })
+        return
+      }
+      if (url.pathname === `${PREFIX}/model-proxy/claude/callback` && req.method === 'POST') {
+        const controllerLogin = requireNativeLogin()
+        const input = z.object({
+          state: z.string().regex(/^[A-Za-z0-9_-]{16,256}$/),
+          code: z.string().min(1).max(16_384).optional(),
+          error: z.string().min(1).max(1024).optional(),
+        }).refine(value => value.code !== undefined || value.error !== undefined, 'OAuth code or error is required')
+          .parse(await jsonBody(req))
+        const pending = pendingClaude.get(controllerLogin)
+        if (pending === undefined || pending.state !== input.state) {
+          throw new GatewayError(409, 'Claude login state is not pending for this person')
+        }
+        if (pending.expiresAt <= Date.now()) {
+          pendingClaude.delete(controllerLogin)
+          throw new GatewayError(410, 'Claude login expired')
+        }
+        await modelProxyOperation(registry, controllerLogin, 'claude-callback', {
+          state: input.state,
+          ...input.code === undefined ? {} : { code: input.code },
+          ...input.error === undefined ? {} : { error: input.error },
+        })
+        json(res, 202, { accepted: true })
+        return
+      }
+      if (url.pathname === `${PREFIX}/model-proxy/claude/status` && req.method === 'GET') {
+        const controllerLogin = requireNativeLogin()
+        const pending = pendingClaude.get(controllerLogin)
+        if (pending === undefined) {
+          json(res, 200, { state: 'idle' })
+          return
+        }
+        if (pending.expiresAt <= Date.now()) {
+          pendingClaude.delete(controllerLogin)
+          json(res, 200, { state: 'error', error: 'Claude login expired' })
+          return
+        }
+        const status = ClaudeLoginStatus.parse(await modelProxyOperation(registry, controllerLogin, 'claude-status', {
+          state: pending.state,
+        }))
+        if (status.status !== 'wait') pendingClaude.delete(controllerLogin)
+        json(res, 200, { state: status.status === 'ok' ? 'connected' : status.status === 'error' ? 'error' : 'waiting',
+          ...status.error === undefined ? {} : { error: redactSensitive(status.error) } })
+        return
+      }
+      if (url.pathname === `${PREFIX}/model-proxy/claude/session` && req.method === 'DELETE') {
+        const controllerLogin = requireNativeLogin()
+        const pending = pendingClaude.get(controllerLogin)
+        if (pending === undefined) {
+          json(res, 200, { cancelled: false })
+          return
+        }
+        await modelProxyOperation(registry, controllerLogin, 'claude-cancel', { state: pending.state })
+        pendingClaude.delete(controllerLogin)
+        json(res, 200, { cancelled: true })
+        return
+      }
+      const proxyProvider = proxyProviderPath.exec(url.pathname)
+      if (proxyProvider && req.method === 'PUT') {
+        const controllerLogin = requireNativeLogin()
+        const provider = z.enum(['one-nexus', 'openai']).parse(proxyProvider[1])
+        const input = z.object({ apiKey: z.string().min(1).max(16_384) }).parse(await jsonBody(req))
+        await modelProxyOperation(registry, controllerLogin, 'ensure')
+        const result = await modelProxyOperation(registry, controllerLogin, 'provider-key-set', {
+          provider,
+          apiKey: input.apiKey,
+        })
+        if (!isRecord(result) || result.provider !== provider || result.configured !== true) {
+          throw new GatewayError(502, 'Model proxy returned an invalid provider result')
+        }
+        json(res, 200, { provider, configured: true })
+        return
+      }
+      const proxyDeployment = proxyDeploymentPath.exec(url.pathname)
+      if (proxyDeployment && req.method === 'POST') {
+        const controllerLogin = requireNativeLogin()
+        const deployment = findDeployment(registry, controllerLogin, proxyDeployment[1]!)
+        if (deployment === undefined) throw new GatewayError(404, `Deployment not found: ${proxyDeployment[1]}`)
+        await modelProxyOperation(registry, controllerLogin, 'ensure')
+        const created = ProxyKey.parse(await modelProxyOperation(registry, controllerLogin, 'deployment-key-create', {
+          id: deployment.id,
+        }))
+        if (created.id !== deployment.id) throw new GatewayError(502, 'Model proxy returned a different deployment key')
+        json(res, 201, created)
+        return
+      }
+      if (proxyDeployment && req.method === 'DELETE') {
+        const controllerLogin = requireNativeLogin()
+        const deployment = findDeployment(registry, controllerLogin, proxyDeployment[1]!)
+        if (deployment === undefined) throw new GatewayError(404, `Deployment not found: ${proxyDeployment[1]}`)
+        const input = z.object({ value: z.string().regex(/^[A-Za-z0-9_-]{16,256}$/) }).parse(await jsonBody(req))
+        await modelProxyOperation(registry, controllerLogin, 'deployment-key-revoke', {
+          id: deployment.id,
+          value: input.value,
+        })
+        json(res, 200, { id: deployment.id, revoked: true })
+        return
+      }
+      const proxyFinalize = proxyDeploymentFinalizePath.exec(url.pathname)
+      if (proxyFinalize && req.method === 'POST') {
+        const controllerLogin = requireNativeLogin()
+        const deployment = findDeployment(registry, controllerLogin, proxyFinalize[1]!)
+        if (deployment === undefined) throw new GatewayError(404, `Deployment not found: ${proxyFinalize[1]}`)
+        const input = z.object({ keep: z.string().regex(/^[A-Za-z0-9_-]{16,256}$/) }).parse(await jsonBody(req))
+        await modelProxyOperation(registry, controllerLogin, 'deployment-key-prune', {
+          id: deployment.id,
+          keep: input.keep,
+        })
+        json(res, 200, { id: deployment.id, pruned: true })
+        return
+      }
       if (url.pathname === `${PREFIX}/person` && req.method === 'POST') {
         if (onboardingBusy) throw new GatewayError(409, 'Another onboarding operation is already running')
         onboardingBusy = true
@@ -778,6 +998,7 @@ export function registerGateway(ctx: Context, stateDir: string, fetcher: FetchLi
   try { registry = loadRegistry(stateDir) } catch { /* The HTTP route reports the invalid registry. */ }
   for (const deployment of registry === undefined ? [] : allDeployments(registry)) registerNativeRoute(deployment)
   return () => {
+    pendingClaude.clear()
     for (const route of nativeRoutes.reverse()) {
       route.dispose()
       route.close()

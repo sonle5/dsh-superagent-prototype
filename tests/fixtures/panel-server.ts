@@ -36,6 +36,7 @@ export function actor(source: string, id: string, human = true): Actor {
 }
 type TicketFields = Omit<TicketRow, 'stage' | 'action'>
 type ProviderControlView = ApiResponse<'GET fleet/:id/providers'>
+type ModelProxyView = ApiResponse<'GET gateway/model-proxy'>
 const TICKET = {
   id: 't1', title: '修复回归', state: 'open', actions: { retry: false, stop: true }, strength: 'explicit', ended: undefined,
   attention: undefined, assignments: 1, inputs: 2, undelivered: 0, deliveryError: undefined, sessionId: 'worker-t1', directory: '/w/t1',
@@ -113,6 +114,8 @@ export interface PanelServer {
   failing: Extract<Problem, { kind: 'outgoing' }>['outgoing'][]
   fleet: FleetView
   gatewayStatus: ApiResponse<'GET gateway/status'>
+  modelProxy: ModelProxyView
+  claudeLogin: ApiResponse<'GET gateway/model-proxy/claude/status'>
   /** Redacted provider-control views keyed by deployment id. */
   providerControls: Record<string, ProviderControlView>
   /** Hold the initial Fleet response while a test exercises panel startup. */
@@ -315,6 +318,21 @@ function initial(): PanelServer {
     },
     providerControls: { 'inference-support-loop': providerControl(), sglang: providerControl() },
     gatewayStatus: { configured: false },
+    modelProxy: {
+      status: 'ready',
+      baseURL: 'http://127.0.0.1:8317/v1',
+      providers: [
+        { id: 'claude', label: 'Claude', state: 'connected' },
+        { id: 'nexus13', label: 'Nexus13', state: 'connected' },
+        { id: 'one-nexus', label: 'OneNexus', state: 'configured' },
+        { id: 'openai', label: 'OpenAI', state: 'missing' },
+      ],
+      deployments: [
+        { id: 'inference-support-loop', keyConfigured: true },
+        { id: 'sglang', keyConfigured: true },
+      ],
+    },
+    claudeLogin: { state: 'idle' },
     setup: { machine: MACHINE, problem: null, feishuProblem: null,
       accounts: { repository: 'acme/widgets', agent: 'agent-bot', feishu: { appId: 'cli_bot', brand: 'feishu', botId: 'ou_bot',
         name: 'Widgets Bot' } } },
@@ -372,6 +390,27 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
   'POST gateway/session': { body: true, answer: () => ({
     login: 'fixture-user', organization: 'fixture-org', expiresAt: '2099-01-01T00:00:00Z',
   }) },
+  'DELETE gateway/session': { answer: () => {
+    server.gatewayStatus = { ...server.gatewayStatus, login: undefined, organization: undefined, person: undefined }
+    return { signedOut: true }
+  } },
+  'GET gateway/model-proxy': { answer: () => structuredClone(server.modelProxy) },
+  'POST gateway/model-proxy/claude/connect': { answer: () => {
+    server.claudeLogin = { state: 'waiting' }
+    return { url: 'https://claude.example/authorize', expiresAt: '2099-01-01T00:05:00Z' }
+  } },
+  'GET gateway/model-proxy/claude/status': { answer: () => server.claudeLogin },
+  'DELETE gateway/model-proxy/claude/session': { answer: () => {
+    const cancelled = server.claudeLogin.state === 'waiting'
+    server.claudeLogin = { state: 'idle' }
+    return { cancelled }
+  } },
+  'PUT gateway/model-proxy/provider/:provider': { body: true, answer: ({ params }) => {
+    const provider = server.modelProxy.providers.find(item => item.id === params.provider)
+    if (provider?.id !== 'one-nexus' && provider?.id !== 'openai') return refuse(404, 'Provider not found')
+    provider.state = 'configured'
+    return { provider: provider.id, configured: true }
+  } },
   'POST gateway/person': { answer: () => {
     const created = server.gatewayStatus.person !== true
     server.gatewayStatus = { ...server.gatewayStatus, person: true }
@@ -412,6 +451,22 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
     if (!item) return refuse(404, `Deployment not found: ${params.id}`)
     item.status = 'starting'; item.detail = 'Starting'
     return { id: params.id, action: 'restart', code: 0, output: 'Restarted' }
+  } },
+  'POST fleet/:id/model-proxy': { answer: ({ params }) => {
+    const control = controlOf(params.id)
+    if (!control) return refuse(404, `Deployment not found: ${params.id}`)
+    control.providers = control.providers.map(provider => ({
+      ...provider,
+      baseURL: server.modelProxy.baseURL,
+      credentialRef: `DSH_MODEL_PROXY_${params.id.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_FIXTURE`,
+      credential: { configured: true, source: 'user', writable: true },
+    }))
+    control.revision++
+    server.modelProxy.deployments = [
+      ...server.modelProxy.deployments.filter(item => item.id !== params.id),
+      { id: params.id, keyConfigured: true },
+    ]
+    return providerControl(params.id)!
   } },
   'GET fleet/:id/providers': { answer: ({ params }) => providerControl(params.id)
     ?? refuse(404, `Deployment not found: ${params.id}`) },

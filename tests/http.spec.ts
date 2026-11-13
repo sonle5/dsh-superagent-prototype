@@ -223,6 +223,46 @@ it('keeps the controller loopback-only and serves its registry without a local r
   expect(() => serveControl(state, '0.0.0.0')).toThrow('Fleet control requires a loopback Web server')
 })
 
+it('requires native controller capability for protected model-proxy routes', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'dsh-model-proxy-controller-'))
+  cleanup.push(() => { rmSync(state, { recursive: true, force: true }) })
+  writeFileSync(join(state, 'fleet.json'), JSON.stringify({ version: 1, deployments: [] }))
+  const gateway = createServer((request, response) => {
+    if (request.url !== '/gateway/api/model-proxy' || request.method !== 'GET'
+      || request.headers['x-dsh-superagent-native'] !== 'gateway-session') {
+      response.writeHead(401).end(JSON.stringify({ error: 'unauthorized' }))
+      return
+    }
+    response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({
+      status: 'ready',
+      baseURL: 'http://127.0.0.1:8317/v1',
+      providers: [{ id: 'one-nexus', label: 'OneNexus', state: 'configured' }],
+      deployments: [],
+    }))
+  })
+  await new Promise<void>((resolve, reject) => {
+    gateway.once('error', reject)
+    gateway.listen(0, '127.0.0.1', resolve)
+  })
+  cleanup.push(() => { gateway.close() })
+  writeFileSync(join(state, 'gateway.json'), JSON.stringify({
+    version: 1, url: `http://127.0.0.1:${(gateway.address() as AddressInfo).port}`, token: 'gateway-session',
+  }))
+  const call = serveControl(state)
+  expect(await call('GET', 'gateway/model-proxy')).toEqual({ status: 403,
+    body: { error: 'Trusted controller request required' } })
+  const token = nativeToken(state)!
+  expect(await call('GET', 'gateway/model-proxy', undefined, { 'x-dsh-superagent-native': token })).toEqual({
+    status: 200,
+    body: {
+      status: 'ready',
+      baseURL: 'http://127.0.0.1:8317/v1',
+      providers: [{ id: 'one-nexus', label: 'OneNexus', state: 'configured' }],
+      deployments: [],
+    },
+  })
+})
+
 it('signs the Fleet controller in to a gateway and stores only the gateway session', async () => {
   const state = mkdtempSync(join(tmpdir(), 'dsh-gateway-controller-'))
   cleanup.push(() => { rmSync(state, { recursive: true, force: true }) })
@@ -331,7 +371,8 @@ it('signs the Fleet controller in to a gateway and stores only the gateway sessi
         workspace: '/var/lib/dsh-superagent/worktrees/widgets',
       },
     } })
-  expect(await call('POST', 'gateway/deployment/widgets/credentials', { githubToken: 'agent-github-token-1234' }))
+  expect(await call('POST', 'gateway/deployment/widgets/credentials', { githubToken: 'agent-github-token-1234' },
+    { 'x-dsh-superagent-native': nativeToken(state)! }))
     .toEqual({ status: 200, body: { saved: true, revision: 8, restarting: true } })
   expect(readFileSync(join(state, 'gateway.json'), 'utf8')).not.toContain('agent-github-token-1234')
 })

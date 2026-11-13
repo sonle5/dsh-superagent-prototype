@@ -167,3 +167,100 @@ it('rejects invalid names instead of deriving unsafe paths', async () => {
   expect(user).toMatch(/^dsh-[a-z0-9-]{1,28}$/)
   expect(user.length).toBeLessThanOrEqual(32)
 })
+
+it('plans a protected model proxy on a dedicated Linux identity', async () => {
+  const baseDir = mkdtempSync(join(tmpdir(), 'dsh-model-proxy-plan-'))
+  const result = await run({
+    operation: 'model-proxy', action: 'ensure', login: 'alice',
+    gatewayUser: 'gateway', gatewayGroup: 'gateway', checkout: '/opt/dsh-superagent', baseDir,
+    modelProxy: { binary: '/opt/cliproxyapi/cli-proxy-api', portRange: { start: 8317, end: 9316 } },
+  })
+  expect(result).toMatchObject({ code: 0 })
+  const plan = JSON.parse(result.stdout) as Record<string, unknown>
+  expect(plan).toMatchObject({
+    user: 'dsh-alice-models',
+    stateDir: `${baseDir}/model-proxies/alice`,
+    legacyStateDir: `${baseDir}/people/alice/model-proxy`,
+    config: `${baseDir}/model-proxies/alice/config.yaml`,
+    authDir: `${baseDir}/model-proxies/alice/auth`,
+    managementSecret: `${baseDir}/model-proxies/alice/management-secret`,
+    unit: 'dsh-superagent-person-alice-model-proxy.service',
+  })
+  expect(plan.unitContent).toContain('User=dsh-alice-models')
+  expect(plan.unitContent).toContain('ProtectHome=yes')
+  expect(plan.unitContent).toContain('ProtectSystem=strict')
+  expect(plan.unitContent).toContain(`ReadWritePaths=${baseDir}/model-proxies/alice`)
+})
+
+it('derives a short model-proxy user for long GitHub logins', async () => {
+  const result = await run({
+    operation: 'model-proxy', action: 'ensure', login: 'A'.repeat(39),
+    gatewayUser: 'gateway', gatewayGroup: 'gateway', checkout: '/opt/dsh-superagent',
+    baseDir: '/var/lib/dsh-superagent',
+    modelProxy: { binary: '/opt/cliproxyapi/cli-proxy-api', portRange: { start: 8317, end: 9316 } },
+  })
+  expect(result).toMatchObject({ code: 0 })
+  const user = JSON.parse(result.stdout).user as string
+  expect(user).toMatch(/^dsh-m-[a-f0-9]{16}$/)
+  expect(user.length).toBeLessThanOrEqual(32)
+})
+
+it('rejects unbounded model-proxy configuration', async () => {
+  const missing = await run({
+    operation: 'model-proxy', action: 'ensure', login: 'alice',
+    gatewayUser: 'gateway', gatewayGroup: 'gateway', checkout: '/opt/dsh-superagent',
+    baseDir: '/var/lib/dsh-superagent',
+  })
+  expect(missing).toMatchObject({ code: 1, stderr: expect.stringContaining('modelProxy configuration is required') })
+
+  const invalid = await run({
+    operation: 'model-proxy', action: 'status', login: 'alice',
+    gatewayUser: 'gateway', gatewayGroup: 'gateway', checkout: '/opt/dsh-superagent',
+    baseDir: '/var/lib/dsh-superagent',
+    modelProxy: { binary: 'relative', portRange: { start: 80, end: 90 } },
+  })
+  expect(invalid).toMatchObject({ code: 1, stderr: expect.stringContaining('absolute path') })
+})
+
+it('allocates stable, distinct proxy ports for multiple protected people', async () => {
+  const baseDir = mkdtempSync(join(tmpdir(), 'dsh-model-proxy-ports-'))
+  const modelProxy = { binary: '/opt/cliproxyapi/cli-proxy-api', portRange: { start: 8317, end: 8416 } }
+  const plan = async (login: string): Promise<number> => {
+    const result = await run({
+      operation: 'model-proxy', action: 'ensure', login,
+      gatewayUser: 'gateway', gatewayGroup: 'gateway', checkout: '/opt/dsh-superagent', baseDir, modelProxy,
+    })
+    expect(result).toMatchObject({ code: 0 })
+    const port = JSON.parse(result.stdout).port as number
+    expect(port).toBeGreaterThanOrEqual(8317)
+    expect(port).toBeLessThanOrEqual(8416)
+    return port
+  }
+  const alice = await plan('alice')
+  const bob = await plan('bob')
+  expect(alice).not.toBe(bob)
+  expect(await plan('alice')).toBe(alice)
+})
+
+it('reuses an assigned port and skips ports already owned by another protected person', () => {
+  const ports = JSON.parse(execFileSync('python3', ['-c', [
+    'import json, runpy, tempfile',
+    'from pathlib import Path',
+    'import yaml',
+    `module = runpy.run_path(${JSON.stringify(script)})`,
+    "module['port_is_available'] = lambda _port: True",
+    'with tempfile.TemporaryDirectory() as base:',
+    '    root = Path(base) / "model-proxies"',
+    '    alice = root / "alice"',
+    '    bob = root / "bob"',
+    '    alice.mkdir(parents=True)',
+    '    bob.mkdir(parents=True)',
+    '    first = module["allocate_model_proxy_port"]("alice", alice, 8317, 8416)',
+    '    (alice / "config.yaml").write_text(yaml.safe_dump({"port": first}))',
+    '    reused = module["allocate_model_proxy_port"]("alice", alice, 8317, 8416)',
+    '    second = module["allocate_model_proxy_port"]("bob", bob, 8317, 8416)',
+    '    print(json.dumps({"first": first, "reused": reused, "second": second}))',
+  ].join('\n')], { encoding: 'utf8' })) as { first: number; reused: number; second: number }
+  expect(ports.reused).toBe(ports.first)
+  expect(ports.second).not.toBe(ports.first)
+})

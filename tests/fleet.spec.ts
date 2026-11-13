@@ -395,3 +395,94 @@ it('preserves a gateway lifecycle conflict for the operator', async () => {
     message: 'Another lifecycle action is already running for sglang',
   })
 })
+
+it('receives a Claude callback on the local listener and forwards only the one-time state and code', async () => {
+  const state = workspace()
+  const seen: unknown[] = []
+  const gateway = createServer(async (request, response) => {
+    const chunks: Buffer[] = []
+    for await (const chunk of request) chunks.push(Buffer.from(chunk))
+    if (request.url === '/gateway/api/model-proxy/claude/connect' && request.method === 'POST'
+      && request.headers['x-dsh-superagent-native'] === 'gateway-session') {
+      response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({
+        url: 'https://claude.example/authorize', expiresAt: '2099-01-01T00:05:00Z',
+      }))
+      return
+    }
+    if (request.url === '/gateway/api/model-proxy/claude/callback' && request.method === 'POST') {
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown
+      seen.push(body)
+      const item = body as { state?: string }
+      response.writeHead(item.state === 'oauth-state-value' ? 202 : 409, { 'content-type': 'application/json' })
+        .end(JSON.stringify(item.state === 'oauth-state-value' ? { accepted: true } : { error: 'state mismatch' }))
+      return
+    }
+    response.writeHead(500).end(JSON.stringify({ error: `Unexpected gateway path: ${request.url}` }))
+  })
+  servers.push(gateway)
+  await new Promise<void>(resolve => gateway.listen(0, '127.0.0.1', resolve))
+  writeFileSync(join(state, 'gateway.json'), JSON.stringify({
+    version: 1, url: `http://127.0.0.1:${(gateway.address() as AddressInfo).port}`, token: 'gateway-session',
+  }), { mode: 0o600 })
+  const callbackProbe = createServer()
+  await new Promise<void>(resolve => callbackProbe.listen(0, '127.0.0.1', resolve))
+  const callbackPort = (callbackProbe.address() as AddressInfo).port
+  await new Promise<void>(resolve => callbackProbe.close(() => resolve()))
+  const fleet = new Fleet(state, { claudeCallbackPort: callbackPort })
+  try {
+    await fleet.startClaudeLogin()
+    const success = await fetch(`http://127.0.0.1:${callbackPort}/callback?state=oauth-state-value&code=one-time-code`)
+    expect(success.status).toBe(200)
+    expect(await success.text()).toContain('Authorization received')
+    expect(seen).toEqual([{ state: 'oauth-state-value', code: 'one-time-code' }])
+    const mismatch = await fetch(`http://127.0.0.1:${callbackPort}/callback?state=wrong-state&code=one-time-code`)
+    expect(mismatch.status).toBe(400)
+  } finally {
+    fleet.dispose()
+  }
+})
+
+it('reports an occupied Claude callback port before starting a provider login', async () => {
+  const state = workspace()
+  const occupied = createServer()
+  servers.push(occupied)
+  await new Promise<void>(resolve => occupied.listen(0, '127.0.0.1', resolve))
+  const fleet = new Fleet(state, { claudeCallbackPort: (occupied.address() as AddressInfo).port })
+  await expect(fleet.startClaudeLogin()).rejects.toMatchObject({
+    status: 409,
+    message: `Port ${(occupied.address() as AddressInfo).port} is already in use. Close the other Claude sign-in window and try again.`,
+  })
+})
+
+it('refuses a Claude callback after its pending login expires', async () => {
+  const state = workspace()
+  let now = 1_000_000
+  const gateway = createServer((request, response) => {
+    if (request.url === '/gateway/api/model-proxy/claude/connect' && request.method === 'POST') {
+      response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({
+        url: 'https://claude.example/authorize', expiresAt: new Date(now + 1_000).toISOString(),
+      }))
+      return
+    }
+    response.writeHead(500).end(JSON.stringify({ error: `Unexpected gateway path: ${request.url}` }))
+  })
+  servers.push(gateway)
+  await new Promise<void>(resolve => gateway.listen(0, '127.0.0.1', resolve))
+  writeFileSync(join(state, 'gateway.json'), JSON.stringify({
+    version: 1, url: `http://127.0.0.1:${(gateway.address() as AddressInfo).port}`, token: 'gateway-session',
+  }), { mode: 0o600 })
+  const callbackProbe = createServer()
+  await new Promise<void>(resolve => callbackProbe.listen(0, '127.0.0.1', resolve))
+  const callbackPort = (callbackProbe.address() as AddressInfo).port
+  await new Promise<void>(resolve => callbackProbe.close(() => resolve()))
+  const fleet = new Fleet(state, { claudeCallbackPort: callbackPort, now: () => now })
+  try {
+    await fleet.startClaudeLogin()
+    now += 2_000
+    const expired = await fetch(`http://127.0.0.1:${callbackPort}/callback?state=oauth-state-value&code=one-time-code`)
+    expect(expired.status).toBe(410)
+    expect(await expired.text()).toContain('Sign-in expired')
+  } finally {
+    fleet.dispose()
+  }
+})
