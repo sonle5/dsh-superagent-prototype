@@ -264,3 +264,87 @@ it('reuses an assigned port and skips ports already owned by another protected p
   expect(ports.reused).toBe(ports.first)
   expect(ports.second).not.toBe(ports.first)
 })
+
+it('reads protected proxy ports from legacy and v8 config layouts', () => {
+  const ports = JSON.parse(execFileSync('python3', ['-c', [
+    'import json, runpy, tempfile',
+    'from pathlib import Path',
+    'import yaml',
+    `module = runpy.run_path(${JSON.stringify(script)})`,
+    'with tempfile.TemporaryDirectory() as base:',
+    '    state = Path(base)',
+    '    (state / "config.yaml").write_text(yaml.safe_dump({"port": 8401}))',
+    '    legacy = module["configured_model_proxy_port"](state)',
+    '    (state / "config.yaml").write_text(yaml.safe_dump({"server": {"port": 8402}}))',
+    '    v8 = module["configured_model_proxy_port"](state)',
+    '    (state / "config.yaml").write_text(yaml.safe_dump({"server": {"port": True}, "port": 8403}))',
+    '    legacy_fallback = module["configured_model_proxy_port"](state)',
+    '    (state / "config.yaml").write_text(yaml.safe_dump({"server": {}}))',
+    '    missing = module["configured_model_proxy_port"](state)',
+    '    print(json.dumps({"legacy": legacy, "v8": v8, "legacyFallback": legacy_fallback, "missing": missing}))',
+  ].join('\n')], { encoding: 'utf8' })) as {
+    legacy: number
+    v8: number
+    legacyFallback: number
+    missing: null
+  }
+  expect(ports).toEqual({ legacy: 8401, v8: 8402, legacyFallback: 8403, missing: null })
+})
+
+it('reports a controlled error when protected proxy management has no port', () => {
+  const result = JSON.parse(execFileSync('python3', ['-c', [
+    'import json, runpy, tempfile',
+    'from pathlib import Path',
+    'import yaml',
+    `module = runpy.run_path(${JSON.stringify(script)})`,
+    'with tempfile.TemporaryDirectory() as base:',
+    '    state = Path(base)',
+    '    (state / "config.yaml").write_text(yaml.safe_dump({"server": {}}))',
+    '    (state / "management-secret").write_text("management-secret")',
+    '    try:',
+    '        module["management_request"](state, "GET", "/config/access/api-keys")',
+    '    except Exception as error:',
+    '        print(json.dumps({"type": type(error).__name__, "message": str(error)}))',
+  ].join('\n')], { encoding: 'utf8' }))
+  expect(result).toEqual({
+    type: 'OnboardingError',
+    message: 'model proxy config has no valid port',
+  })
+})
+
+it('adds supported OpenAI replay models without dropping existing provider models', async () => {
+  const baseDir = mkdtempSync(join(tmpdir(), 'dsh-model-proxy-providers-'))
+  const state = join(baseDir, 'model-proxies', 'alice')
+  execFileSync('mkdir', ['-p', state])
+  execFileSync('python3', ['-c', [
+    'import yaml',
+    'from pathlib import Path',
+    `state = Path(${JSON.stringify(state)})`,
+    '(state / "config.yaml").write_text(yaml.safe_dump({"server": {"port": 8401}}))',
+    '(state / "management-secret").write_text("management-secret")',
+  ].join('\n')])
+
+  const result = execFileSync('python3', ['-c', [
+    'import json, runpy, types',
+    `module = runpy.run_path(${JSON.stringify(script)})`,
+    'requests = []',
+    'def request(_state, method, suffix, body=None, secret=None):',
+    '    if method == "GET":',
+    '        return [{"name": "openai", "base-url": "https://api.openai.com/v1", "keys": [{"api-key": "old"}], '
+      + '"models": [{"name": "custom-model", "alias": "custom-model"}]}]',
+    '    requests.append(body)',
+    '    return None',
+    "module['provider_key_set'].__globals__['management_request'] = request",
+    'value = module["provider_key_set"]({',
+    '    "login": "alice", "provider": "openai", "apiKey": "replacement-key",',
+    `    "gatewayUser": "gateway", "gatewayGroup": "gateway", "checkout": "/opt/dsh-superagent", "baseDir": ${JSON.stringify(baseDir)},`,
+    '    "modelProxy": {"binary": "/opt/cliproxyapi/cli-proxy-api", "portRange": {"start": 8317, "end": 9316}},',
+    '}, False)',
+    'print(json.dumps({"result": value, "models": [item["name"] for item in requests[0][0]["models"]]}))',
+  ].join('\n')], { encoding: 'utf8' })
+
+  expect(JSON.parse(result)).toEqual({
+    result: { provider: 'openai', configured: true },
+    models: ['custom-model', 'gpt-6.1-terra', 'gpt-6.1-sol', 'gpt-5.6-sol'],
+  })
+})

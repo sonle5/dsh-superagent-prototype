@@ -37,6 +37,17 @@ PROFILE_TEMPLATE = "web"
 WEB_APP_BUNDLE = "@deepseek-ai/dsh-web-app"
 ACTIONS = {"start", "stop", "restart"}
 MODEL_PROXY_PROVIDERS = {"one-nexus", "openai"}
+MODEL_PROXY_PROVIDER_MODELS = {
+    "one-nexus": [
+        {"name": "glm-5.3-sontinh", "alias": "glm-5.3-sontinh"},
+        {"name": "dsv41f-thuytinh", "alias": "dsv41f-thuytinh"},
+    ],
+    "openai": [
+        {"name": "gpt-6.1-terra", "alias": "gpt-6.1-terra"},
+        {"name": "gpt-6.1-sol", "alias": "gpt-6.1-sol"},
+        {"name": "gpt-5.6-sol", "alias": "gpt-5.6-sol"},
+    ],
+}
 MAX_LOG_LINES = 80
 MAX_OUTPUT = 64 * 1024
 GRACEFUL_STOP_SECONDS = 300
@@ -145,8 +156,16 @@ def configured_model_proxy_port(state):
         data = yaml.safe_load(path.read_text())
     except (OSError, yaml.YAMLError):
         return None
-    port = data.get("port") if isinstance(data, dict) else None
-    return port if isinstance(port, int) and not isinstance(port, bool) else None
+    if not isinstance(data, dict):
+        return None
+    server = data.get("server")
+    for port in (
+        server.get("port") if isinstance(server, dict) else None,
+        data.get("port"),
+    ):
+        if isinstance(port, int) and not isinstance(port, bool):
+            return port
+    return None
 
 
 def port_is_available(port):
@@ -586,7 +605,9 @@ def ensure_model_proxy(request, dry):
 
 def management_request(state, method, suffix, body=None, secret=None):
     secret = secret or (state / "management-secret").read_text().strip()
-    port = yaml.safe_load((state / "config.yaml").read_text())["port"]
+    port = configured_model_proxy_port(state)
+    if port is None:
+        raise OnboardingError("model proxy config has no valid port")
     data = None if body is None else json.dumps(body).encode()
     request = urllib.request.Request(
         f"http://127.0.0.1:{port}/v8/management{suffix}",
@@ -815,7 +836,21 @@ def provider_key_set(request, dry):
     found = False
     for item in providers:
         if item.get("name") == provider:
-            item = {**item, "keys": [{"api-key": api_key}]}
+            models = item.get("models") if isinstance(item.get("models"), list) else []
+            known_models = {
+                model.get("name")
+                for model in models
+                if isinstance(model, dict) and isinstance(model.get("name"), str)
+            }
+            item = {
+                **item,
+                "keys": [{"api-key": api_key}],
+                "models": [
+                    *models,
+                    *(model for model in MODEL_PROXY_PROVIDER_MODELS[provider]
+                      if model["name"] not in known_models),
+                ],
+            }
             found = True
         updated.append(item)
     if not found:
@@ -824,17 +859,14 @@ def provider_key_set(request, dry):
                 "name": "one-nexus",
                 "base-url": "https://onenexus-ws.onenexus.cloud/v1",
                 "keys": [{"api-key": api_key}],
-                "models": [
-                    {"name": "glm-5.3-sontinh", "alias": "glm-5.3-sontinh"},
-                    {"name": "dsv41f-thuytinh", "alias": "dsv41f-thuytinh"},
-                ],
+                "models": MODEL_PROXY_PROVIDER_MODELS["one-nexus"],
             })
         else:
             updated.append({
                 "name": "openai",
                 "base-url": "https://api.openai.com/v1",
                 "keys": [{"api-key": api_key}],
-                "models": [{"name": "gpt-5.6-sol", "alias": "gpt-5.6-sol"}],
+                "models": MODEL_PROXY_PROVIDER_MODELS["openai"],
             })
     management_request(state, "PATCH", "/config/api-keys/openai-compatibility", updated)
     return {"provider": provider, "configured": True}

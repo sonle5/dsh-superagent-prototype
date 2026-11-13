@@ -231,6 +231,16 @@ Remote lifecycle and log controls were accepted on 2026-11-13 against deployed c
 - `pnpm check` passed with 71 test files, 1,332 tests, and the production build. The Fleet-page regression also verifies that an intentional selected-deployment poll failure does not produce a redundant global error banner.
 - The final least-privilege CI polling deployment uses commit `74ea8f8c83c9fa0f2f5ed46db37cbde101edcdf3`. The `hdt98` wrapper returned `200` for Actions workflow runs and commit statuses; its expected Checks API `403` is covered by the Actions fallback. After restarting the gateway and all deployments, each of the three deployments reported all ten health components as `ready`.
 
+Protected model credentials were live-validated on 2026-11-13:
+
+- Both `sonle5` deployments now use distinct deployment-scoped keys and point every model provider at the per-person loopback proxy. No worker-visible provider profile contains a direct Claude, Nexus13, OneNexus or OpenAI credential.
+- The proxy configuration is mode `0600` under a `0700` state directory owned by `dsh-sonle5-models`; its management secret is mode `0600` and root-owned. The worker cannot read either protected file, and the proxy identity cannot read the worker credential store.
+- The current CLIProxyAPI v8 layout is read from `server.port`, while legacy configurations using top-level `port` remain supported.
+- GLM 5.3, Claude Opus 5.5, and Nexus13 Opus 5.5 returned HTTP `200` through both deployment keys with `max_tokens: 65000`. Invalid proxy keys returned HTTP `401`.
+- Eval remained `one-nexus / glm-5.3-sontinh` and Executor remained `claude / claude-opus-5-5(auto)` on both deployments.
+- OpenAI `gpt-6.1-terra` and `gpt-6.1-sol` resolve through both deployments with the exact configured key, but generation is currently blocked by the OpenAI organization's `429 insufficient_quota` balance. A replay run must not be recorded as passed until the organization has API credit.
+- The full local gate passed after the compatibility changes: typecheck, 72 test files, 1,350 tests, and the production build.
+
 ## Migration and upgrades
 
 - Stop the Mac-local deployment before starting its server copy; two running deployments polling one GitHub account duplicate work.
