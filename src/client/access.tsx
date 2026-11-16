@@ -5,7 +5,7 @@ import { usePoll, type SettingsView } from './api.ts'
 import { Button, Icon, Input, Tag } from './controls.tsx'
 import { useAction, usePanel } from './provider.tsx'
 import { Field, Fields } from './settings-kit.tsx'
-import { errorText } from './text.ts'
+import { errorText, when } from './text.ts'
 import { Hint, LoadState, Section } from './widgets.tsx'
 
 type ModelProxy = ApiResponse<'GET gateway/model-proxy'>
@@ -13,7 +13,7 @@ type ProxyProvider = ModelProxy['providers'][number]
 type WritableProvider = Extract<ProxyProvider['id'], 'one-nexus' | 'openai'>
 
 const tone = (state: ProxyProvider['state']) => state === 'connected' || state === 'configured' ? 'success'
-  : state === 'error' ? 'danger' : state === 'missing' ? 'warning' : 'quiet'
+  : state === 'auth-expired' || state === 'error' ? 'danger' : state === 'missing' ? 'warning' : 'quiet'
 
 function route(value: unknown): string | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
@@ -21,6 +21,8 @@ function route(value: unknown): string | undefined {
   if (typeof item.provider !== 'string' || typeof item.model !== 'string') return route(item.model)
   return `${item.provider} / ${item.model}${typeof item.reasoningEffort === 'string' ? ` · ${item.reasoningEffort}` : ''}`
 }
+
+const authTime = (value: string | undefined, lang: string) => value ? when(value, lang) : undefined
 
 export function AccessSettings() {
   const { t, call, deployment, notify } = usePanel()
@@ -127,13 +129,17 @@ export function AccessSettings() {
             <p className="dt-mono">{item.id}</p>
             {item.id === 'claude' && item.state !== 'connected' && <div className="dt-row-buttons">
               <Button variant="primary" size="sm" icon={<Icon name="shield" size={14} />} disabled={claudeWaiting}
-                onClick={() => { void connectClaude() }}>{claudeWaiting ? t('accessClaudeWaiting') : t('accessClaudeConnect')}</Button>
+                onClick={() => { void connectClaude() }}>{claudeWaiting ? t('accessClaudeWaiting')
+                  : item.state === 'auth-expired' ? t('accessClaudeReconnect') : t('accessClaudeConnect')}</Button>
               {claudeWaiting && <Button variant="ghost" size="sm" onClick={() => {
                 void call('DELETE gateway/model-proxy/claude/session').finally(() => {
                   setClaudeWaiting(false); setLoginUrl(undefined); void access.reload()
                 })
               }}>{t('accessClaudeCancel')}</Button>}
             </div>}
+            {item.state === 'auth-expired' && <p className="dt-hint">
+              {t('accessAuthExpired', { expiresAt: authTime(item.expiresAt, t('lang')) ?? t('unsetValue') })}
+            </p>}
             {item.id === 'claude' && loginUrl && <a className="dt-inline-link" href={loginUrl} target="_blank"
               rel="noopener noreferrer">{t('accessClaudeLink')}</a>}
           </article>)}

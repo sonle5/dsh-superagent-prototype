@@ -7,7 +7,7 @@ this helper never accepts an arbitrary command, unit name, credential, profile n
 
 import argparse
 from contextlib import nullcontext
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import fcntl
 import json
 import os
@@ -633,6 +633,27 @@ def management_request(state, method, suffix, body=None, secret=None):
         raise OnboardingError("model proxy management API returned invalid JSON") from error
 
 
+def parse_auth_time(value):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(value, timezone.utc)
+        except (OSError, OverflowError, ValueError):
+            return None
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+def auth_time_text(value):
+    return value.isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
 def model_proxy_status(request, dry):
     login = require(request.get("login"), LOGIN, "login")
     _gateway_user, _gateway_group, _checkout, base = config(request)
@@ -661,6 +682,7 @@ def model_proxy_status(request, dry):
     ]
     auth_dir = state / "auth"
     auth = []
+    auth_states = {}
     if auth_dir.exists():
         for path in auth_dir.glob("*.json"):
             if path.name.startswith("._"):
@@ -672,17 +694,38 @@ def model_proxy_status(request, dry):
             if item.get("type") != "claude" or item.get("disabled") is True:
                 continue
             prefix = item.get("prefix")
+            provider = "nexus13" if prefix == "nexus13" else "claude"
             connected = bool(item.get("access_token"))
-            if prefix == "nexus13":
-                statuses.append({"id": "nexus13", "label": "Nexus13",
-                                 "state": "connected" if connected else "sign-in-required"})
-            else:
-                statuses.append({"id": "claude", "label": "Claude",
-                                 "state": "connected" if connected else "sign-in-required"})
+            expires_at = parse_auth_time(item.get("expired"))
+            last_refresh = parse_auth_time(item.get("last_refresh"))
+            current = auth_states.get(provider)
+            if current is None:
+                current = {
+                    "id": provider,
+                    "label": "Nexus13" if provider == "nexus13" else "Claude",
+                    "state": "sign-in-required",
+                }
+                auth_states[provider] = current
+            if connected:
+                current["state"] = "auth-expired" if expires_at is not None and expires_at <= datetime.now(timezone.utc) \
+                    else "connected" if current["state"] != "auth-expired" else current["state"]
+            expires_values = [
+                value for value in (current.get("expiresAt"), expires_at) if value is not None
+            ]
+            if expires_values:
+                current["expiresAt"] = auth_time_text(min(expires_values))
+            refresh_values = [
+                value for value in (current.get("lastRefreshAt"), last_refresh) if value is not None
+            ]
+            if refresh_values:
+                current["lastRefreshAt"] = auth_time_text(max(refresh_values))
             auth.append({"name": path.name, "provider": "nexus13" if prefix == "nexus13" else "claude",
                          "connected": connected})
     for provider in ("claude", "nexus13"):
-        if not any(item["id"] == provider for item in statuses):
+        state = auth_states.get(provider)
+        if state is not None:
+            statuses.append(state)
+        else:
             statuses.append({"id": provider, "label": "Claude" if provider == "claude" else "Nexus13",
                              "state": "missing"})
     raw_ids = request.get("deploymentIds", [])
@@ -711,8 +754,14 @@ def claude_start(request, dry):
     if not isinstance(response, dict) or response.get("status") != "ok" \
             or not isinstance(response.get("url"), str) or not isinstance(response.get("state"), str):
         raise OnboardingError("model proxy did not return a Claude login URL")
-    return {"url": response["url"], "state": response["state"],
-            "expiresAt": response.get("expires_at") or response.get("expiresAt")}
+    expires_at = response.get("expires_at") or response.get("expiresAt")
+    if not isinstance(expires_at, str):
+        expires_at = auth_time_text(datetime.now(timezone.utc) + timedelta(minutes=5))
+    else:
+        parsed_expires_at = parse_auth_time(expires_at)
+        if parsed_expires_at is not None:
+            expires_at = auth_time_text(parsed_expires_at)
+    return {"url": response["url"], "state": response["state"], "expiresAt": expires_at}
 
 
 def claude_callback(request, dry):

@@ -142,7 +142,9 @@ const DeploymentLogs = z.object({
 const ModelProxyProvider = z.object({
   id: z.enum(['claude', 'nexus13', 'one-nexus', 'openai']),
   label: z.string().min(1),
-  state: z.enum(['connected', 'configured', 'sign-in-required', 'missing', 'error']),
+  state: z.enum(['connected', 'configured', 'sign-in-required', 'auth-expired', 'missing', 'error']),
+  expiresAt: z.string().datetime().optional(),
+  lastRefreshAt: z.string().datetime().optional(),
 })
 const ModelProxyStatus = z.object({
   status: z.string().min(1),

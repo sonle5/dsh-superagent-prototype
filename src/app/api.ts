@@ -25,7 +25,9 @@ export interface ModelProxyView {
   providers: {
     id: ModelProxyProviderId
     label: string
-    state: 'connected' | 'configured' | 'sign-in-required' | 'missing' | 'error'
+    state: 'connected' | 'configured' | 'sign-in-required' | 'auth-expired' | 'missing' | 'error'
+    expiresAt?: string
+    lastRefreshAt?: string
   }[]
   deployments: {
     id: string

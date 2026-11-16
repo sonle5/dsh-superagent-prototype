@@ -222,6 +222,79 @@ it('rejects unbounded model-proxy configuration', async () => {
   expect(invalid).toMatchObject({ code: 1, stderr: expect.stringContaining('absolute path') })
 })
 
+it('defaults Claude login expiry when the proxy omits it', () => {
+  const result = JSON.parse(execFileSync('python3', ['-c', [
+    'import json, runpy',
+    `module = runpy.run_path(${JSON.stringify(script)})`,
+    'overrides = module["claude_start"].__globals__',
+    'overrides["config"] = lambda _request: ('
+      + '"gateway", "gateway", "/opt/dsh-superagent", _request["baseDir"])',
+    'overrides["model_proxy_plan"] = lambda _login, _base: ("model-user", "/tmp", None, {})',
+    'overrides["management_request"] = lambda _state, _method, _suffix: {'
+      + '"status": "ok", "url": "https://claude.example/authorize", "state": "state-token", "expires_at": None}',
+    'value = module["claude_start"]({'
+      + '"login": "alice", "gatewayUser": "gateway", "gatewayGroup": "gateway", '
+      + '"checkout": "/opt/dsh-superagent", "baseDir": "/tmp"'
+      + '}, False)',
+    'print(json.dumps(value))',
+  ].join('\n')], { encoding: 'utf8' }))
+
+  expect(result).toMatchObject({
+    url: 'https://claude.example/authorize',
+    state: 'state-token',
+  })
+  expect(result.expiresAt).toMatch(/Z$/)
+  expect(new Date(result.expiresAt).getTime()).toBeGreaterThan(Date.now())
+})
+
+it('reports expired Claude authorization as auth-expired', () => {
+  const result = JSON.parse(execFileSync('python3', ['-c', [
+    'import json, runpy, tempfile',
+    'from pathlib import Path',
+    `module = runpy.run_path(${JSON.stringify(script)})`,
+    'overrides = module["model_proxy_status"].__globals__',
+    'overrides["config"] = lambda _request: ('
+      + '"gateway", "gateway", "/opt/dsh-superagent", _request["baseDir"])',
+    'overrides["model_proxy_config"] = lambda _request: ("/opt/cliproxyapi/cli-proxy-api", 8317, 8416)',
+    'def model_proxy_plan(_login, _base):',
+    '    return ("model-user", Path(_base) / "model-proxies" / "alice", None, {"unit": "unit.service"})',
+    'overrides["model_proxy_plan"] = model_proxy_plan',
+    'overrides["allocate_model_proxy_port"] = lambda _login, _state, _start, _end: 8317',
+    'overrides["systemctl_state"] = lambda _unit: "active"',
+    'def management_request(_state, _method, suffix, _body=None):',
+    '    if suffix == "/config/access/api-keys": return []',
+    '    if suffix == "/config/api-keys/openai-compatibility": return []',
+    '    raise AssertionError(suffix)',
+    'overrides["management_request"] = management_request',
+    'with tempfile.TemporaryDirectory() as base:',
+    '    state = Path(base) / "model-proxies" / "alice"',
+    '    auth = state / "auth"',
+    '    auth.mkdir(parents=True)',
+    '    (auth / "claude.json").write_text(json.dumps({',
+    '        "type": "claude", "access_token": "opaque", "expired": "2026-01-01T00:00:00Z",',
+    '        "last_refresh": "2025-12-31T00:00:00Z"',
+    '    }))',
+    '    (auth / "nexus13.json").write_text(json.dumps({',
+    '        "type": "claude", "prefix": "nexus13", "access_token": "opaque",',
+    '        "expired": "2099-01-01T00:00:00Z"',
+    '    }))',
+    '    value = module["model_proxy_status"]({',
+    '        "login": "alice", "gatewayUser": "gateway", "gatewayGroup": "gateway",',
+    '        "checkout": "/opt/dsh-superagent", "baseDir": base, "deploymentIds": []',
+    '    }, False)',
+    '    print(json.dumps(value))',
+  ].join('\n')], { encoding: 'utf8' })) as {
+    providers: { id: string; state: string; expiresAt?: string }[]
+  }
+
+  expect(result.providers).toMatchObject([
+    expect.objectContaining({ id: 'one-nexus', state: 'missing' }),
+    expect.objectContaining({ id: 'openai', state: 'missing' }),
+    expect.objectContaining({ id: 'claude', state: 'auth-expired', expiresAt: '2026-01-01T00:00:00Z' }),
+    expect.objectContaining({ id: 'nexus13', state: 'connected' }),
+  ])
+})
+
 it('allocates stable, distinct proxy ports for multiple protected people', async () => {
   const baseDir = mkdtempSync(join(tmpdir(), 'dsh-model-proxy-ports-'))
   const modelProxy = { binary: '/opt/cliproxyapi/cli-proxy-api', portRange: { start: 8317, end: 8416 } }

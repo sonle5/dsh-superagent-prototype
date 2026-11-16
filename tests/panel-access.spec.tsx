@@ -64,10 +64,14 @@ it('opens one browser window for Claude and polls the existing callback listener
   const opened = { opener: {}, location: { replace: vi.fn() }, close: vi.fn() }
   vi.stubGlobal('open', vi.fn(() => opened))
   onTestFinished(() => { vi.unstubAllGlobals() })
-  server.modelProxy.providers = server.modelProxy.providers.map(item => item.id === 'claude' ? { ...item, state: 'missing' } : item)
+  server.modelProxy.providers = server.modelProxy.providers.map(item => item.id === 'claude' ? {
+    ...item, state: 'auth-expired', expiresAt: '2026-01-01T00:00:00Z',
+  } : item)
   accessPage()
   await mount()
-  await click(zh.accessClaudeConnect)
+  expect(text()).toContain(zh.accessClaudeReconnect)
+  expect(text()).toContain(zh.accessAuthExpired.split('{expiresAt}')[0])
+  await click(zh.accessClaudeReconnect)
   expect(opened.location.replace).toHaveBeenCalledWith('https://claude.example/authorize')
   expect(server.claudeLogin.state).toBe('waiting')
   expect(text()).toContain(zh.accessClaudeWaiting)
