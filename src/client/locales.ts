@@ -45,6 +45,7 @@ const TEXT = {
   'health.launch': ['派工启动', 'Assignment launches'],
   'health.delivery': ['输入送达', 'Input delivery to Assignments'],
   'health.relay': ['转达给主 Session 的消息', 'Relays to the main Session'],
+  'health.result-fallback': ['兜底发布的结果', 'Fallback results'],
   'health.notice': ['给主 Session 的通知', 'Notices to the main Session'],
   'health.reply': ['发往渠道的消息', 'Messages to Channels'],
   'health.worker': ['执行器事件处理', 'Executor event handling'],

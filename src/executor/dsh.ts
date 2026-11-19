@@ -11,7 +11,7 @@ import type { Machine } from '../deployment.ts'
 import { runAsWorker, verifyDirectory } from '../infra/environment.ts'
 import type { Settings } from '../policy.ts'
 import type { Store } from '../app/store.ts'
-import { Later, type Effects } from '../app/effects.ts'
+import { Later, type Effects, type ResultSettlement } from '../app/effects.ts'
 import { executionRoot, type Variable } from '../app/execution-environment.ts'
 import type { Sessions } from '../app/sessions.ts'
 import { WorktreeNameSchema } from '../app/assessment.ts'
@@ -476,7 +476,9 @@ export class DshExecutor implements Executor {
       ...providerRetry(agent, turn, step),
     }
   }
-  private relay({ id, text }: { id: string; text: string }): void { this.host.sessions.relay(id, text) }
+  private relay({ id, text, result }: { id: string; text: string; result?: ResultSettlement }): void {
+    this.host.sessions.relay(id, text, result)
+  }
   private async launch(ticket: Ticket, assignment: Assignment): Promise<void> {
     const current = () => {
       if (this.host.closing()) throw new Error('dsh-superagent is stopping')

@@ -2,10 +2,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { latestAssignment, waitsForPerson, type Ticket, type Trigger } from '../src/core/index.ts'
 import { Later } from '../src/app/effects.ts'
-import { reportRelay } from '../src/app/notices.ts'
+import { fallbackResultText, reportRelay } from '../src/app/notices.ts'
 import { WorkerSlots, inputMessage, mandateInstructions, ticketExecution, transient, triggerMessage } from '../src/executor/dsh.ts'
 import { SettingsSchema } from '../src/policy.ts'
 import { Commands } from '../src/infra/commands.ts'
+import { IM_WORDS, wordCount } from '../src/infra/text.ts'
 import { deferred, waitUntil } from './fixtures/async.ts'
 import { CHAT, MEMBER, feishu, startRuntime, type Host } from './fixtures/host.ts'
 
@@ -1013,7 +1014,7 @@ describe('the Executor\'s parts', () => {
     expect(inputMessage({ id: 'i4', kind: 'reopen', at: '' } as never)).toBeUndefined()
   })
   it('relays a worker\'s question, result or answer to the main Session, and keeps its progress internal', () => {
-    const ticket = { id: 't1', title: 'Fix', updatedAt: '2026-09-01T00:00:00Z', attention: { id: 'a1', question: 'Which color?' }, assignments: [],
+    const ticket = { id: 't1', title: 'Fix', updatedAt: '2026-09-01T00:00:00Z', attention: { id: 'a1', question: 'Which color?' }, assignments: [], inputs: [],
       mandate: { strength: 'explicit' }, origin: { triggerId: 'tr1' } } as unknown as Ticket
     expect(reportRelay(ticket, { state: 'progress', summary: 'halfway' })).toBeUndefined()
     expect(reportRelay(ticket, { state: 'blocked', summary: 'need input', question: 'Which color?' }))
@@ -1022,5 +1023,17 @@ describe('the Executor\'s parts', () => {
       answers: 'tr9' })!
     expect(ready.id).toMatch(/^report:/)
     expect(JSON.parse(ready.text)).toMatchObject({ kind: 'worker_report', ticket: { ticket_id: 't1' }, trigger_id: 'tr1', state: 'ready', answer_to: 'tr9', summary: 'Done' })
+    for (const state of ['ready', 'blocked', 'failed', 'dropped'] as const) {
+      const at = `2026-09-01T00:00:0${['ready', 'blocked', 'failed', 'dropped'].indexOf(state)}Z`
+      const reported = {
+        ...ticket,
+        attention: undefined,
+        assignments: [{ report: { state, summary: `${state} report`, at } }],
+      } as unknown as Ticket
+      expect(reportRelay(reported, { state, summary: `${state} report` })?.result)
+        .toEqual({ ticketId: 't1', reportAt: at, state, summary: `${state} report` })
+    }
+    const longest = Array.from({ length: IM_WORDS + 20 }, () => 'evidence').join(' ')
+    expect(wordCount(fallbackResultText({ state: 'failed', summary: longest }))).toBeLessThanOrEqual(IM_WORDS)
   })
 })

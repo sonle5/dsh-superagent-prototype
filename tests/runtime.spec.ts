@@ -22,7 +22,7 @@ import { readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { feishuKind } from '../src/sources/feishu.ts'
 import { githubKind, pollRound } from '../src/sources/github.ts'
 import { CliError, Commands } from '../src/infra/commands.ts'
-import { UserError, key, runningAssignment, said, threadKey, waitsForPerson, type Trigger } from '../src/core/index.ts'
+import { UserError, key, latestAssignment, runningAssignment, said, threadKey, waitsForPerson, type Trigger } from '../src/core/index.ts'
 import { feishuTrigger } from '../src/sources/feishu.ts'
 import { feishuChannel } from '../src/sources/feishu-trigger.ts'
 import { commentTrigger, githubChannel } from '../src/sources/github-trigger.ts'
@@ -34,6 +34,7 @@ import { overview } from '../src/app/views/overview.ts'
 import { preview, readable } from '../src/app/views/text.ts'
 import { decisionList, search, threadDetail, threadList } from '../src/app/views/threads.ts'
 import { executorLoad, ticketDetail, ticketList } from '../src/app/views/tickets.ts'
+import { resultReplyId } from '../src/core/replies.ts'
 
 let runtime: Runtime
 const viewsOf = (value: Runtime) => ({ store: value.store, sources: value.sources, links: value.links() })
@@ -313,7 +314,8 @@ it('accepts silently under a rule that says so, gives the worker the rule proced
   expect(await runTool(`worker-${ticket.id}`, 'orchestrator_read', { resource: `ticket/${ticket.id}/assignment` })).toMatchObject({ text: expect.stringContaining('沉默地复现和修复 (silent-bugfix): Reproduce minimally first; accept silently.') })
   await expect(runTool(runtime.masterId, 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'result', text: 'x' })).rejects.toThrow('not ready')
   await runTool(`worker-${ticket.id}`, 'orchestrator_report', { state: 'blocked', summary: 'needs a decision' })
-  await expect(runTool(runtime.masterId, 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'result', text: 'x' })).rejects.toThrow('not ready')
+  expect(await runTool(runtime.masterId, 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'result', text: 'Needs attention: a decision is required.' }))
+    .toEqual({ status: 'sent' })
   // Nothing left for a human: the ticket closes instead of waiting, and the rule's closing sentence can still be delivered.
   await runTool(`worker-${ticket.id}`, 'orchestrator_report', { state: 'dropped', summary: 'too complex; recorded in #123' })
   expect(runtime.store.tickets.get(ticket.id)).toMatchObject({ ended: expect.objectContaining({ by: 'executor', outcome: 'dropped' }) })
@@ -351,6 +353,62 @@ it('records worker reports, binds the task PR, ends the ticket on ready without 
   expect(agents.get(sessionId)!.cancel).not.toHaveBeenCalled()
   const notice = runtime.store.receipts.waiting().find(item => item.kind === 'notice')
   expect(notice ?? runtime.store.replyStatus(key('pr-terminal', '42', 'feishu', JSON.stringify({ chatId: CHAT, messageId: 'om_1' }), 'merged'))).toBeTruthy()
+})
+
+it('publishes one concise fallback result when the orchestrator ends without replying, even across restart', async () => {
+  const { ticket, sessionId } = await acceptedTicket()
+  const main = agents.get(runtime.masterId)!
+  main.status = 'idle'
+  vi.mocked(Commands.prototype.lark).mockClear()
+  const summary = `Implemented the guard and verified it. ${'Evidence. '.repeat(120)}`
+  await runTool(sessionId, 'orchestrator_report', { state: 'ready', summary })
+  const report = latestAssignment(runtime.store.tickets.get(ticket.id)!)!.report!
+  const resultId = resultReplyId(ticket.id, report)
+  main.status = 'idle'
+  ;(runtime as unknown as { ctx: Context }).ctx.emit('agent/status', { agent: main, status: 'idle' } as never)
+  await vi.waitFor(() => expect(runtime.effects.pending('result-fallback')).toBe(false), { timeout: 5000 })
+  expect(runtime.store.replyStatus(resultId)).toBe('sent')
+  const replies = () => vi.mocked(Commands.prototype.lark).mock.calls
+    .map(([args]) => args).filter(args => args[1] === '+messages-reply')
+  expect(replies()).toHaveLength(1)
+  expect(replies()[0]).toEqual(expect.arrayContaining(['--markdown', expect.stringMatching(/^Completed\. Implemented the guard/)]))
+
+  runtime.effects.enqueue('result-fallback', 'repeat', {
+    ticketId: ticket.id, reportAt: report.at, state: report.state as 'ready', summary: report.summary,
+  })
+  await runtime.idle()
+  expect(replies()).toHaveLength(1)
+
+  await restart()
+  vi.mocked(Commands.prototype.lark).mockClear()
+  runtime.effects.enqueue('result-fallback', 'after-restart', {
+    ticketId: ticket.id, reportAt: report.at, state: report.state as 'ready', summary: report.summary,
+  })
+  await runtime.idle()
+  expect(replies()).toHaveLength(0)
+  expect(runtime.store.replyStatus(resultId)).toBe('sent')
+})
+
+it('waits while the orchestrator is running and lets its normal result reply suppress the fallback', async () => {
+  const { ticket, sessionId } = await acceptedTicket()
+  const main = agents.get(runtime.masterId)!
+  main.status = 'running'
+  vi.mocked(Commands.prototype.lark).mockClear()
+  await runTool(sessionId, 'orchestrator_report', { state: 'failed', summary: 'The provider timed out.' })
+  const report = latestAssignment(runtime.store.tickets.get(ticket.id)!)!.report!
+  expect(runtime.store.replyStatus(resultReplyId(ticket.id, report))).toBeUndefined()
+  expect(runtime.effects.pending('result-fallback')).toBe(true)
+
+  const normal = 'Could not complete: the provider timed out; retry after it recovers.'
+  expect(await runTool(runtime.masterId, 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'result', text: normal })).toEqual({ status: 'sent' })
+  main.inbox.nextStep.length = 0
+  main.status = 'idle'
+  ;(runtime as unknown as { ctx: Context }).ctx.emit('agent/status', { agent: main, status: 'idle' } as never)
+  await vi.waitFor(() => expect(runtime.effects.pending('result-fallback')).toBe(false), { timeout: 5000 })
+  const replies = vi.mocked(Commands.prototype.lark).mock.calls
+    .map(([args]) => args).filter(args => args[1] === '+messages-reply')
+  expect(replies).toHaveLength(1)
+  expect(replies[0]).toEqual(expect.arrayContaining(['--markdown', normal]))
 })
 
 it('lists each ticket with the Threads it subscribes to, as their Sources describe them', async () => {

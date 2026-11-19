@@ -11,7 +11,7 @@ import { mandateInstructions, ticketOfSession, workerSessionId } from '../execut
 import type { HealthEntry } from '../infra/health.ts'
 import type { RoleModel } from '../policy.ts'
 import { AgentDelivery, messageId } from './delivery.ts'
-import type { Effects } from './effects.ts'
+import type { Effects, ResultSettlement } from './effects.ts'
 import type { Variable } from './execution-environment.ts'
 import { RetryHealth } from './retry-health.ts'
 import { applyRoleModel as applyAgentRoleModel } from './role-models.ts'
@@ -102,7 +102,10 @@ export class Sessions {
     this.ctx = host.context
     this.agentDelivery = new AgentDelivery(host.context, host.masterId)
     // Deliver relays and notices to the main Session in the order they were queued.
-    host.effects.handle('relay', ({ text }, requestId) => this.prompt(host.masterId, requestId, text, 'steer'), { ordered: true })
+    host.effects.handle('relay', async ({ text, result }, requestId) => {
+      await this.prompt(host.masterId, requestId, text, 'steer')
+      if (result) host.effects.enqueue('result-fallback', requestId, result)
+    }, { ordered: true })
     host.effects.handle('notice', ({ value, summary }, name) => this.inject(name, value, summary), { ordered: true })
   }
   /** Subscribes to host agent and session events so newly created sessions are decorated and model-budget retries are reflected in health. Call once at startup. */
@@ -194,7 +197,9 @@ export class Sessions {
   /** The id of the message `prompt` delivers under `requestId`, which DSH's inbox events name it by. */
   promptedId(requestId: string): MessageId { return messageId(key(requestId)) }
   /** Enqueues a steering relay to the main Session; relays are durable and retried by `Effects` until delivered, at most once per `requestId`. */
-  relay(requestId: string, text: string): void { this.host.effects.enqueue('relay', requestId, { text }) }
+  relay(requestId: string, text: string, result?: ResultSettlement): void {
+    this.host.effects.enqueue('relay', requestId, { text, ...result ? { result } : {} })
+  }
   /** Enqueues a durable background notice for injection into the main Session; a new notice with the same `name` replaces a still-waiting notice of that `name`. */
   notify(name: string, value: Record<string, unknown>, summary: string): void { this.host.effects.enqueue('notice', name, { value, summary }) }
   /** Waits for currently runnable `notice` effects to settle and returns `'injected'` if notice `name` has reached the main Session or `'pending'` if it is still queued. */

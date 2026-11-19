@@ -16,13 +16,22 @@ export interface EffectPayloads {
   /** Hand a ticket's waiting Inputs to its running Assignment; the key is the Ticket ID. */
   delivery: { ticketId: string }
   /** Steer a report or a candidate into the main Session; the key is the request ID. */
-  relay: { text: string }
+  relay: { text: string; result?: ResultSettlement }
   /** Inject a notice into the main Session without waking it; the key names what it reports, such as `prompts`. */
   notice: { value: Record<string, unknown>; summary: string }
+  /** Publish a deterministic result if the orchestrator finishes its turn without delivering one. */
+  'result-fallback': ResultSettlement
   /** Send a message for a Channel through its Source; the key is the message ID, whose receipt the Outbox keeps. */
   reply: Record<string, never>
 }
 export type EffectKind = keyof EffectPayloads
+/** The worker report whose result must reach people even when the orchestrator omits a final reply. */
+export interface ResultSettlement {
+  ticketId: string
+  reportAt: string
+  state: 'ready' | 'blocked' | 'failed' | 'dropped'
+  summary: string
+}
 interface Handler<K extends EffectKind> {
   run: (payload: EffectPayloads[K], key: string) => Promise<void>
   /** How many may run at once now; 0 holds the kind, such as while processing is paused. */

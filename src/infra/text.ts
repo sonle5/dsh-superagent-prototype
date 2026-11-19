@@ -8,6 +8,17 @@ export function wordCount(text: string): number {
   for (const segment of words.segment(text)) if (segment.isWordLike) count++
   return count
 }
+/** Normalize whitespace and truncate before the first word beyond `maximum`. */
+export function fitWords(text: string, maximum: number): string {
+  const normalized = text.replace(/\s+/g, ' ').trim()
+  let count = 0
+  for (const segment of words.segment(normalized)) {
+    if (!segment.isWordLike) continue
+    if (count === maximum) return `${normalized.slice(0, segment.index).trimEnd()}…`
+    count++
+  }
+  return normalized
+}
 /** Validates that an outgoing IM Markdown message does not exceed `IM_WORDS` (link labels and URLs both count toward the limit). */
 export function checkedImText(text: string): string {
   const count = wordCount(text)

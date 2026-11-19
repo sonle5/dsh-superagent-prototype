@@ -1,11 +1,13 @@
 /** Formats background notices and steering relays delivered to the main Session via the effect queue. */
 import { randomUUID } from 'node:crypto'
-import { followupOwners, key, liveTicket, type DomainEvent, type Ticket, type WorkerReport } from '../core/index.ts'
+import { followupOwners, key, latestAssignment, liveTicket, type DomainEvent, type Ticket, type WorkerReport } from '../core/index.ts'
+import { IM_WORDS, fitWords, wordCount } from '../infra/text.ts'
 import { triggerMessage } from '../executor/dsh.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
 import { repliedTo } from './links.ts'
 import type { Store } from './store.ts'
 import { ticketCard } from './cards.ts'
+import type { ResultSettlement } from './effects.ts'
 
 /**
  * A background notice tuple for the main Session: `[name, value, summary]`, where `name` is the coalescing key in
@@ -74,7 +76,7 @@ export const threadFollowedNotice = (ticketId: string, thread: string, reason: s
     `Ticket ${ticketId} follows thread ${thread} for context: ${reason}`)
 
 /** Steering relay payload for the main Session: `id` is the request ID that makes delivery idempotent, and `text` is the message body. */
-export interface Relay { id: string; text: string }
+export interface Relay { id: string; text: string; result?: ResultSettlement }
 /** What a follow-up asks of the main Session: nothing but a stop the person asks for, since its ticket's worker decides it. */
 const FOLLOWUP_NOTE = 'Its ticket\'s worker has it and decides; act only if the person asks to stop the work '
   + '(orchestrator_route kind stop with this trigger_id).'
@@ -110,7 +112,19 @@ export function resultRelay(ticket: Ticket, state: string, text: string, replyTo
   const summary = text.length > 600 ? { summary: text.slice(0, 600), chars: text.length } : { summary: text }
   const report = { kind: 'worker_report', ticket: brief(ticket), trigger_id: ticket.origin.triggerId, state, ...replyTo ? { answer_to: replyTo } : {},
     ...summary, read: `ticket/${ticket.id}/result` }
-  return { id: `report:${id}`, text: JSON.stringify(report) }
+  const latest = latestAssignment(ticket)?.report
+  const result = !replyTo && latest && latest.state === state
+    && (state === 'ready' || state === 'blocked' || state === 'failed' || state === 'dropped')
+    ? { ticketId: ticket.id, reportAt: latest.at, state, summary: latest.summary }
+    : undefined
+  return { id: `report:${id}`, text: JSON.stringify(report), ...result ? { result } : {} }
+}
+/** A concise fallback result derived from the worker report when the orchestrator omits its final reply. */
+export function fallbackResultText(result: Pick<ResultSettlement, 'state' | 'summary'>): string {
+  const lead = result.state === 'ready' ? 'Completed.'
+    : result.state === 'blocked' ? 'Needs attention:'
+      : result.state === 'failed' ? 'Could not complete:' : 'Work stopped:'
+  return `${lead} ${fitWords(result.summary, Math.max(1, IM_WORDS - wordCount(lead)))}`
 }
 /**
  * Converts a worker report recorded on `ticket` into a main-Session relay: a question for a person produces a

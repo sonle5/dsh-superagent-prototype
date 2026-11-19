@@ -6,6 +6,10 @@ import type { ChannelRef, Ticket, Trigger } from './model.ts'
 import type { ReplyStatus } from './ports.ts'
 import { EnginePart } from './part.ts'
 
+/** Stable identity of the one canonical result for a worker report. */
+export const resultReplyId = (ticketId: string, report: { at: string; state: string; summary: string }): string =>
+  key('result', ticketId, report.at, report.state, report.summary)
+
 /**
  * A message for a Channel, by purpose: an Executor's acknowledgement of a person's request it works on, the answer to a
  * person's question once the worker reported it, the result of a ticket that is `ready`, `completed`, `merged`, or `dropped`,
@@ -28,9 +32,9 @@ export class Replies extends EnginePart {
   /**
    * Queue a message for the Channel its purpose names: an acknowledgement or an answer goes where that person's message was
    * written, attention where the message that raised the question was (or to the ticket's starting conversation), and a
-   * result to the conversation where the ticket started (`result` is allowed only for a ticket in `ready`, `completed`,
-   * `merged`, or `dropped`). Each message is queued at most once (idempotent). An acknowledgement, even one already queued,
-   * records that the ticket's worker took the message up.
+   * result to the conversation where the ticket started (`result` is allowed only for a ticket in `ready`, `blocked`,
+   * `failed`, `completed`, `merged`, or `dropped`). Each message is queued at most once (idempotent). An acknowledgement,
+   * even one already queued, records that the ticket's worker took the message up.
    * @throws UserError when the ticket or trigger is unknown or the purpose's rule refuses it, such as a result of a ticket
    * that is not ready, completed, merged, or dropped.
    */
@@ -69,7 +73,8 @@ export class Replies extends EnginePart {
       : trigger ? this.repo.tickets.list().find(item => this.reaches(item, trigger)) : undefined
     if (request.purpose === 'result') {
       const outcome = ticket && ticketOutcome(ticket)
-      const reported = !!ticket && liveTicket(ticket) && latestAssignment(ticket)?.report?.state === 'ready'
+      const reportState = ticket ? latestAssignment(ticket)?.report?.state : undefined
+      const reported = !!ticket && liveTicket(ticket) && (reportState === 'ready' || reportState === 'blocked' || reportState === 'failed')
       const ready = outcome === 'merged' || outcome === 'completed' || outcome === 'dropped' || reported
       if (!ticket || !ready) throw new UserError('notReady')
     }
@@ -77,7 +82,10 @@ export class Replies extends EnginePart {
     // Attention replies must match the ticket's currently open question text.
     if (request.purpose === 'attention' && (!attention || attention.question !== request.question)) throw new UserError('notAttention')
     if (request.purpose === 'answer' && !trigger?.human) throw new UserError('notQuestion')
-    const id = attention ? key('attention-reply', attention.id) : key('reply', trigger?.id ?? ticket?.id ?? '', request.text)
+    const id = attention ? key('attention-reply', attention.id)
+      : request.purpose === 'result' && ticket
+        ? resultReplyId(ticket.id, latestAssignment(ticket)?.report ?? { at: ticket.updatedAt, state: '', summary: '' })
+        : key('reply', trigger?.id ?? ticket?.id ?? '', request.text)
     const existing = this.options.outbox.status(id)
     const ready = !ticket || !trigger || ticket.answers?.includes(trigger.id)
     if (request.purpose === 'answer' && !ready && !existing) throw new UserError('noAnswer')

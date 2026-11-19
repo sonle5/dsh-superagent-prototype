@@ -1023,7 +1023,7 @@ describe('replies', () => {
     h.engine.stopTicket(ticketId)
     expect(() => h.engine.reply({ purpose: 'acknowledgement', ticketId, triggerId: '2', text: 'x' })).toThrow(new UserError('ackEnded'))
   })
-  it('sends an answer only after the worker reported it, a result only for a ready ticket, and attention only for its current question', () => {
+  it('sends an answer only after the worker reported it, a result only after terminal work, and attention only for its current question', () => {
     const h = harness()
     const ticketId = accepted(h).ticketId!
     const asked = trigger('2', { actor: guest, channel: { source: 'chat', thread: 't1', address: { message: '2' } } })
@@ -1047,6 +1047,11 @@ describe('replies', () => {
     h.engine.report(ticketId, { state: 'ready', summary: 'Done' })
     expect(h.engine.reply({ purpose: 'result', ticketId, text: 'Done' })).toMatchObject({ status: 'pending' })
     expect(h.outbox.at(-1)!.channel).toEqual(trigger('1').channel)
+    for (const state of ['blocked', 'failed'] as const) {
+      const id = accepted(h, state === 'blocked' ? '7' : '8', state).ticketId!
+      h.engine.report(id, { state, summary: `${state} result` })
+      expect(h.engine.reply({ purpose: 'result', ticketId: id, text: `${state} result` })).toMatchObject({ status: 'pending', reused: false })
+    }
   })
 
   it('posts one linked completion notice to the latest active followed thread', () => {
@@ -1312,7 +1317,7 @@ describe('gaps', () => {
     h.engine.stopTicket(ticketId)
     expect(() => h.engine.retryTicket(ticketId)).toThrow(new UserError('notRetryable'))
   })
-  it('answers a question once, sends a result only for finished work, and the same result once', () => {
+  it('answers a question once, sends one result per finished worker report, and reuses it regardless of model wording', () => {
     const h = harness()
     const ticketId = accepted(h).ticketId!
     h.tick(1); h.engine.receive(trigger('2')); h.settle()
@@ -1323,7 +1328,7 @@ describe('gaps', () => {
     h.engine.report(ticketId, { state: 'ready', summary: 'Done' })
     const sent = h.outbox.length
     expect(h.engine.reply({ purpose: 'result', ticketId, text: 'Done' })).toMatchObject({ reused: false })
-    expect(h.engine.reply({ purpose: 'result', ticketId, text: 'Done' })).toMatchObject({ reused: true })
+    expect(h.engine.reply({ purpose: 'result', ticketId, text: 'A different model summary' })).toMatchObject({ reused: true })
     expect(h.outbox).toHaveLength(sent + 1)
     // A ticket whose PR closed unmerged, or that a person stopped, has no result to send.
     const closed = accepted(h, '5', 't5').ticketId!
