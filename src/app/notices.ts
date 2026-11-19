@@ -119,12 +119,15 @@ export function resultRelay(ticket: Ticket, state: string, text: string, replyTo
     : undefined
   return { id: `report:${id}`, text: JSON.stringify(report), ...result ? { result } : {} }
 }
-/** A concise fallback result derived from the worker report when the orchestrator omits its final reply. */
-export function fallbackResultText(result: Pick<ResultSettlement, 'state' | 'summary'>): string {
+/** A fallback result derived from the worker report when the orchestrator omits its final reply. */
+export function fallbackResultText(result: Pick<ResultSettlement, 'state' | 'summary'>, source?: string): string {
   const lead = result.state === 'ready' ? 'Completed.'
     : result.state === 'blocked' ? 'Needs attention:'
       : result.state === 'failed' ? 'Could not complete:' : 'Work stopped:'
-  return `${lead} ${fitWords(result.summary, Math.max(1, IM_WORDS - wordCount(lead)))}`
+  const summary = source === 'feishu'
+    ? fitWords(result.summary, Math.max(1, IM_WORDS - wordCount(lead)))
+    : result.summary
+  return `${lead} ${summary}`
 }
 /**
  * Converts a worker report recorded on `ticket` into a main-Session relay: a question for a person produces a

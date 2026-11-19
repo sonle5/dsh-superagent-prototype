@@ -1034,6 +1034,8 @@ describe('the Executor\'s parts', () => {
         .toEqual({ ticketId: 't1', reportAt: at, state, summary: `${state} report` })
     }
     const longest = Array.from({ length: IM_WORDS + 20 }, () => 'evidence').join(' ')
-    expect(wordCount(fallbackResultText({ state: 'failed', summary: longest }))).toBeLessThanOrEqual(IM_WORDS)
+    expect(wordCount(fallbackResultText({ state: 'failed', summary: longest }, 'feishu'))).toBeLessThanOrEqual(IM_WORDS)
+    const markdown = `## Verification\n\n- ${longest}\n\nFINAL_SENTINEL`
+    expect(fallbackResultText({ state: 'ready', summary: markdown }, 'github')).toBe(`Completed. ${markdown}`)
   })
 })

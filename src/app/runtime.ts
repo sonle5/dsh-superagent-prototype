@@ -160,7 +160,8 @@ export class Runtime extends Service implements SourceHost {
         const latest = ticket ? latestAssignment(ticket)?.report : undefined
         if (!ticket || !latest || latest.at !== result.reportAt) return
         if (store.replyStatus(resultReplyId(ticket.id, { at: result.reportAt, state: result.state, summary: result.summary }))) return
-        engine.reply({ purpose: 'result', ticketId: ticket.id, text: fallbackResultText(result) })
+        const source = store.triggers.get(ticket.origin.triggerId)?.channel?.source
+        engine.reply({ purpose: 'result', ticketId: ticket.id, text: fallbackResultText(result, source) })
         await outbox.sent()
       }, { retry: [2_000, 60_000], quiet: true })
       // Update the `evals` health entry on every pass if an evaluation failed as unavailable within the last hour.
