@@ -94,6 +94,21 @@ export function issueTrigger(issue: Opened, agent: string): Trigger {
 export function pullTrigger(pull: Opened, agent: string): Trigger {
   return { ...issueTrigger(pull, agent), meta: { number: pull.number, isPr: true, prAuthor: pull.user.login, kind: 'pull' } }
 }
+/** A PR timeline event as `issues/<number>/events` returns it; `review_requested` events name the requested reviewer. */
+export const IssueEventSchema = z.looseObject({ id: z.number(), event: z.string(), actor: UserSchema, created_at: z.string(),
+  requested_reviewer: z.looseObject({ login: z.string() }).nullish() })
+export type GithubIssueEvent = z.infer<typeof IssueEventSchema>
+/**
+ * Builds the trigger for a request that the agent review a PR; the requester is its actor and the request addresses the agent.
+ * The ID names the request event, so requesting the agent again produces a new Trigger.
+ */
+export function reviewRequestTrigger(pull: Opened, request: GithubIssueEvent): Trigger {
+  return { id: key('github-review-request', String(pull.number), String(request.id)), source: SOURCE,
+    threads: [{ source: SOURCE, id: String(pull.number) }], ...author(request.actor), at: request.created_at,
+    text: `@${request.actor.login} requested your review of this pull request.\n\n${pull.title}\n\n${pull.body ?? ''}`.trimEnd(),
+    addressed: 'mention', channel: githubChannel(pull.number, pull.html_url), url: pull.html_url,
+    meta: { number: pull.number, isPr: true, prAuthor: pull.user.login, kind: 'review_request' } }
+}
 /** Builds a trigger for a default-branch CI transition; default-branch CI has no person to reply to, so it has no `channel`. */
 export function branchCiTrigger(branch: string, sha: string, revision: number, summary: string, url: string): Trigger {
   return { id: key('github-ci', `branch:${branch}`, String(revision)), source: SOURCE,

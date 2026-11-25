@@ -743,6 +743,30 @@ describe('github source', () => {
     expect(h.receive.mock.calls.filter(([trigger]) => trigger.meta.kind === 'pull')).toEqual([])
     h.store.close()
   })
+  it('takes in a request that the agent review a PR as a Trigger addressed to the agent from the requester', async () => {
+    const h = host()
+    h.store.set('github-since', '2026-09-08T00:00:00.000Z')
+    const pr = { ...openPull(9), body: 'Adds padding', created_at: '2026-09-01T00:00:00Z' }
+    const request = (id: number, reviewer: string, actor = 'alice', at = '2026-09-09T00:00:00Z') =>
+      ({ id, event: 'review_requested', actor: { login: actor, type: 'User' }, created_at: at, requested_reviewer: { login: reviewer } })
+    const events = [request(1, 'agent-bot', 'alice', '2026-08-01T00:00:00Z'), request(2, 'bob'), request(3, 'agent-bot'),
+      request(4, 'agent-bot', 'agent-bot'), { id: 5, event: 'labeled', actor: { login: 'alice' }, created_at: '2026-09-09T00:00:00Z' }]
+    github(h, { notifications: [{ ...notification(9, 'pulls'), reason: 'review_requested' }], 'pulls/9': pr,
+      'issues/9/events': events })
+    await pollRound(h)
+    const requested = h.receive.mock.calls.map(([trigger]) => trigger).filter(trigger => trigger.meta.kind === 'review_request')
+    expect(requested).toEqual([expect.objectContaining({ id: key('github-review-request', '9', '3'), addressed: 'mention',
+      actor: { source: 'github', id: 'alice' }, human: true, text: '@alice requested your review of this pull request.\n\nFix the margin\n\nAdds padding',
+      meta: { number: 9, isPr: true, prAuthor: 'carol', kind: 'review_request' } })])
+    // An allowed requester asks explicitly.
+    expect(h.engine.candidate(requested[0]!.id)?.strength).toBe('explicit')
+    // A notification for any other reason reads no review requests.
+    github(h, { notifications: [notification(9, 'pulls')], 'pulls/9': pr, 'issues/9/events': events })
+    h.receive.mockClear()
+    await pollRound(h)
+    expect(h.receive.mock.calls.filter(([trigger]) => trigger.meta.kind === 'review_request')).toEqual([])
+    h.store.close()
+  })
   it('reads a subscribed default-branch CI Thread as no Issue, and keeps no poll error on it', async () => {
     const h = host()
     h.store.tickets.save(openTicket('ticket'))

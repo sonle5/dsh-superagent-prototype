@@ -5,7 +5,8 @@ import { sameName } from '../infra/text.ts'
 import { GithubAccountsSchema } from '../deployment.ts'
 import { CliError, validItems, type Tally } from '../infra/commands.ts'
 import { ciCounts, ciFact, ciFailures, ciSummary, githubThreadContext, pullChecks } from './github-read.ts'
-import { branchCiTrigger, ciTrigger, commentTrigger, CommentSchema, githubAddress, issueTrigger, IssueSchema, mentions, pullTrigger, SOURCE }
+import { branchCiTrigger, ciTrigger, commentTrigger, CommentSchema, githubAddress, IssueEventSchema, issueTrigger, IssueSchema, mentions, pullTrigger,
+  reviewRequestTrigger, SOURCE }
   from './github-trigger.ts'
 import { githubLink, sendGithub } from './github-channel.ts'
 import type { GithubComment, PullRef } from './github-trigger.ts'
@@ -19,7 +20,7 @@ import { z } from 'zod'
 export { commentTrigger, type GithubComment } from './github-trigger.ts'
 /** A notification of the agent account; `subject.url` is its Issue or PR and `latest_comment_url` its newest comment. */
 const NotificationSchema = z.looseObject({
-  repository: z.looseObject({ full_name: z.string() }),
+  repository: z.looseObject({ full_name: z.string() }), reason: z.string().nullish(),
   subject: z.looseObject({ url: z.string().nullish(), latest_comment_url: z.string().nullish() }),
 })
 
@@ -157,7 +158,8 @@ const newRound = (signal?: AbortSignal): Round => ({ started: new Date().toISOSt
   failures: [], dropped: [], abandoned: [], tally: { skipped: 0 } })
 const stopped = (ctx: SourceContext, round: Round): boolean => !!round.signal?.aborted || !ctx.config(SOURCE)
 interface ExactComment { path: string; kind: 'conversation' | 'inline' | 'review' }
-export interface Retry { since: string; pr: boolean; comment?: ExactComment; failedAt?: string; attempts?: number }
+/** A notified Issue or PR to read; `reviewRequested` is set when a notification reported a review request to the agent. */
+export interface Retry { since: string; pr: boolean; comment?: ExactComment; reviewRequested?: true; failedAt?: string; attempts?: number }
 const RETRY_WINDOW_MS = 24 * 3600_000
 /** GitHub can surface a new Issue's mention after the polling cursor passed its `created_at`. */
 const OPENED_GRACE_MS = 5 * 60_000
@@ -334,7 +336,7 @@ async function pollNotifications(ctx: SourceContext, round: Round): Promise<{ co
     const previous = items.get(number)
     const comment = exactComment(notification.subject.latest_comment_url, repository)
     items.set(number, { ...previous, since: previous?.since ?? [state.get(KV.github.cursor(number)) ?? since, since].sort().at(-1)!,
-      pr, ...comment ? { comment } : {} })
+      pr, ...comment ? { comment } : {}, ...notification.reason === 'review_requested' ? { reviewRequested: true as const } : {} })
   }
   for (const [number, item] of items) {
     if (stopped(ctx, round)) return { count: notifications.length, interval }
@@ -384,6 +386,7 @@ async function readNotified(ctx: SourceContext, round: Round, number: number, it
       const opened = { number, title: pr.title ?? '', body: pr.body, user: pr.user, created_at: pr.created_at, html_url: pr.html_url }
       await ctx.receive(pullTrigger(opened, login))
     }
+    if (item.reviewRequested) await intakeReviewRequests(ctx, round, pr, since)
     const ref = { number, isPr: true, url: pr.html_url, prAuthor: pr.user.login }
     await intakeComments(ctx, ref, since, round)
     await intakeExactComment(ctx, round, ref, item.comment)
@@ -391,6 +394,17 @@ async function readNotified(ctx: SourceContext, round: Round, number: number, it
   }
   ctx.state.set(KV.github.cursor(number), cursorAt(round.started))
   ctx.threads.patch(`github:${number}`, { pollError: undefined })
+}
+/** Takes in each request since `since` that the agent review the PR, with the requester as its actor; the agent's own requests are skipped. */
+async function intakeReviewRequests(ctx: SourceContext, round: Round, pr: Pull, since: string): Promise<void> {
+  const { login } = ctx.deployment.github
+  const events = await ctx.commands.withSignal(round.signal).pages(IssueEventSchema, `issues/${pr.number}/events?per_page=100`, round.tally)
+  const opened = { number: pr.number, title: pr.title ?? '', body: pr.body, user: pr.user, created_at: pr.created_at ?? '', html_url: pr.html_url }
+  for (const event of events) {
+    if (event.event !== 'review_requested' || !event.requested_reviewer || !sameName(event.requested_reviewer.login, login)) continue
+    if (Date.parse(event.created_at) < Date.parse(since) - OPENED_GRACE_MS || sameName(event.actor.login, login)) continue
+    await ctx.receive(reviewRequestTrigger(opened, event))
+  }
 }
 /** Reads and observes a PR at most once per polling round. */
 function pull(ctx: SourceContext, round: Round, number: number): Promise<Pull> {
