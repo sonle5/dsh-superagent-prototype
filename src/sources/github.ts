@@ -26,7 +26,7 @@ const NotificationSchema = z.looseObject({
 
 const GithubConfigSchema = GithubAccountsSchema.extend({ pollSeconds: z.number().int().min(60).max(3600).default(60),
   failuresBeforeError: z.number().int().min(1).max(20).default(3),
-  notifications: z.boolean().default(true),
+  notifications: z.boolean().default(true), reviewRequests: z.boolean().default(false),
   observeIssues: z.boolean().default(false), observePulls: z.boolean().default(false), observeComments: z.boolean().default(false),
   observeCi: z.boolean().default(false) }).strict()
 export type GithubConfig = z.infer<typeof GithubConfigSchema>
@@ -59,7 +59,9 @@ export const githubKind: SourceKind<GithubConfig> = {
     { key: 'observeComments', type: 'switch', label: { zh: '接收仓库里的评论', en: 'Receive comments in the repository' },
       hint: { zh: '打开后，Issue 和 PR 上没有 @ 智能体的评论和代码评论也会收到，由策略的接收表决定是否成为候选。', en: 'Comments and review comments on Issues and PRs that do not mention the agent are received too, and the Policy\'s admission table decides whether they become candidates.' } },
     { key: 'observeCi', type: 'switch', label: { zh: '接收默认分支的 CI', en: 'Receive the default branch\'s CI' },
-      hint: { zh: '打开后，默认分支的 CI 失败和恢复会收到，由策略的接收表决定是否成为候选。', en: 'Failures of the default branch\'s CI, and its recovery, are received, and the Policy\'s admission table decides whether they become candidates.' } }],
+      hint: { zh: '打开后，默认分支的 CI 失败和恢复会收到，由策略的接收表决定是否成为候选。', en: 'Failures of the default branch\'s CI, and its recovery, are received, and the Policy\'s admission table decides whether they become candidates.' } },
+    { key: 'reviewRequests', type: 'switch', label: { zh: '把审查请求当作点名', en: 'Treat review requests as addressed' },
+      hint: { zh: '打开后，有人在 PR 上请求智能体审查时，算作点名智能体的请求，请求人是发送者。需要读取账号通知。', en: 'A request that the agent review a pull request addresses the agent, with the requester as its sender. Needs the account notification inbox.' } }],
   // What the Source observes across the repository it receives in full; elsewhere, only what addresses the agent.
   scope: ({ meta }, config) => {
     const row = scopeOf(meta)
@@ -158,7 +160,7 @@ const newRound = (signal?: AbortSignal): Round => ({ started: new Date().toISOSt
   failures: [], dropped: [], abandoned: [], tally: { skipped: 0 } })
 const stopped = (ctx: SourceContext, round: Round): boolean => !!round.signal?.aborted || !ctx.config(SOURCE)
 interface ExactComment { path: string; kind: 'conversation' | 'inline' | 'review' }
-/** A notified Issue or PR to read; `reviewRequested` is set when a notification reported a review request to the agent. */
+/** A notified Issue or PR to read; `reviewRequested` is set when a notification reported a review request to the agent, which `reviewRequests` turns into Triggers. */
 export interface Retry { since: string; pr: boolean; comment?: ExactComment; reviewRequested?: true; failedAt?: string; attempts?: number }
 const RETRY_WINDOW_MS = 24 * 3600_000
 /** GitHub can surface a new Issue's mention after the polling cursor passed its `created_at`. */
@@ -386,7 +388,7 @@ async function readNotified(ctx: SourceContext, round: Round, number: number, it
       const opened = { number, title: pr.title ?? '', body: pr.body, user: pr.user, created_at: pr.created_at, html_url: pr.html_url }
       await ctx.receive(pullTrigger(opened, login))
     }
-    if (item.reviewRequested) await intakeReviewRequests(ctx, round, pr, since)
+    if (item.reviewRequested && ctx.config<GithubConfig>(SOURCE)?.reviewRequests) await intakeReviewRequests(ctx, round, pr, since)
     const ref = { number, isPr: true, url: pr.html_url, prAuthor: pr.user.login }
     await intakeComments(ctx, ref, since, round)
     await intakeExactComment(ctx, round, ref, item.comment)

@@ -743,17 +743,23 @@ describe('github source', () => {
     expect(h.receive.mock.calls.filter(([trigger]) => trigger.meta.kind === 'pull')).toEqual([])
     h.store.close()
   })
-  it('takes in a request that the agent review a PR as a Trigger addressed to the agent from the requester', async () => {
+  it('takes in a request that the agent review a PR as a Trigger addressed to the agent from the requester, when switched on', async () => {
     const h = host()
-    h.store.set('github-since', '2026-09-08T00:00:00.000Z')
     const pr = { ...openPull(9), body: 'Adds padding', created_at: '2026-09-01T00:00:00Z' }
     const request = (id: number, reviewer: string, actor = 'alice', at = '2026-09-09T00:00:00Z') =>
       ({ id, event: 'review_requested', actor: { login: actor, type: 'User' }, created_at: at, requested_reviewer: { login: reviewer } })
     const events = [request(1, 'agent-bot', 'alice', '2026-08-01T00:00:00Z'), request(2, 'bob'), request(3, 'agent-bot'),
       request(4, 'agent-bot', 'agent-bot'), { id: 5, event: 'labeled', actor: { login: 'alice' }, created_at: '2026-09-09T00:00:00Z' }]
-    github(h, { notifications: [{ ...notification(9, 'pulls'), reason: 'review_requested' }], 'pulls/9': pr,
-      'issues/9/events': events })
-    await pollRound(h)
+    const requestedPoll = async () => {
+      h.store.set('github-since', '2026-09-08T00:00:00.000Z'); h.store.set('github-cursor:9', '2026-09-08T00:00:00.000Z')
+      github(h, { notifications: [{ ...notification(9, 'pulls'), reason: 'review_requested' }], 'pulls/9': pr, 'issues/9/events': events })
+      await pollRound(h)
+    }
+    // Off by default: a review request is not read.
+    await requestedPoll()
+    expect(h.receive.mock.calls.filter(([trigger]) => trigger.meta.kind === 'review_request')).toEqual([])
+    h.store.saveSettings({ ...h.store.settings(), sources: { ...h.store.settings().sources, github: { enabled: true, config: { reviewRequests: true } } } })
+    await requestedPoll()
     const requested = h.receive.mock.calls.map(([trigger]) => trigger).filter(trigger => trigger.meta.kind === 'review_request')
     expect(requested).toEqual([expect.objectContaining({ id: key('github-review-request', '9', '3'), addressed: 'mention',
       actor: { source: 'github', id: 'alice' }, human: true, text: '@alice requested your review of this pull request.\n\nFix the margin\n\nAdds padding',
@@ -1156,7 +1162,7 @@ it('reports GitHub as failing only after the configured number of consecutive fa
   expect(pollFailure(1, 3, eof)).toBeUndefined()
   expect(pollFailure(2, 3, eof)).toBeUndefined()
   expect(pollFailure(3, 3, eof)).toEqual({ state: 'error', detail: '3 consecutive failed polls; last: Error: Get "https://api.github.com/x": EOF', code: 'pollFailures', values: { count: '3', error: 'Error: Get "https://api.github.com/x": EOF' } })
-  expect(githubKind.schema.parse({})).toEqual({ repository: '', cli: '', pollSeconds: 60, failuresBeforeError: 3, notifications: true, observeIssues: false,
+  expect(githubKind.schema.parse({})).toEqual({ repository: '', cli: '', pollSeconds: 60, failuresBeforeError: 3, notifications: true, reviewRequests: false, observeIssues: false,
     observePulls: false, observeComments: false, observeCi: false })
 })
 describe('feishu event consumer', () => {
