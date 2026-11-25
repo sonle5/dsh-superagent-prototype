@@ -37,7 +37,8 @@ export const IssueSchema = CommentSchema.extend({
   pull_request: z.looseObject({ url: z.string() }).nullish(),
 })
 export type GithubIssue = z.infer<typeof IssueSchema>
-type Opened = Pick<GithubIssue, 'number' | 'title' | 'body' | 'user' | 'created_at' | 'html_url'>
+/** The fields of an opened Issue or PR that its Triggers carry. */
+export type Opened = Pick<GithubIssue, 'number' | 'title' | 'body' | 'user' | 'created_at' | 'html_url'>
 export interface PullRef { number: number; isPr: boolean; url?: string; prAuthor?: string }
 /**
  * True when GitHub reports the account as a regular user rather than a bot or GitHub App.
@@ -94,9 +95,12 @@ export function issueTrigger(issue: Opened, agent: string): Trigger {
 export function pullTrigger(pull: Opened, agent: string): Trigger {
   return { ...issueTrigger(pull, agent), meta: { number: pull.number, isPr: true, prAuthor: pull.user.login, kind: 'pull' } }
 }
-/** A PR timeline event as `issues/<number>/events` returns it; `review_requested` events name the requested reviewer. */
+/**
+ * An Issue or PR timeline event as `issues/<number>/events` returns it; `review_requested` events name the requested reviewer,
+ * and `assigned` events the assignee.
+ */
 export const IssueEventSchema = z.looseObject({ id: z.number(), event: z.string(), actor: UserSchema, created_at: z.string(),
-  requested_reviewer: z.looseObject({ login: z.string() }).nullish() })
+  requested_reviewer: z.looseObject({ login: z.string() }).nullish(), assignee: z.looseObject({ login: z.string() }).nullish() })
 export type GithubIssueEvent = z.infer<typeof IssueEventSchema>
 /**
  * Builds the trigger for a request that the agent review a PR; the requester is its actor and the request addresses the agent.
@@ -108,6 +112,18 @@ export function reviewRequestTrigger(pull: Opened, request: GithubIssueEvent): T
     text: `@${request.actor.login} requested your review of this pull request.\n\n${pull.title}\n\n${pull.body ?? ''}`.trimEnd(),
     addressed: 'mention', channel: githubChannel(pull.number, pull.html_url), url: pull.html_url,
     meta: { number: pull.number, isPr: true, prAuthor: pull.user.login, kind: 'review_request' } }
+}
+/**
+ * Builds the trigger for assigning the agent to an Issue or PR; the assigner is its actor and the assignment addresses the agent.
+ * The ID names the assignment event, so assigning the agent again produces a new Trigger.
+ */
+export function assignmentTrigger(item: Opened, isPr: boolean, assignment: GithubIssueEvent): Trigger {
+  const noun = isPr ? 'pull request' : 'issue'
+  return { id: key('github-assignment', String(item.number), String(assignment.id)), source: SOURCE,
+    threads: [{ source: SOURCE, id: String(item.number) }], ...author(assignment.actor), at: assignment.created_at,
+    text: `@${assignment.actor.login} assigned you this ${noun}.\n\n${item.title}\n\n${item.body ?? ''}`.trimEnd(),
+    addressed: 'mention', channel: githubChannel(item.number, item.html_url), url: item.html_url,
+    meta: { number: item.number, isPr, ...isPr ? { prAuthor: item.user.login } : {}, kind: 'assignment' } }
 }
 /** Builds a trigger for a default-branch CI transition; default-branch CI has no person to reply to, so it has no `channel`. */
 export function branchCiTrigger(branch: string, sha: string, revision: number, summary: string, url: string): Trigger {

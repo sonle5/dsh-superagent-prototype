@@ -773,6 +773,41 @@ describe('github source', () => {
     expect(h.receive.mock.calls.filter(([trigger]) => trigger.meta.kind === 'review_request')).toEqual([])
     h.store.close()
   })
+  it('takes in assigning the agent to an Issue or PR as a Trigger addressed to the agent from the assigner, when switched on', async () => {
+    const h = host()
+    const issue = { id: 7, number: 7, title: 'Brand residue', body: 'Remove the old name', state: 'open', user: { login: 'carol' },
+      created_at: '2026-09-01T00:00:00Z', html_url: 'https://github.com/acme/widgets/issues/7' }
+    const pr = { ...openPull(9), body: 'Adds padding', created_at: '2026-09-01T00:00:00Z' }
+    const assigned = (id: number, assignee: string, actor = 'alice', at = '2026-09-09T00:00:00Z') =>
+      ({ id, event: 'assigned', actor: { login: actor, type: 'User' }, created_at: at, assignee: { login: assignee } })
+    const events = [assigned(1, 'agent-bot', 'alice', '2026-08-01T00:00:00Z'), assigned(2, 'bob'), assigned(3, 'agent-bot'),
+      assigned(4, 'agent-bot', 'agent-bot'), { id: 5, event: 'unassigned', actor: { login: 'alice' }, created_at: '2026-09-09T00:00:00Z',
+        assignee: { login: 'agent-bot' } }]
+    const assignedPoll = async (reason = 'assign') => {
+      h.store.set('github-since', '2026-09-08T00:00:00.000Z')
+      for (const number of [7, 9]) h.store.set(`github-cursor:${number}`, '2026-09-08T00:00:00.000Z')
+      github(h, { notifications: [{ ...notification(7), reason }, { ...notification(9, 'pulls'), reason }], 'issues/7': issue, 'pulls/9': pr,
+        'issues/7/events': events, 'issues/9/events': events })
+      h.receive.mockClear()
+      await pollRound(h)
+      return h.receive.mock.calls.map(([trigger]) => trigger).filter(trigger => trigger.meta.kind === 'assignment')
+    }
+    // Off by default: an assignment is not read.
+    expect(await assignedPoll()).toEqual([])
+    h.store.saveSettings({ ...h.store.settings(), sources: { ...h.store.settings().sources, github: { enabled: true, config: { assignments: true } } } })
+    const triggers = await assignedPoll()
+    expect(triggers).toEqual([
+      expect.objectContaining({ id: key('github-assignment', '9', '3'), addressed: 'mention', actor: { source: 'github', id: 'alice' },
+        text: '@alice assigned you this pull request.\n\nFix the margin\n\nAdds padding',
+        meta: { number: 9, isPr: true, prAuthor: 'carol', kind: 'assignment' } }),
+      expect.objectContaining({ id: key('github-assignment', '7', '3'), addressed: 'mention', actor: { source: 'github', id: 'alice' }, human: true,
+        text: '@alice assigned you this issue.\n\nBrand residue\n\nRemove the old name', meta: { number: 7, isPr: false, kind: 'assignment' } })])
+    // An allowed assigner asks explicitly.
+    expect(h.engine.candidate(triggers[0]!.id)?.strength).toBe('explicit')
+    // A notification for any other reason reads no assignments.
+    expect(await assignedPoll('mention')).toEqual([])
+    h.store.close()
+  })
   it('reads a subscribed default-branch CI Thread as no Issue, and keeps no poll error on it', async () => {
     const h = host()
     h.store.tickets.save(openTicket('ticket'))
@@ -1162,7 +1197,7 @@ it('reports GitHub as failing only after the configured number of consecutive fa
   expect(pollFailure(1, 3, eof)).toBeUndefined()
   expect(pollFailure(2, 3, eof)).toBeUndefined()
   expect(pollFailure(3, 3, eof)).toEqual({ state: 'error', detail: '3 consecutive failed polls; last: Error: Get "https://api.github.com/x": EOF', code: 'pollFailures', values: { count: '3', error: 'Error: Get "https://api.github.com/x": EOF' } })
-  expect(githubKind.schema.parse({})).toEqual({ repository: '', cli: '', pollSeconds: 60, failuresBeforeError: 3, notifications: true, reviewRequests: false, observeIssues: false,
+  expect(githubKind.schema.parse({})).toEqual({ repository: '', cli: '', pollSeconds: 60, failuresBeforeError: 3, notifications: true, reviewRequests: false, assignments: false, observeIssues: false,
     observePulls: false, observeComments: false, observeCi: false })
 })
 describe('feishu event consumer', () => {

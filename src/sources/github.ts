@@ -6,10 +6,10 @@ import { GithubAccountsSchema } from '../deployment.ts'
 import { CliError, validItems, type Tally } from '../infra/commands.ts'
 import { ciCounts, ciFact, ciFailures, ciSummary, githubThreadContext, pullChecks } from './github-read.ts'
 import { branchCiTrigger, ciTrigger, commentTrigger, CommentSchema, githubAddress, IssueEventSchema, issueTrigger, IssueSchema, mentions, pullTrigger,
-  reviewRequestTrigger, SOURCE }
+  assignmentTrigger, reviewRequestTrigger, SOURCE }
   from './github-trigger.ts'
 import { githubLink, sendGithub } from './github-channel.ts'
-import type { GithubComment, PullRef } from './github-trigger.ts'
+import type { GithubComment, Opened, PullRef } from './github-trigger.ts'
 import { observePull, pullsOf, readPull, type Pull } from './github-pull.ts'
 import { health, sourceContext, type Health, type SourceContext } from './host.ts'
 import { KV } from '../kv.ts'
@@ -26,7 +26,7 @@ const NotificationSchema = z.looseObject({
 
 const GithubConfigSchema = GithubAccountsSchema.extend({ pollSeconds: z.number().int().min(60).max(3600).default(60),
   failuresBeforeError: z.number().int().min(1).max(20).default(3),
-  notifications: z.boolean().default(true), reviewRequests: z.boolean().default(false),
+  notifications: z.boolean().default(true), reviewRequests: z.boolean().default(false), assignments: z.boolean().default(false),
   observeIssues: z.boolean().default(false), observePulls: z.boolean().default(false), observeComments: z.boolean().default(false),
   observeCi: z.boolean().default(false) }).strict()
 export type GithubConfig = z.infer<typeof GithubConfigSchema>
@@ -61,7 +61,9 @@ export const githubKind: SourceKind<GithubConfig> = {
     { key: 'observeCi', type: 'switch', label: { zh: '接收默认分支的 CI', en: 'Receive the default branch\'s CI' },
       hint: { zh: '打开后，默认分支的 CI 失败和恢复会收到，由策略的接收表决定是否成为候选。', en: 'Failures of the default branch\'s CI, and its recovery, are received, and the Policy\'s admission table decides whether they become candidates.' } },
     { key: 'reviewRequests', type: 'switch', label: { zh: '把审查请求当作点名', en: 'Treat review requests as addressed' },
-      hint: { zh: '打开后，有人在 PR 上请求智能体审查时，算作点名智能体的请求，请求人是发送者。需要读取账号通知。', en: 'A request that the agent review a pull request addresses the agent, with the requester as its sender. Needs the account notification inbox.' } }],
+      hint: { zh: '打开后，有人在 PR 上请求智能体审查时，算作点名智能体的请求，请求人是发送者。需要读取账号通知。', en: 'A request that the agent review a pull request addresses the agent, with the requester as its sender. Needs the account notification inbox.' } },
+    { key: 'assignments', type: 'switch', label: { zh: '把指派当作点名', en: 'Treat assignments as addressed' },
+      hint: { zh: '打开后，有人把 Issue 或 PR 指派给智能体时，算作点名智能体的请求，指派人是发送者。需要读取账号通知。', en: 'Assigning the agent to an Issue or pull request addresses the agent, with the assigner as its sender. Needs the account notification inbox.' } }],
   // What the Source observes across the repository it receives in full; elsewhere, only what addresses the agent.
   scope: ({ meta }, config) => {
     const row = scopeOf(meta)
@@ -160,8 +162,11 @@ const newRound = (signal?: AbortSignal): Round => ({ started: new Date().toISOSt
   failures: [], dropped: [], abandoned: [], tally: { skipped: 0 } })
 const stopped = (ctx: SourceContext, round: Round): boolean => !!round.signal?.aborted || !ctx.config(SOURCE)
 interface ExactComment { path: string; kind: 'conversation' | 'inline' | 'review' }
-/** A notified Issue or PR to read; `reviewRequested` is set when a notification reported a review request to the agent, which `reviewRequests` turns into Triggers. */
-export interface Retry { since: string; pr: boolean; comment?: ExactComment; reviewRequested?: true; failedAt?: string; attempts?: number }
+/**
+ * A notified Issue or PR to read; `reviewRequested` and `assigned` are set when a notification reported a review request to
+ * the agent or its assignment, which `reviewRequests` and `assignments` turn into Triggers.
+ */
+export interface Retry { since: string; pr: boolean; comment?: ExactComment; reviewRequested?: true; assigned?: true; failedAt?: string; attempts?: number }
 const RETRY_WINDOW_MS = 24 * 3600_000
 /** GitHub can surface a new Issue's mention after the polling cursor passed its `created_at`. */
 const OPENED_GRACE_MS = 5 * 60_000
@@ -338,7 +343,8 @@ async function pollNotifications(ctx: SourceContext, round: Round): Promise<{ co
     const previous = items.get(number)
     const comment = exactComment(notification.subject.latest_comment_url, repository)
     items.set(number, { ...previous, since: previous?.since ?? [state.get(KV.github.cursor(number)) ?? since, since].sort().at(-1)!,
-      pr, ...comment ? { comment } : {}, ...notification.reason === 'review_requested' ? { reviewRequested: true as const } : {} })
+      pr, ...comment ? { comment } : {}, ...notification.reason === 'review_requested' ? { reviewRequested: true as const } : {},
+      ...notification.reason === 'assign' ? { assigned: true as const } : {} })
   }
   for (const [number, item] of items) {
     if (stopped(ctx, round)) return { count: notifications.length, interval }
@@ -373,6 +379,7 @@ async function readNotified(ctx: SourceContext, round: Round, number: number, it
       const opened = Date.parse(issue.created_at) >= Date.parse(since) - OPENED_GRACE_MS
         && (!sameName(issue.user.login, login) || mentions(issue.body ?? '', login))
       if (opened) await ctx.receive(issueTrigger(issue, login))
+      await intakeRequests(ctx, round, issue, false, item)
       const ref = { number, isPr: false, url: issue.html_url }
       await intakeComments(ctx, ref, since, round)
       await intakeExactComment(ctx, round, ref, item.comment)
@@ -388,7 +395,8 @@ async function readNotified(ctx: SourceContext, round: Round, number: number, it
       const opened = { number, title: pr.title ?? '', body: pr.body, user: pr.user, created_at: pr.created_at, html_url: pr.html_url }
       await ctx.receive(pullTrigger(opened, login))
     }
-    if (item.reviewRequested && ctx.config<GithubConfig>(SOURCE)?.reviewRequests) await intakeReviewRequests(ctx, round, pr, since)
+    await intakeRequests(ctx, round, { number, title: pr.title ?? '', body: pr.body, user: pr.user, created_at: pr.created_at ?? '',
+      html_url: pr.html_url }, true, item)
     const ref = { number, isPr: true, url: pr.html_url, prAuthor: pr.user.login }
     await intakeComments(ctx, ref, since, round)
     await intakeExactComment(ctx, round, ref, item.comment)
@@ -397,15 +405,24 @@ async function readNotified(ctx: SourceContext, round: Round, number: number, it
   ctx.state.set(KV.github.cursor(number), cursorAt(round.started))
   ctx.threads.patch(`github:${number}`, { pollError: undefined })
 }
-/** Takes in each request since `since` that the agent review the PR, with the requester as its actor; the agent's own requests are skipped. */
-async function intakeReviewRequests(ctx: SourceContext, round: Round, pr: Pull, since: string): Promise<void> {
+/**
+ * Takes in each request since the item's cursor that the agent review the PR or take the Issue or PR, with the requester or
+ * assigner as its actor, for the notified reasons whose switches are on; the agent's own requests are skipped.
+ */
+async function intakeRequests(ctx: SourceContext, round: Round, opened: Opened, isPr: boolean, item: Retry): Promise<void> {
+  const config = ctx.config<GithubConfig>(SOURCE)
+  const review = isPr && !!item.reviewRequested && !!config?.reviewRequests
+  const assign = !!item.assigned && !!config?.assignments
+  if (!review && !assign) return
   const { login } = ctx.deployment.github
-  const events = await ctx.commands.withSignal(round.signal).pages(IssueEventSchema, `issues/${pr.number}/events?per_page=100`, round.tally)
-  const opened = { number: pr.number, title: pr.title ?? '', body: pr.body, user: pr.user, created_at: pr.created_at ?? '', html_url: pr.html_url }
+  const events = await ctx.commands.withSignal(round.signal).pages(IssueEventSchema, `issues/${opened.number}/events?per_page=100`, round.tally)
   for (const event of events) {
-    if (event.event !== 'review_requested' || !event.requested_reviewer || !sameName(event.requested_reviewer.login, login)) continue
-    if (Date.parse(event.created_at) < Date.parse(since) - OPENED_GRACE_MS || sameName(event.actor.login, login)) continue
-    await ctx.receive(reviewRequestTrigger(opened, event))
+    if (Date.parse(event.created_at) < Date.parse(item.since) - OPENED_GRACE_MS || sameName(event.actor.login, login)) continue
+    if (review && event.event === 'review_requested' && event.requested_reviewer && sameName(event.requested_reviewer.login, login)) {
+      await ctx.receive(reviewRequestTrigger(opened, event))
+    } else if (assign && event.event === 'assigned' && event.assignee && sameName(event.assignee.login, login)) {
+      await ctx.receive(assignmentTrigger(opened, isPr, event))
+    }
   }
 }
 /** Reads and observes a PR at most once per polling round. */
