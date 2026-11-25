@@ -113,8 +113,9 @@ export function resultRelay(ticket: Ticket, state: string, text: string, replyTo
   const report = { kind: 'worker_report', ticket: brief(ticket), trigger_id: ticket.origin.triggerId, state, ...replyTo ? { answer_to: replyTo } : {},
     ...summary, read: `ticket/${ticket.id}/result` }
   const latest = latestAssignment(ticket)?.report
+  // A `dropped` report ends the ticket without a message, so it never gets a fallback result.
   const result = !replyTo && latest && latest.state === state
-    && (state === 'ready' || state === 'blocked' || state === 'failed' || state === 'dropped')
+    && (state === 'ready' || state === 'blocked' || state === 'failed')
     ? { ticketId: ticket.id, reportAt: latest.at, state, summary: latest.summary }
     : undefined
   return { id: `report:${id}`, text: JSON.stringify(report), ...result ? { result } : {} }

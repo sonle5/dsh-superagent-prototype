@@ -1030,8 +1030,10 @@ describe('the Executor\'s parts', () => {
         attention: undefined,
         assignments: [{ report: { state, summary: `${state} report`, at } }],
       } as unknown as Ticket
-      expect(reportRelay(reported, { state, summary: `${state} report` })?.result)
-        .toEqual({ ticketId: 't1', reportAt: at, state, summary: `${state} report` })
+      const relayed = reportRelay(reported, { state, summary: `${state} report` })
+      // A dropped ticket ends without a message: the orchestrator hears of it, but no fallback result is published.
+      expect(relayed?.id).toMatch(/^report:/)
+      expect(relayed?.result).toEqual(state === 'dropped' ? undefined : { ticketId: 't1', reportAt: at, state, summary: `${state} report` })
     }
     const longest = Array.from({ length: IM_WORDS + 20 }, () => 'evidence').join(' ')
     expect(wordCount(fallbackResultText({ state: 'failed', summary: longest }, 'feishu'))).toBeLessThanOrEqual(IM_WORDS)
