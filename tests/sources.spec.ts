@@ -778,8 +778,10 @@ describe('github source', () => {
     const issue = { id: 7, number: 7, title: 'Brand residue', body: 'Remove the old name', state: 'open', user: { login: 'carol' },
       created_at: '2026-09-01T00:00:00Z', html_url: 'https://github.com/acme/widgets/issues/7' }
     const pr = { ...openPull(9), body: 'Adds padding', created_at: '2026-09-01T00:00:00Z' }
-    const assigned = (id: number, assignee: string, actor = 'alice', at = '2026-09-09T00:00:00Z') =>
-      ({ id, event: 'assigned', actor: { login: actor, type: 'User' }, created_at: at, assignee: { login: assignee } })
+    // GitHub reports the assignee as an `assigned` event's actor and the account that assigned as its assigner.
+    const assigned = (id: number, assignee: string, assigner = 'alice', at = '2026-09-09T00:00:00Z') =>
+      ({ id, event: 'assigned', actor: { login: assignee, type: 'User' }, created_at: at, assignee: { login: assignee },
+        assigner: { login: assigner, type: 'User' } })
     const events = [assigned(1, 'agent-bot', 'alice', '2026-08-01T00:00:00Z'), assigned(2, 'bob'), assigned(3, 'agent-bot'),
       assigned(4, 'agent-bot', 'agent-bot'), { id: 5, event: 'unassigned', actor: { login: 'alice' }, created_at: '2026-09-09T00:00:00Z',
         assignee: { login: 'agent-bot' } }]

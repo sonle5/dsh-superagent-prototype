@@ -6,7 +6,7 @@ import { GithubAccountsSchema } from '../deployment.ts'
 import { CliError, validItems, type Tally } from '../infra/commands.ts'
 import { ciCounts, ciFact, ciFailures, ciSummary, githubThreadContext, pullChecks } from './github-read.ts'
 import { branchCiTrigger, ciTrigger, commentTrigger, CommentSchema, githubAddress, IssueEventSchema, issueTrigger, IssueSchema, mentions, pullTrigger,
-  assignmentTrigger, reviewRequestTrigger, SOURCE }
+  assignmentTrigger, eventSender, reviewRequestTrigger, SOURCE }
   from './github-trigger.ts'
 import { githubLink, sendGithub } from './github-channel.ts'
 import type { GithubComment, Opened, PullRef } from './github-trigger.ts'
@@ -417,7 +417,7 @@ async function intakeRequests(ctx: SourceContext, round: Round, opened: Opened, 
   const { login } = ctx.deployment.github
   const events = await ctx.commands.withSignal(round.signal).pages(IssueEventSchema, `issues/${opened.number}/events?per_page=100`, round.tally)
   for (const event of events) {
-    if (Date.parse(event.created_at) < Date.parse(item.since) - OPENED_GRACE_MS || sameName(event.actor.login, login)) continue
+    if (Date.parse(event.created_at) < Date.parse(item.since) - OPENED_GRACE_MS || sameName(eventSender(event).login, login)) continue
     if (review && event.event === 'review_requested' && event.requested_reviewer && sameName(event.requested_reviewer.login, login)) {
       await ctx.receive(reviewRequestTrigger(opened, event))
     } else if (assign && event.event === 'assigned' && event.assignee && sameName(event.assignee.login, login)) {
