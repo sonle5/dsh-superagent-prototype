@@ -414,7 +414,6 @@ it('waits while the orchestrator is running and lets its normal result reply sup
 it('publishes no fallback result when a worker drops its ticket', async () => {
   const { ticket, sessionId } = await acceptedTicket()
   const main = agents.get(runtime.masterId)!
-  main.status = 'idle'
   vi.mocked(Commands.prototype.lark).mockClear()
   await runTool(sessionId, 'orchestrator_report', { state: 'dropped', summary: 'A review addressed to the author; nothing for this ticket.' })
   const report = latestAssignment(runtime.store.tickets.get(ticket.id)!)!.report!

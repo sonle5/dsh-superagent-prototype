@@ -1032,9 +1032,8 @@ describe('the Executor\'s parts', () => {
       } as unknown as Ticket
       const relayed = reportRelay(reported, { state, summary: `${state} report` })
       // A dropped ticket ends without a message: the orchestrator hears of it, but no fallback result is published.
-      if (state === 'dropped') expect(relayed).toMatchObject({ id: expect.stringMatching(/^report:/) })
-      if (state === 'dropped') expect(relayed?.result).toBeUndefined()
-      else expect(relayed?.result).toEqual({ ticketId: 't1', reportAt: at, state, summary: `${state} report` })
+      expect(relayed?.id).toMatch(/^report:/)
+      expect(relayed?.result).toEqual(state === 'dropped' ? undefined : { ticketId: 't1', reportAt: at, state, summary: `${state} report` })
     }
     const longest = Array.from({ length: IM_WORDS + 20 }, () => 'evidence').join(' ')
     expect(wordCount(fallbackResultText({ state: 'failed', summary: longest }, 'feishu'))).toBeLessThanOrEqual(IM_WORDS)

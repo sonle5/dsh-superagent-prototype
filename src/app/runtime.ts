@@ -153,10 +153,10 @@ export class Runtime extends Service implements SourceHost {
           }
         } })
       effects.handle('result-fallback', async result => {
+        if (result.state === 'dropped') return
         const agent = ctx.agents.get(masterId as SessionId)
         if (!agent) throw new Later('The orchestrator Session is not available')
         if (agent.status === 'running') throw new Later('The orchestrator is still processing the worker report')
-        if (result.state === 'dropped') return
         const ticket = store.tickets.get(result.ticketId)
         const latest = ticket ? latestAssignment(ticket)?.report : undefined
         if (!ticket || !latest || latest.at !== result.reportAt) return
