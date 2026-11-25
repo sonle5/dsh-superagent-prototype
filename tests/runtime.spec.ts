@@ -411,6 +411,24 @@ it('waits while the orchestrator is running and lets its normal result reply sup
   expect(replies[0]).toEqual(expect.arrayContaining(['--markdown', normal]))
 })
 
+it('publishes no fallback result when a worker drops its ticket', async () => {
+  const { ticket, sessionId } = await acceptedTicket()
+  const main = agents.get(runtime.masterId)!
+  main.status = 'idle'
+  vi.mocked(Commands.prototype.lark).mockClear()
+  await runTool(sessionId, 'orchestrator_report', { state: 'dropped', summary: 'A review addressed to the author; nothing for this ticket.' })
+  const report = latestAssignment(runtime.store.tickets.get(ticket.id)!)!.report!
+  ;(runtime as unknown as { ctx: Context }).ctx.emit('agent/status', { agent: main, status: 'idle' } as never)
+  // A settlement queued by an older version is discarded too.
+  runtime.effects.enqueue('result-fallback', 'legacy', { ticketId: ticket.id, reportAt: report.at, state: 'dropped', summary: report.summary })
+  await runtime.idle()
+  expect(runtime.effects.pending('result-fallback')).toBe(false)
+  expect(runtime.store.replyStatus(resultReplyId(ticket.id, report))).toBeUndefined()
+  const replies = vi.mocked(Commands.prototype.lark).mock.calls
+    .map(([args]) => args).filter(args => args[1] === '+messages-reply')
+  expect(replies).toHaveLength(0)
+})
+
 it('lists each ticket with the Threads it subscribes to, as their Sources describe them', async () => {
   const { sessionId, ticket } = await acceptedTicket()
   await runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: 'pr open', pr_number: 42 })

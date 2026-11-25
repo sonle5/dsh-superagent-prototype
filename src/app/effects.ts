@@ -29,6 +29,7 @@ export type EffectKind = keyof EffectPayloads
 export interface ResultSettlement {
   ticketId: string
   reportAt: string
+  /** `dropped` only in settlements queued by older versions; they are discarded, since a dropped ticket ends without a message. */
   state: 'ready' | 'blocked' | 'failed' | 'dropped'
   summary: string
 }
