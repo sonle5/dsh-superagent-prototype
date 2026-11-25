@@ -418,11 +418,12 @@ it('publishes no fallback result when a worker drops its ticket', async () => {
   vi.mocked(Commands.prototype.lark).mockClear()
   await runTool(sessionId, 'orchestrator_report', { state: 'dropped', summary: 'A review addressed to the author; nothing for this ticket.' })
   const report = latestAssignment(runtime.store.tickets.get(ticket.id)!)!.report!
-  ;(runtime as unknown as { ctx: Context }).ctx.emit('agent/status', { agent: main, status: 'idle' } as never)
   // A settlement queued by an older version is discarded too.
   runtime.effects.enqueue('result-fallback', 'legacy', { ticketId: ticket.id, reportAt: report.at, state: 'dropped', summary: report.summary })
+  main.status = 'idle'
+  ;(runtime as unknown as { ctx: Context }).ctx.emit('agent/status', { agent: main, status: 'idle' } as never)
+  await vi.waitFor(() => expect(runtime.effects.pending('result-fallback')).toBe(false), { timeout: 5000 })
   await runtime.idle()
-  expect(runtime.effects.pending('result-fallback')).toBe(false)
   expect(runtime.store.replyStatus(resultReplyId(ticket.id, report))).toBeUndefined()
   const replies = vi.mocked(Commands.prototype.lark).mock.calls
     .map(([args]) => args).filter(args => args[1] === '+messages-reply')
