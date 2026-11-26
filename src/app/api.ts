@@ -42,6 +42,8 @@ export interface ModelProxyView {
     sharedPool: boolean
     /** Model-name prefix that routes to this account alone; empty when the account has none. */
     prefix: string
+    /** Why the proxy could not give this account a prefix; such an account is reachable only through the shared pool. */
+    prefixError?: string
   }[]
 }
 

@@ -124,6 +124,11 @@ export function listedBot(settings: Settings, actor: ActorRef): z.infer<typeof A
   const bots = z.array(AllowedSchema).catch([]).parse(settings.policy.sources[actor.source]?.bots ?? [])
   return bots.find(entry => sameName(entry.id, actor.id))
 }
+/** Look up `actor` in the Source's `agents` policy list (validated by the Source's kind), whose Triggers addressing the agent are explicit requests. */
+export function listedAgent(settings: Settings, actor: ActorRef): z.infer<typeof AllowedSchema> | undefined {
+  const agents = z.array(AllowedSchema).catch([]).parse(settings.policy.sources[actor.source]?.agents ?? [])
+  return agents.find(entry => sameName(entry.id, actor.id))
+}
 export const anyoneAllowed = (settings: Settings): boolean => Object.values(settings.policy.sources).some(part => part.allowed.length > 0)
 const senderName = (entry: z.infer<typeof AllowedSchema>): string => entry.name || entry.id
 
@@ -167,8 +172,19 @@ export function policyEffects(tickets: readonly Ticket[], old: Settings, now: Se
 export function settingsPolicy(settings: Settings, sources: SourceScope): Policy {
   const version = policyVersion(settings)
   const mode = settings.eval.mode
-  /** Gate non-human triggers: only listed bots (as inferred candidates) and senderless system/CI events may pass; other bots are rejected. */
+  /** Admit a listed agent's Trigger that addresses the agent, in a listened scope, as an explicit request; the agent list grants nothing else. */
+  const agentGate = (trigger: Trigger): GateResult | undefined => {
+    if (!trigger.addressed || !trigger.actor.id) return undefined
+    const agent = listedAgent(settings, trigger.actor)
+    const scope = listened(sources, trigger.source, trigger.meta)
+    if (!agent || !scope.listened) return undefined
+    const recorded = { source: trigger.source, scope: trigger.meta, ...scope.row === undefined ? {} : { row: scope.row } }
+    return { admissible: true, strength: 'explicit', basis: { ...recorded, via: 'agent', sender: senderName(agent), addressed: trigger.addressed } }
+  }
+  /** Gate non-human triggers: only listed agents addressing the agent, listed bots (as inferred candidates) and senderless system/CI events may pass; other bots are rejected. */
   const machineGate = (trigger: Trigger): GateResult => {
+    const agent = agentGate(trigger)
+    if (agent) return agent
     const bot = trigger.actor.id ? listedBot(settings, trigger.actor) : undefined
     if (trigger.actor.id && !bot) return { admissible: false, reason: 'not_human' }
     const scope = listened(sources, trigger.source, trigger.meta)
@@ -195,6 +211,8 @@ export function settingsPolicy(settings: Settings, sources: SourceScope): Policy
       const row = scope.listened ? scope.row : undefined
       const recorded = { source: trigger.source, scope: trigger.meta, ...row === undefined ? {} : { row }, ...allowed ? { sender: senderName(allowed) } : {} }
       if (allowed && trigger.addressed) return { admissible: true, strength: 'explicit', basis: { ...recorded, via: 'addressed', addressed: trigger.addressed } }
+      const agent = agentGate(trigger)
+      if (agent) return agent
       const cell = admissionCell(!!allowed, !!trigger.addressed)!
       // Unaddressed messages only use the admission table when the Source observes all messages in that scope.
       const receivable = !!trigger.addressed || (scope.listened && scope.observed)
@@ -219,6 +237,8 @@ export function settingsPolicy(settings: Settings, sources: SourceScope): Policy
       const rulesOn = (rules: string[] | undefined) => (rules ?? []).every(id => settings.policy.rules.some(rule => rule.enabled && rule.id === id))
       // Explicit follow-ups remain valid; inferred follow-ups require auto mode and enabled matched rules.
       if (basis.via === 'followup') return mandate.strength === 'explicit' || (mode === 'auto' && rulesOn(basis.rules))
+      // An agent's request holds only while the agent remains on its Source's agent list.
+      if (basis.via === 'agent') return !!listedAgent(settings, mandate.actor)
       // A bot's candidate holds only while the bot remains on its Source's bot list and passes the observation checks below.
       if (basis.via === 'bot' && !listedBot(settings, mandate.actor)) return false
       // An admission-table Mandate holds while the sender's current cell still grants at least the original strength.

@@ -11,6 +11,7 @@ The host enforces allowed lists, rules and Mandates. Messages, comments and quot
 The Source records whether a message addresses the agent: `mention` for a mention of the bot or agent account, and `direct` for a direct message. The gate checks the sender and the Source's Policy:
 
 - An allowed person who addresses the agent makes an explicit request.
+- An account on the Source's agent list that addresses the agent makes an explicit request. On GitHub this includes requesting the agent's review and assigning it an Issue or pull request when those switches are on.
 - A person's follow-up on a Thread with Tickets follows the rules below.
 - Other human messages use the admission table for their receiving scope.
 - A bot on the Source's bot list can produce an inferred candidate, never an explicit request. Other bots are not admitted.
@@ -47,7 +48,7 @@ Human messages that reach no Ticket, including Threads whose Tickets were stoppe
 
 | Strength | Cases |
 | --- | --- |
-| explicit | A person on the list addresses the agent, or follows up on a Thread that already has a Ticket; a cell of the admission table set to explicit request |
+| explicit | A person on the list addresses the agent, or follows up on a Thread that already has a Ticket; an account on the agent list addresses the agent; a cell of the admission table set to explicit request |
 | inferred | A person not on the list follows up on a Thread with a Ticket, unless their cell of the admission table is explicit; a cell of the admission table set to inferred candidate; a message of a bot on the Source's bot list that addresses the agent or arrives where the Source receives every message |
 | not admitted | Any other bot's message, everything the admission table ignores, and every inferred case while the accept mode is `off` |
 
@@ -77,6 +78,10 @@ The admission table is part of the Policy version. Weakening a cell does not imm
 ### Bots and automated reviewers
 
 The host recognizes GitHub Apps, logins ending in `[bot]`, and Feishu bots as bots. A Source can list bots such as `dependabot[bot]` whose messages may become inferred candidates. They must either address the agent or post in a scope that receives every message. They cannot make explicit requests or stop Tickets.
+
+### Agents that may originate work
+
+The GitHub Source's Policy has an optional `agents` list of agent accounts, such as another review agent. When a listed agent account mentions the agent, requests its review or assigns it an Issue or pull request, that is an explicit request, like a person's. It cannot stop Tickets or make follow-ups. An account on the allowed list keeps its own path. An account on both the bot list and the agent list makes an explicit request when it addresses the agent, and is a listed bot otherwise.
 
 An automated reviewer using an ordinary account counts as a person to the host. Its comments reach subscribed Tickets and generate follow-up notices. Team prompt text must identify such accounts as automated reviewers.
 
@@ -135,6 +140,7 @@ The Source must still listen to the original Thread. The remaining checks depend
 - An explicit follow-up Mandate passes.
 - An inferred Mandate needs `auto` mode and its matched rules still enabled.
 - A Mandate admitted by a table cell must still receive at least its original strength under today's table and sender membership. Removing a sender from the list can therefore revoke a Mandate accepted through the listed-sender cell.
+- An agent's Mandate requires that account to remain on the Source's agent list.
 - A bot's Mandate requires that bot to remain on the Source's bot list. Inferred table and bot Mandates also need `auto` mode and enabled matched rules.
 - Other Mandates require the sender to remain on the Source's allowed list.
 

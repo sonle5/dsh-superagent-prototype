@@ -294,7 +294,8 @@ export class Evals extends EnginePart {
       const ticket = this.repo.tickets.get(outcome.ticketId)
       if (!ticket || !liveTicket(ticket)) return this.finish(thread, evaluation, { kind: 'ignore', reason: [{ code: 'stopUnknown' }],
         ...audit })
-      if (evaluation.strength !== 'explicit') return this.finish(thread, evaluation, { kind: 'ignore',
+      // A listed agent's explicit request may originate work but never stop it.
+      if (evaluation.strength !== 'explicit' || evaluation.basis.via === 'agent') return this.finish(thread, evaluation, { kind: 'ignore',
         reason: [{ code: 'stopNotExplicit' }], ...audit })
       const decision = this.finish(thread, evaluation, { kind: 'stop', reason: reasonOf(outcome.reason), ticketId: ticket.id, ...audit })
       this.tickets.end(ticket.id, 'human', 'stopped', this.now(), typeof outcome.reason === 'string' ? outcome.reason : undefined)

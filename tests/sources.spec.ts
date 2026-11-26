@@ -810,6 +810,33 @@ describe('github source', () => {
     expect(await assignedPoll('mention')).toEqual([])
     h.store.close()
   })
+  it('makes a review request or an assignment from an account on the GitHub agent list an explicit request', async () => {
+    const schema = githubKind.policy!.schema
+    expect(schema.parse({})).toEqual({ allowed: [] })
+    expect(schema.parse({ agents: [{ id: 'review-agent' }, { id: 'copilot[bot]' }] }).agents).toEqual([{ id: 'review-agent' }, { id: 'copilot[bot]' }])
+    expect(schema.safeParse({ agents: [{ id: 'bad agent' }] }).success).toBe(false)
+    const h = host()
+    const settings = h.store.settings()
+    h.store.saveSettings({ ...settings, policy: { ...settings.policy, sources: { ...settings.policy.sources,
+      github: { ...settings.policy.sources.github!, agents: [{ id: 'review-agent' }] } } },
+      sources: { ...settings.sources, github: { enabled: true, config: { reviewRequests: true, assignments: true } } } })
+    const pr = { ...openPull(9), body: 'Adds padding', created_at: '2026-09-01T00:00:00Z' }
+    const at = '2026-09-09T00:00:00Z'
+    const events = [{ id: 3, event: 'review_requested', actor: { login: 'review-agent', type: 'User' }, created_at: at, requested_reviewer: { login: 'agent-bot' } },
+      { id: 4, event: 'assigned', actor: { login: 'agent-bot', type: 'User' }, created_at: at, assignee: { login: 'agent-bot' },
+        assigner: { login: 'review-agent', type: 'User' } }]
+    // Each poll reads one event, on a Thread of its own, and the agent list makes its sender's request explicit.
+    for (const [reason, number, kind] of [['review_requested', 9, 'review_request'], ['assign', 11, 'assignment']] as const) {
+      h.store.set('github-since', '2026-09-08T00:00:00.000Z'); h.store.set(`github-cursor:${number}`, '2026-09-08T00:00:00.000Z')
+      github(h, { notifications: [{ ...notification(number, 'pulls'), reason }], [`pulls/${number}`]: { ...pr, number },
+        [`issues/${number}/events`]: events })
+      h.receive.mockClear()
+      await pollRound(h)
+      const [trigger] = h.receive.mock.calls.map(([item]) => item).filter(item => item.meta.kind === kind)
+      expect(h.engine.candidate(trigger!.id)?.strength).toBe('explicit')
+    }
+    h.store.close()
+  })
   it('reads a subscribed default-branch CI Thread as no Issue, and keeps no poll error on it', async () => {
     const h = host()
     h.store.tickets.save(openTicket('ticket'))

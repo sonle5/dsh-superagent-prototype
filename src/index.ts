@@ -25,7 +25,7 @@ export async function apply(ctx: Context, config: DeploymentConfig): Promise<voi
     return
   }
   if (config.mode === 'gateway') {
-    ctx.effect(() => registerGateway(ctx, config.stateDir))
+    ctx.effect(() => registerGateway(ctx, config.stateDir, fetch, config.modelProxySyncMinutes * 60_000))
     ctx.logger.info('dsh-superagent gateway ready; signed-in Fleet clients can use /gateway/api')
     return
   }

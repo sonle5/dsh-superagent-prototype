@@ -243,6 +243,8 @@ it('names a listed bot as the Policy lists it, and gives a bot\'s Mandate a basi
   expect(view.actor({ source: 'feishu', id: 'cli_review' }, false).name).toEqual({ zh: '评审机器人', en: '评审机器人' })
   expect(basisFacts({ via: 'bot', sender: '评审机器人', addressed: 'mention', observation: { mode: 'auto' } }, view.rule).facts)
     .toEqual([{ name: 'sender', value: '评审机器人' }, { name: 'bot' }, { name: 'addressed', value: 'mention' }, { name: 'mode', value: 'auto' }])
+  expect(basisFacts({ via: 'agent', sender: 'review-agent', addressed: 'mention' }, view.rule).facts)
+    .toEqual([{ name: 'sender', value: 'review-agent' }, { name: 'agent' }, { name: 'addressed', value: 'mention' }])
 })
 
 it('shows a follow-up that reached a ticket as delivered, the tickets that handed a Trigger back with why, and the Threads a ticket follows for context', () => {

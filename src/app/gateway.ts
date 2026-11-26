@@ -13,7 +13,8 @@ import { DEPLOYMENT_ROUTES, matchesRoute } from './api.ts'
 import { nativeToken } from './native-auth.ts'
 import { INTERNAL_HEADER, INTERNAL_REQUEST_HEADER } from './native-transport.ts'
 import { LIMITS } from '../limits.ts'
-import { redactSensitive } from './fleet.ts'
+import { redactSensitive, type FleetNativeTarget } from './fleet.ts'
+import { syncProxyProviders, type ProxyFleet } from './providers.ts'
 
 const PREFIX = '/gateway/api'
 const COOKIE = 'dsh-superagent-gateway'
@@ -167,6 +168,7 @@ const ModelProxyStatus = z.object({
     state: z.enum(['connected', 'sign-in-required', 'auth-expired']),
     sharedPool: z.boolean(),
     prefix: z.string().max(64).default(''),
+    prefixError: z.string().max(256).optional(),
   })).default([]),
   deployments: z.array(z.object({
     id: z.string().min(1),
@@ -508,6 +510,43 @@ async function modelProxyOperation(
   })
 }
 
+/**
+ * Proxy-provider sync operations for one person's deployments, run by the gateway itself so new proxy upstreams and
+ * Anthropic accounts reach deployments without a signed-in Desktop client.
+ */
+function gatewayProxyFleet(registry: RegistryConfig, login: string): ProxyFleet {
+  const deployment = (id: string): DeploymentConfig => {
+    const found = findDeployment(registry, login, id)
+    if (found === undefined) throw new GatewayError(404, `Deployment not found: ${id}`)
+    return found
+  }
+  return {
+    view: async () => ({ deployments: personDeployments(registry, login) }),
+    managementTarget: async (id): Promise<FleetNativeTarget> => {
+      const found = deployment(id)
+      const token = deploymentToken(found)
+      if (token === undefined) throw new GatewayError(503, `Deployment native capability is missing for ${id}`)
+      return { id, remote: false, url: found.url, nativeUrl: found.url, repository: found.repository,
+        profile: found.profile, stateDir: found.stateDir, workspace: found.workspace, token }
+    },
+    modelProxyStatus: async () => ModelProxyStatus.parse(await modelProxyOperation(registry, login, 'status', {
+      deploymentIds: personDeployments(registry, login).map(item => item.id),
+    })),
+    createModelProxyKey: async id => {
+      await modelProxyOperation(registry, login, 'ensure')
+      const created = ProxyKey.parse(await modelProxyOperation(registry, login, 'deployment-key-create', { id: deployment(id).id }))
+      if (created.id !== id) throw new GatewayError(502, 'Model proxy returned a different deployment key')
+      return created
+    },
+    revokeModelProxyKey: async (id, value) => {
+      await modelProxyOperation(registry, login, 'deployment-key-revoke', { id: deployment(id).id, value })
+    },
+    finalizeModelProxyKey: async (id, keep) => {
+      await modelProxyOperation(registry, login, 'deployment-key-prune', { id: deployment(id).id, keep })
+    },
+  }
+}
+
 async function forward(
   req: IncomingMessage,
   res: ServerResponse,
@@ -672,7 +711,16 @@ function proxyNativeMux(
 }
 
 /** Register the gateway API on DSH's configured public Web server. */
-export function registerGateway(ctx: Context, stateDir: string, fetcher: FetchLike = fetch): () => void {
+/**
+ * Mount the gateway routes.
+ *
+ * @param ctx - Plugin context providing the web server and logger.
+ * @param stateDir - Gateway state directory holding `gateway.json` and session secrets.
+ * @param fetcher - GitHub HTTP client.
+ * @param proxySyncMs - Interval of the gateway-side proxy-provider sync; 0 disables it.
+ * @returns The disposer of every route and timer.
+ */
+export function registerGateway(ctx: Context, stateDir: string, fetcher: FetchLike = fetch, proxySyncMs = 0): () => void {
   const deploymentPath = /^\/gateway\/api\/deployment\/([a-z0-9][a-z0-9-]*)\/(.+)$/
   const proxyDeploymentPath = /^\/gateway\/api\/model-proxy\/deployment\/([a-z0-9][a-z0-9-]*)\/key$/
   const proxyDeploymentFinalizePath = /^\/gateway\/api\/model-proxy\/deployment\/([a-z0-9][a-z0-9-]*)\/key\/finalize$/
@@ -1098,7 +1146,30 @@ export function registerGateway(ctx: Context, stateDir: string, fetcher: FetchLi
   let registry: RegistryConfig | undefined
   try { registry = loadRegistry(stateDir) } catch { /* The HTTP route reports the invalid registry. */ }
   for (const deployment of registry === undefined ? [] : allDeployments(registry)) registerNativeRoute(deployment)
+  let syncing = false
+  const syncProxies = async (): Promise<void> => {
+    if (syncing) return
+    syncing = true
+    try {
+      const current = loadRegistry(stateDir)
+      if (current.onboarding?.modelProxy === undefined) return
+      for (const person of current.people) {
+        for (const result of await syncProxyProviders(gatewayProxyFleet(current, person.login))) {
+          if (result.error !== undefined) ctx.logger.warn('model proxy sync failed for %s: %s', result.id, redactSensitive(result.error))
+          else if (result.added.length > 0) ctx.logger.info('model proxy sync added %s to %s', result.added.join(', '), result.id)
+        }
+      }
+    } catch (error) {
+      ctx.logger.warn('model proxy sync failed: %s', redactSensitive(error instanceof Error ? error.message : String(error)))
+    } finally {
+      syncing = false
+    }
+  }
+  const syncTimer = proxySyncMs > 0 ? setInterval(() => { void syncProxies() }, proxySyncMs) : undefined
+  syncTimer?.unref()
+  if (syncTimer !== undefined) void syncProxies()
   return () => {
+    clearInterval(syncTimer)
     pendingClaude.clear()
     for (const route of nativeRoutes.reverse()) {
       route.dispose()

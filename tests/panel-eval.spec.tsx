@@ -197,7 +197,8 @@ it('lists each Source\'s bots next to its people and saves them, and sets the Gi
   await type(bot.querySelector<HTMLInputElement>('input[aria-label="App ID 或 open_id"]')!, 'cli_reviewer')
   await type(bot.querySelector<HTMLInputElement>('input[aria-label="名字"]')!, '评审机器人')
   await click(find(zh['source.github'], '.dt-subtab'))
-  expect(lists()).toEqual(['能发起工作的 GitHub 账号', '评论可以成为候选的机器人'])
+  expect(lists()).toEqual(['能发起工作的 GitHub 账号', '可以发起工作的智能体账号', '评论可以成为候选的机器人'])
+  await type((await add('可以发起工作的智能体账号')).querySelector<HTMLInputElement>('input[aria-label="账号"]')!, 'review-agent')
   await type((await add('评论可以成为候选的机器人')).querySelector<HTMLInputElement>('input[aria-label="账号"]')!, 'dependabot[bot]')
   // Until the GitHub Source receives the repository's Issues, pull requests, comments or CI, only messages that mention the agent arrive.
   const rows = () => all('.dt-admission tbody tr').map(row => [row.querySelector('.dt-admission-scope')!.firstChild?.textContent,
@@ -207,6 +208,7 @@ it('lists each Source\'s bots next to its people and saves them, and sets the Gi
   await click(zh.save)
   expect(server.settings.policy.sources.feishu!.bots).toEqual([{ id: 'cli_reviewer', name: '评审机器人' }])
   expect(server.settings.policy.sources.github!.bots).toEqual([{ id: 'dependabot[bot]' }])
+  expect(server.settings.policy.sources.github!.agents).toEqual([{ id: 'review-agent' }])
 })
 
 it('shows the GitHub Source\'s switches for what it receives across the repository, and the admission rows they open, in English', async () => {

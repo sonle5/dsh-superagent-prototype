@@ -74,6 +74,7 @@ export function AnthropicAccounts({ accounts, onRemoved }: { accounts: Anthropic
       <span>{account.name}</span>
       <Tag tone={accountTone(account.state)}>{account.state}</Tag>
       {pooled && !account.sharedPool && <Tag tone="warning">{t('accessAnthropicNotShared')}</Tag>}
+      {account.prefixError && <Tag tone="danger" title={account.prefixError}>{t('accessAnthropicNoPrefix')}</Tag>}
       <ConfirmButton icon="trash" label={t('accessAnthropicRemove')} title={t('accessAnthropicRemoveTitle')}
         message={t('accessAnthropicRemoveMessage', { account: account.name })} onConfirm={async () => {
           await call('DELETE gateway/model-proxy/claude/accounts/:id', { id: account.id })

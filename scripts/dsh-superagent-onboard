@@ -754,14 +754,16 @@ def model_proxy_status(request, dry):
             candidate = account_prefix(email, path.stem, taken)
             try:
                 management_request(state, "PATCH", "/credentials/fields", {"name": path.name, "prefix": candidate})
-            except ManagementHTTPError:
-                pass  # The account stays reachable through the shared pool only.
+            except ManagementHTTPError as error:
+                # The account stays reachable through the shared pool only; the Access page shows why.
+                item["prefixError"] = f"Prefix assignment failed with HTTP {error.code}"
             else:
                 prefix = candidate
                 taken.add(candidate)
         item["prefix"] = prefix
     for path, item in items:
         prefix = item["prefix"]
+        prefix_error = item.get("prefixError")
         connected = bool(item.get("access_token"))
         expires_at = parse_auth_time(item.get("expired"))
         last_refresh = parse_auth_time(item.get("last_refresh"))
@@ -771,7 +773,8 @@ def model_proxy_status(request, dry):
         shared = prefix.strip() == "" or not force_prefix
         email = item.get("email")
         accounts.append({"id": path.name, "name": email if isinstance(email, str) and email else path.stem,
-                         "state": account_state, "sharedPool": shared, "prefix": prefix})
+                         "state": account_state, "sharedPool": shared, "prefix": prefix,
+                         **({"prefixError": prefix_error} if prefix_error else {})})
         auth.append({"name": path.name, "provider": "claude", "connected": connected})
         if not shared:
             continue

@@ -355,6 +355,16 @@ describe('resume and stop', () => {
     expect(h.repo.tickets.get(decision.ticketId!)).toMatchObject({ ended: expect.objectContaining({ by: 'human' }) })
     expect(h.executor.stop).toHaveBeenCalledOnce()
   })
+  it('refuses a stop from a listed agent, whose explicit request may originate work but not stop it', () => {
+    const h = harness({ gate: t => t.actor.id === 'agent' ? { admissible: true, strength: 'explicit', basis: { via: 'agent', addressed: 'mention' } }
+      : { admissible: true, strength: 'explicit', basis: { via: 'listed' } } })
+    const decision = accepted(h)
+    h.engine.receive(trigger('2', { actor: { source: 'chat', id: 'agent' }, addressed: 'mention' })); h.pump()
+    expect(h.engine.decide('2', { kind: 'stop', ticketId: decision.ticketId!, reason: 'x' })).toMatchObject({ kind: 'ignore',
+      strength: 'explicit', reason: [{ code: 'stopNotExplicit' }] })
+    expect(h.repo.tickets.get(decision.ticketId!)!.ended).toBeUndefined()
+    expect(h.executor.stop).not.toHaveBeenCalled()
+  })
 })
 describe('follow-ups', () => {
   it('takes a follow-up an older version queued out of the queue without a Decision, and keeps one sent to Eval again', () => {

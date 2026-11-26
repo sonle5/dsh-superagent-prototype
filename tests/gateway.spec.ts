@@ -50,7 +50,7 @@ function gatewayFetch(member = true, login = 'member', agents: Record<string, { 
   })
 }
 
-async function serveGateway(stateDir: string, fetcher: ReturnType<typeof gatewayFetch>) {
+async function serveGateway(stateDir: string, fetcher: ReturnType<typeof gatewayFetch>, proxySyncMs = 0) {
   let handler: ((request: IncomingMessage, response: ServerResponse) => Promise<void>) | undefined
   const upgrades = new Map<string, UpgradeHandler>()
   registerGateway({
@@ -62,7 +62,8 @@ async function serveGateway(stateDir: string, fetcher: ReturnType<typeof gateway
         return () => upgrades.delete(route.path)
       },
     },
-  } as never, stateDir, fetcher as never)
+    logger: { info: () => undefined, warn: () => undefined },
+  } as never, stateDir, fetcher as never, proxySyncMs)
   const { server, url } = await listen((request, response) => {
     if (handler === undefined) throw new Error('Gateway route is not installed')
     void handler(request, response)
@@ -365,6 +366,65 @@ it('keeps model-provider operations behind the trusted controller and never retu
     { keep: 'dsh-widgets-new-private-proxy-key' }, { cookie, 'x-dsh-superagent-native': native }))
     .toMatchObject({ status: 200, body: { id: 'widgets', pruned: true } })
   expect(JSON.stringify(JSON.parse(readFileSync(join(state, 'gateway.json'), 'utf8')))).not.toContain('dsh-widgets-private-proxy-key')
+})
+
+it('adds connected proxy upstreams to a person\'s deployments on its own timer without a Desktop client', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'dsh-gateway-proxy-sync-'))
+  cleanup.push(() => rmSync(state, { recursive: true, force: true }))
+  const deploymentState = join(state, 'widgets-state')
+  const token = nativeToken(deploymentState)!
+  const providers: Record<string, unknown> = {}
+  let revision = 1
+  let added: () => void
+  const mutated = new Promise<void>(resolve => { added = resolve })
+  const target = await listen((request, response) => {
+    let raw = ''
+    request.on('data', chunk => { raw += String(chunk) })
+    request.on('end', () => {
+      if (request.headers['x-dsh-superagent-native'] !== token) {
+        response.writeHead(401).end('{}')
+        return
+      }
+      const envelope = JSON.parse(raw) as { rpcId: string; method: string; payload: { args: Record<string, unknown> } }
+      const args = envelope.payload.args
+      const value = (() => {
+        switch (envelope.method) {
+          case 'settings/describe':
+            return { writable: true, namespaces: [{ ns: 'llm-pi-ai', value: { providers }, user: { providers }, revision }] }
+          case 'settings/mutate':
+            for (const op of args.ops as { op: string; path: string[]; value?: unknown }[]) {
+              if (op.op === 'set') providers[op.path[1]!] = op.value
+            }
+            revision++
+            added()
+            return { revision }
+          case 'credentials/set':
+          case 'credentials/unset':
+            return {}
+          default:
+            throw new Error(`Unexpected RPC ${envelope.method}`)
+        }
+      })()
+      response.writeHead(200, { 'content-type': 'application/json' })
+        .end(JSON.stringify({ type: 'server-response', rpcId: envelope.rpcId, result: { ok: true, value } }))
+    })
+  })
+  const helper = onboardingHelper(state, target.url)
+  writeFileSync(join(state, 'gateway.json'), JSON.stringify({
+    version: 1, organization: 'example-org', githubClientId: 'a'.repeat(20),
+    onboarding: {
+      command: [helper], gatewayUser: 'gateway-user', gatewayGroup: 'gateway-group',
+      checkout: '/opt/dsh-superagent', baseDir: '/var/lib/dsh-superagent',
+      modelProxy: { binary: '/opt/cliproxyapi/cli-proxy-api', portRange: { start: 8317, end: 9316 } },
+    },
+    people: [{ login: 'member', deployments: [{ id: 'widgets', profile: 'superagent-widgets', repository: 'example-org/widgets',
+      url: `${target.url}/`, stateDir: deploymentState, workspace: '/srv/work/widgets' }] }],
+  }))
+  await serveGateway(state, gatewayFetch(), 60_000)
+  await mutated
+  expect(providers.claude).toMatchObject({ baseURL: 'http://127.0.0.1:8317/v1' })
+  const requests = readFileSync(join(state, 'onboard-requests'), 'utf8').trim().split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
+  expect(requests).toContainEqual(expect.objectContaining({ action: 'deployment-key-create', login: 'member', id: 'widgets' }))
 })
 
 it('onboards a person and deployment without exposing another person’s registry', async () => {

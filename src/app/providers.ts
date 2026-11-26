@@ -3,6 +3,13 @@ import { randomBytes } from 'node:crypto'
 import { z } from 'zod'
 import type { ModelCatalog } from '@deepseek-ai/dsh-api-session-controller/types'
 import { redactSensitive, type Fleet, type FleetNativeTarget } from './fleet.ts'
+
+/**
+ * The Fleet operations proxy-provider sync needs. The Desktop `Fleet` reaches them through the gateway; the gateway
+ * implements them against its own registry so it can sync without a Desktop client.
+ */
+export type ProxyFleet = Pick<Fleet, 'managementTarget' | 'modelProxyStatus' | 'createModelProxyKey'
+  | 'revokeModelProxyKey' | 'finalizeModelProxyKey'> & { view(): Promise<{ deployments: { id: string }[] }> }
 import type { ModelProxyView } from './api.ts'
 import { NativePeerRpcError, nativePeerRpc } from './native-transport.ts'
 
@@ -273,7 +280,7 @@ async function readView(target: FleetNativeTarget): Promise<ProviderControlView>
   }
 }
 
-async function targetOf(fleet: Fleet, id: string): Promise<FleetNativeTarget> {
+async function targetOf(fleet: ProxyFleet, id: string): Promise<FleetNativeTarget> {
   try { return await fleet.managementTarget(id) }
   catch (error) {
     throw new ProviderControlError(404, redactSensitive(error instanceof Error ? error.message : String(error)))
@@ -321,13 +328,24 @@ export async function setProviderCredential(fleet: Fleet, deployment: string, pr
 export const PROXY_PRESETS = ['claude', 'one-nexus'] as const
 export type ProxyPreset = typeof PROXY_PRESETS[number]
 
+/**
+ * Claude models offered through the proxy. The proxy forwards `reasoning_effort` to Anthropic; Claude 5 thinks adaptively
+ * at every level, so no level turns thinking off.
+ */
+const claudeModel = (id: string, name: string): JsonRecord => ({ id, name, contextWindow: 321000, maxTokens: 65000,
+  input: ['text', 'image'], reasoningEfforts: { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' } })
+
 /** Model ids are the names the model proxy serves for each upstream. */
 const PRESET_PROFILES: Record<ProxyPreset, JsonRecord> = {
   claude: {
     displayName: 'Claude',
-    models: [{ id: 'claude-opus-5-5(auto)', name: 'Claude / Opus 5.5 (auto)', contextWindow: 321000, maxTokens: 65000,
-      input: ['text', 'image'], reasoningEfforts: false }],
-    compat: { maxTokensField: 'max_tokens', supportsReasoningEffort: false, thinkingFormat: 'openai' },
+    models: [
+      claudeModel('claude-opus-5-5', 'Claude Opus 5.5'),
+      claudeModel('claude-sonnet-5-5', 'Claude Sonnet 5.5'),
+      claudeModel('claude-haiku-5-5', 'Claude Haiku 5.5'),
+      claudeModel('claude-fable-5-2', 'Claude Fable 5.2'),
+    ],
+    compat: { maxTokensField: 'max_tokens', supportsReasoningEffort: true, thinkingFormat: 'openai' },
   },
   'one-nexus': {
     displayName: 'One Nexus',
@@ -352,7 +370,7 @@ function presetProfile(preset: ProxyPreset, baseURL: string, credentialRef: stri
  * @param build Returns the profiles to set for the proxy credential reference the deployment will use.
  */
 async function setProxiedProfiles(
-  fleet: Fleet, deployment: string, target: FleetNativeTarget, proxy: ModelProxyView,
+  fleet: ProxyFleet, deployment: string, target: FleetNativeTarget, proxy: ModelProxyView,
   build: (credentialRef: string) => Record<string, JsonRecord>, unset: readonly string[] = [],
 ): Promise<void> {
   const described = await settings(target)
@@ -429,7 +447,7 @@ async function setProxiedProfiles(
  * Add one proxy-backed provider profile for an upstream the person already connected to their model proxy, moving
  * every other directly-called profile behind the proxy with it.
  */
-export async function addProxyProvider(fleet: Fleet, deployment: string, provider: string): Promise<ProviderControlView> {
+export async function addProxyProvider(fleet: ProxyFleet, deployment: string, provider: string): Promise<ProviderControlView> {
   const parsed = z.enum(PROXY_PRESETS).safeParse(provider)
   if (!parsed.success) throw new ProviderControlError(404, `No one-step setup for provider: ${provider}`)
   const preset = parsed.data
@@ -464,18 +482,17 @@ const accountProviderId = (prefix: string) => `claude-${prefix}`
  * the pooled `claude` profile is unset with them, since every account is reachable only through its own profile.
  * @returns The account provider ids added.
  */
-async function syncAccountProviders(fleet: Fleet, deployment: string, target: FleetNativeTarget, proxy: ModelProxyView): Promise<string[]> {
+async function syncAccountProviders(fleet: ProxyFleet, deployment: string, target: FleetNativeTarget, proxy: ModelProxyView): Promise<string[]> {
   const namespace = (await settings(target)).namespaces.find(item => item.ns === 'llm-pi-ai')
   if (!namespace) return []
   const profiles = providerProfiles(namespace.value)
   const accounts = proxy.anthropicAccounts.filter(account => account.state === 'connected' && account.prefix !== '')
   const build = (credentialRef: string) => Object.fromEntries(accounts.map(account => {
     const base = PRESET_PROFILES.claude
-    const [model] = base.models as JsonRecord[]
     return [accountProviderId(account.prefix), {
       ...structuredClone(base),
       displayName: `Claude · ${account.name}`,
-      models: [{ ...structuredClone(model), id: `${account.prefix}/${String(model!.id)}` }],
+      models: (base.models as JsonRecord[]).map(model => ({ ...structuredClone(model), id: `${account.prefix}/${String(model.id)}` })),
       api: 'openai-completions', baseURL: proxy.baseURL, apiKeyEnv: credentialRef,
     } satisfies JsonRecord]
   }))
@@ -506,7 +523,7 @@ async function syncAccountProviders(fleet: Fleet, deployment: string, target: Fl
  * has a preset profile behind the proxy keeps it. One deployment's failure is reported in its result and does not stop the others; an unavailable proxy
  * adds nothing.
  */
-export async function syncProxyProviders(fleet: Fleet, deployments?: readonly string[]): Promise<ProxySyncResult[]> {
+export async function syncProxyProviders(fleet: ProxyFleet, deployments?: readonly string[]): Promise<ProxySyncResult[]> {
   // Without a signed-in, reachable proxy there is nothing to add; the Access page reports the proxy state.
   const proxy = await fleet.modelProxyStatus().catch(() => undefined)
   if (proxy?.status !== 'ready') return []

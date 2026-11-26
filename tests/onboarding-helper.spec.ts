@@ -293,7 +293,7 @@ it('reports expired Claude authorization as auth-expired', () => {
     '    print(json.dumps(value))',
   ].join('\n')], { encoding: 'utf8' })) as {
     providers: { id: string; state: string; expiresAt?: string }[]
-    anthropicAccounts: { id: string; name: string; state: string; sharedPool: boolean; prefix: string }[]
+    anthropicAccounts: { id: string; name: string; state: string; sharedPool: boolean; prefix: string; prefixError?: string }[]
   }
 
   expect(result.providers).toMatchObject([
@@ -302,7 +302,8 @@ it('reports expired Claude authorization as auth-expired', () => {
     expect.objectContaining({ id: 'claude', label: 'Anthropic', state: 'auth-expired', expiresAt: '2026-01-01T00:00:00Z' }),
   ])
   expect(result.anthropicAccounts).toEqual([
-    { id: 'claude.json', name: 'claude', state: 'auth-expired', sharedPool: true, prefix: '' },
+    { id: 'claude.json', name: 'claude', state: 'auth-expired', sharedPool: true, prefix: '',
+      prefixError: 'Prefix assignment failed with HTTP 404' },
     { id: 'nexus13.json', name: 'nexus13', state: 'connected', sharedPool: false, prefix: 'nexus13' },
     { id: 'second.json', name: 'bob@example.com', state: 'auth-expired', sharedPool: false, prefix: 'bob' },
   ])

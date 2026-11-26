@@ -16,6 +16,8 @@ export const Config = s.object({
   mode: s.string().pattern(/^(repository|control|gateway)$/).default('repository')
     .description('repository runs one Superagent deployment; control mounts only the repository-neutral Fleet control plane; gateway exposes a public Fleet to signed-in operators.'),
   stateDir: absolute('Directory for the database, locks, worker shims, the agent\'s git configuration and, by default, the ticket directories.').required(),
+  modelProxySyncMinutes: s.number().min(LIMITS.modelProxySyncMinutes.min).max(LIMITS.modelProxySyncMinutes.max).step(1).default(5)
+    .description('Gateway mode only: minutes between gateway-side syncs that add model proxy upstreams and Anthropic account providers to every person\'s deployments; 0 disables the sync.'),
   promptMaxChars: s.number().min(LIMITS.promptMaxChars.min).max(LIMITS.promptMaxChars.max).step(1).default(100000)
     .description('Largest saved prompt configuration, in characters.').volatile(),
   admissionContextMaxPages: s.number().min(LIMITS.admissionContextMaxPages.min).max(LIMITS.admissionContextMaxPages.max).step(1).default(10)

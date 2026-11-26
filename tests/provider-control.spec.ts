@@ -280,7 +280,11 @@ it('adds one provider per connected Anthropic account with the proxy credential 
   expect(await syncProxyProviders(fleet)).toEqual([{ id: 'inference-support-loop', added: ['claude-bob'] }])
   const providers = (described.namespaces as Array<{ value: { providers: Record<string, Record<string, unknown>> } }>)[0]!.value.providers
   expect(providers['claude-bob']).toMatchObject({ displayName: 'Claude · bob@example.com', baseURL: 'http://127.0.0.1:8317/v1',
-    apiKeyEnv: 'DSH_MODEL_PROXY_EXISTING', models: [expect.objectContaining({ id: 'bob/claude-opus-5-5(auto)' })] })
+    apiKeyEnv: 'DSH_MODEL_PROXY_EXISTING', compat: expect.objectContaining({ supportsReasoningEffort: true }) })
+  const models = providers['claude-bob']!.models as Array<{ id: string; reasoningEfforts: Record<string, string> }>
+  expect(models.map(model => model.id)).toEqual(['bob/claude-opus-5-5', 'bob/claude-sonnet-5-5', 'bob/claude-haiku-5-5',
+    'bob/claude-fable-5-2'])
+  expect(models[0]!.reasoningEfforts).toEqual({ low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' })
   expect(Object.keys(providers).sort()).toEqual(['claude', 'claude-bob'])
 
   native.nativePeerRpc.mockClear()
@@ -306,7 +310,7 @@ it('replaces the pooled Anthropic profile with account profiles once the shared 
   const providers = (described.namespaces as Array<{ value: { providers: Record<string, Record<string, unknown>> } }>)[0]!.value.providers
   expect(Object.keys(providers).sort()).toEqual(['claude-bob', 'one-nexus'])
   expect(providers['claude-bob']).toMatchObject({ apiKeyEnv: 'DSH_MODEL_PROXY_EXISTING',
-    models: [expect.objectContaining({ id: 'bob/claude-opus-5-5(auto)' })] })
+    models: expect.arrayContaining([expect.objectContaining({ id: 'bob/claude-opus-5-5' })]) })
 })
 
 it('gives account profiles a new protected proxy key on a deployment without a proxied profile', async () => {

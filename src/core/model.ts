@@ -106,6 +106,7 @@ interface Received { source?: string; scope?: Record<string, unknown>; row?: str
 /**
  * How the gate admitted the Trigger a Mandate came from, which `revalidate` re-checks (see `docs/002`):
  * - `addressed`: a sender on the Source's list addressed the agent;
+ * - `agent`: an account on the Source's agent list addressed the agent;
  * - `followup`: a message on a Thread that has tickets;
  * - `admission`: the cell of the receiving scope's admission row; `observation` when it made an inferred candidate under
  *   an accept mode;
@@ -120,6 +121,8 @@ export type MandateBasis = Received & { sender?: string; rules?: string[] } & (
   | { via: 'listed'; addressed?: 'mention' | 'direct'; observation?: { mode?: AcceptMode }; authority?: string }
   /** A message of a bot on its Source's bot list: an inferred candidate at most, never an explicit request or a stop. */
   | { via: 'bot'; addressed?: 'mention' | 'direct'; observation: { mode: AcceptMode } }
+  /** An account on its Source's agent list addressed the agent: an explicit request, never a stop or a follow-up. */
+  | { via: 'agent'; addressed: 'mention' | 'direct' }
 )
 
 /** Immutable authorization produced by an accept decision; execution is bounded by it and it never changes. */

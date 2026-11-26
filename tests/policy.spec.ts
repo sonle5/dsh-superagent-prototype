@@ -484,3 +484,36 @@ describe('bots and events without a sender', () => {
       ['ci', { listedUnaddressed: false, unlistedAddressed: false, unlistedUnaddressed: false }]])
   })
 })
+describe('agents that may originate work', () => {
+  const agents = (part: Record<string, unknown> = {}) => SettingsSchema.parse({ ...base, policy: { ...base.policy, sources: { ...base.policy.sources,
+    github: { allowed: [{ id: 'Alice' }], agents: [{ id: 'review-agent' }, { id: 'copilot[bot]' }], bots: [{ id: 'copilot[bot]' }], ...part } } } })
+  const review: Trigger = { ...github('review-agent', 'mention'), meta: { number: 1, isPr: true, kind: 'review_request' } }
+  const bot: Trigger = { ...github('copilot[bot]', 'mention'), human: false, meta: { number: 1, isPr: true, kind: 'conversation' } }
+  it('admits a listed agent that addresses the agent as an explicit request, whether GitHub reports it as a person or a bot', () => {
+    const { policy } = setup(agents())
+    expect(policy.gate(review, thread(), [])).toEqual({ admissible: true, strength: 'explicit',
+      basis: { via: 'agent', source: 'github', scope: review.meta, sender: 'review-agent', addressed: 'mention' } })
+    expect(policy.gate(bot, thread(), [])).toMatchObject({ admissible: true, strength: 'explicit', basis: { via: 'agent', sender: 'copilot[bot]' } })
+    // On both lists, an agent that does not address the agent is only a bot.
+    const { addressed: _addressed, ...quiet } = bot
+    expect(setup({ ...agents(), sources: { github: { enabled: true, config: { observeComments: true } } } }).policy.gate(quiet, thread(), []))
+      .toMatchObject({ strength: 'inferred', basis: { via: 'bot' } })
+    // An account on the allowed list keeps its own path.
+    expect(setup(agents({ agents: [{ id: 'Alice' }] })).policy.gate(github('alice', 'mention'), thread(), [])).toMatchObject({ basis: { via: 'addressed' } })
+  })
+  it('gives a listed agent no follow-ups and no admission cells', () => {
+    const { policy } = setup(agents({ admission: { pulls: { unlistedUnaddressed: 'inferred' } } }))
+    // An unaddressed message on a Thread with tickets is a follow-up from someone off the list, never an agent request.
+    expect(policy.gate(github('review-agent'), thread(['ticket']), [ticket])).toMatchObject({ admissible: true, strength: 'inferred', basis: { via: 'followup' } })
+    expect(policy.gate(github('review-agent'), thread(), [])).toEqual({ admissible: false, reason: 'not_a_member' })
+  })
+  it('keeps an agent\'s Mandate only while the agent stays on its list, and says the requester lost authorization once removed', () => {
+    const gate = setup(agents()).policy.gate(review, thread(), [])
+    if (!gate.admissible) throw new Error('not admitted')
+    const mandate = { strength: gate.strength, policyVersion: '', actor: review.actor, scope: '', basis: gate.basis }
+    expect(setup(agents()).policy.revalidate(mandate)).toBe(true)
+    expect(setup(agents({ agents: [] })).policy.revalidate(mandate)).toBe(false)
+    expect(policyEffects([{ ...ticket, id: 'a', mandate } as Ticket], agents(), agents({ agents: [] }), settings => setup(settings).sources).get('a'))
+      .toEqual({ requesterAllowed: false, requester: review.actor })
+  })
+})
