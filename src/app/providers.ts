@@ -412,9 +412,11 @@ function presetProfile(preset: ProxyPreset, baseURL: string, credentialRef: stri
 }
 
 /**
- * Add one proxy-backed provider profile for an upstream the person already connected to their model proxy.
+ * Add one proxy-backed provider profile for an upstream the person already connected to their model proxy, and move
+ * every other profile that still calls its upstream directly behind the proxy in the same settings mutation.
  * A deployment already behind the proxy reuses its proxy credential; otherwise a new deployment key is created,
- * and the key, credential, and profile are rolled back together on failure.
+ * and the key, credential, and profiles are rolled back together on failure. Direct keys of moved profiles are unset
+ * only after the transition succeeds.
  */
 export async function addProxyProvider(fleet: Fleet, deployment: string, provider: string): Promise<ProviderControlView> {
   const parsed = z.enum(PROXY_PRESETS).safeParse(provider)
@@ -432,19 +434,38 @@ export async function addProxyProvider(fleet: Fleet, deployment: string, provide
   const described = await settings(target)
   const namespace = described.namespaces.find(item => item.ns === 'llm-pi-ai')
   if (!namespace) throw new ProviderControlError(502, 'This deployment has no llm-pi-ai settings namespace')
-  const previous = providerProfiles(namespace.value)[preset]
-  const set = (value: JsonRecord, expectedRevision: number) => rpc(target, 'settings/mutate', {
-    ns: 'llm-pi-ai', ops: [{ op: 'set', path: ['providers', preset], value }], expectedRevision,
+  const profiles = providerProfiles(namespace.value)
+  const previous = profiles[preset]
+  // Profiles still calling an upstream directly move behind the proxy with the added one.
+  const unprotected = Object.entries(profiles).filter(([id, profile]) => id !== preset && profile.baseURL !== proxy.baseURL)
+  const set = (credentialRef: string, expectedRevision: number) => rpc(target, 'settings/mutate', {
+    ns: 'llm-pi-ai',
+    ops: [
+      { op: 'set', path: ['providers', preset], value: presetProfile(preset, proxy.baseURL, credentialRef) },
+      ...unprotected.map(([id, profile]) => ({
+        op: 'set', path: ['providers', id], value: protectedProfile(id, profile, credentialRef, proxy.baseURL),
+      })),
+    ],
+    expectedRevision,
   })
+  // Like configureDeploymentModelProxy, retire the worker-readable direct keys once their profiles are proxied.
+  const retire = async (credentialRef: string) => {
+    const oldRefs = new Set(unprotected.flatMap(([, profile]) =>
+      typeof profile.apiKeyEnv === 'string' && profile.apiKeyEnv !== '' ? [profile.apiKeyEnv] : []))
+    for (const ref of oldRefs) {
+      if (ref !== credentialRef) await rpc(target, 'credentials/unset', { ref }).catch(() => undefined)
+    }
+  }
 
-  const proxiedRefs = [...new Set(Object.values(providerProfiles(namespace.value)).flatMap(profile =>
+  const proxiedRefs = [...new Set(Object.values(profiles).flatMap(profile =>
     profile.baseURL === proxy.baseURL && typeof profile.apiKeyEnv === 'string' && profile.apiKeyEnv !== ''
       ? [profile.apiKeyEnv] : []))]
   if (proxiedRefs.length > 0) {
     const credentials = z.record(z.string(), CredentialInfo).parse(await rpc(target, 'credentials/describe', { refs: proxiedRefs }))
     const reusable = proxiedRefs.find(ref => credentials[ref]?.configured)
     if (reusable !== undefined) {
-      await set(presetProfile(preset, proxy.baseURL, reusable), namespace.revision)
+      await set(reusable, namespace.revision)
+      await retire(reusable)
       return readView(target)
     }
   }
@@ -456,17 +477,23 @@ export async function addProxyProvider(fleet: Fleet, deployment: string, provide
   try {
     await rpc(target, 'credentials/set', { ref: credentialRef, value: created.value })
     credentialWritten = true
-    const mutated = z.object({ revision: z.number().int().nonnegative() })
-      .parse(await set(presetProfile(preset, proxy.baseURL, credentialRef), namespace.revision))
+    const mutated = z.object({ revision: z.number().int().nonnegative() }).parse(await set(credentialRef, namespace.revision))
     settingsRevision = mutated.revision
     await fleet.finalizeModelProxyKey(deployment, created.value)
+    await retire(credentialRef)
     return await readView(target)
   } catch (error) {
     if (settingsRevision !== undefined) {
-      await (previous === undefined
-        ? rpc(target, 'settings/mutate', { ns: 'llm-pi-ai', ops: [{ op: 'unset', path: ['providers', preset] }],
-          expectedRevision: settingsRevision })
-        : set(previous, settingsRevision)).catch(() => undefined)
+      await rpc(target, 'settings/mutate', {
+        ns: 'llm-pi-ai',
+        ops: [
+          previous === undefined
+            ? { op: 'unset', path: ['providers', preset] }
+            : { op: 'set', path: ['providers', preset], value: previous },
+          ...unprotected.map(([id, profile]) => ({ op: 'set', path: ['providers', id], value: profile })),
+        ],
+        expectedRevision: settingsRevision,
+      }).catch(() => undefined)
     }
     if (credentialWritten) await rpc(target, 'credentials/unset', { ref: credentialRef }).catch(() => undefined)
     await fleet.revokeModelProxyKey(deployment, created.value).catch(() => undefined)

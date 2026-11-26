@@ -649,6 +649,14 @@ def openai_compatibility_providers(state):
         raise
 
 
+def model_proxy_forces_prefix(state):
+    try:
+        data = yaml.safe_load((state / "config.yaml").read_text())
+    except (OSError, yaml.YAMLError):
+        return False
+    return isinstance(data, dict) and data.get("force-model-prefix") is True
+
+
 def parse_auth_time(value):
     if isinstance(value, bool):
         return None
@@ -696,11 +704,17 @@ def model_proxy_status(request, dry):
         {"id": "openai", "label": "OpenAI",
          "state": "configured" if provider_names.get("openai") else "missing"},
     ]
+    # With force-model-prefix, a prefixed credential serves only "<prefix>/<model>" names, so it is
+    # outside the shared Anthropic pool that unprefixed claude-* model ids balance across.
+    force_prefix = model_proxy_forces_prefix(state)
     auth_dir = state / "auth"
     auth = []
-    auth_states = {}
+    accounts = []
+    pool = {"id": "claude", "label": "Anthropic", "state": "missing"}
+    pool_expires = []
+    pool_refreshes = []
     if auth_dir.exists():
-        for path in auth_dir.glob("*.json"):
+        for path in sorted(auth_dir.glob("*.json")):
             if path.name.startswith("._"):
                 continue
             try:
@@ -709,41 +723,33 @@ def model_proxy_status(request, dry):
                 continue
             if item.get("type") != "claude" or item.get("disabled") is True:
                 continue
-            prefix = item.get("prefix")
-            provider = "nexus13" if prefix == "nexus13" else "claude"
+            prefix = item.get("prefix") if isinstance(item.get("prefix"), str) else ""
             connected = bool(item.get("access_token"))
             expires_at = parse_auth_time(item.get("expired"))
             last_refresh = parse_auth_time(item.get("last_refresh"))
-            current = auth_states.get(provider)
-            if current is None:
-                current = {
-                    "id": provider,
-                    "label": "Nexus13" if provider == "nexus13" else "Claude",
-                    "state": "sign-in-required",
-                }
-                auth_states[provider] = current
-            if connected:
-                current["state"] = "auth-expired" if expires_at is not None and expires_at <= datetime.now(timezone.utc) \
-                    else "connected" if current["state"] != "auth-expired" else current["state"]
-            expires_values = [
-                value for value in (current.get("expiresAt"), expires_at) if value is not None
-            ]
-            if expires_values:
-                current["expiresAt"] = auth_time_text(min(expires_values))
-            refresh_values = [
-                value for value in (current.get("lastRefreshAt"), last_refresh) if value is not None
-            ]
-            if refresh_values:
-                current["lastRefreshAt"] = auth_time_text(max(refresh_values))
-            auth.append({"name": path.name, "provider": "nexus13" if prefix == "nexus13" else "claude",
-                         "connected": connected})
-    for provider in ("claude", "nexus13"):
-        state = auth_states.get(provider)
-        if state is not None:
-            statuses.append(state)
-        else:
-            statuses.append({"id": provider, "label": "Claude" if provider == "claude" else "Nexus13",
-                             "state": "missing"})
+            account_state = "sign-in-required" if not connected \
+                else "auth-expired" if expires_at is not None and expires_at <= datetime.now(timezone.utc) \
+                else "connected"
+            shared = prefix.strip() == "" or not force_prefix
+            email = item.get("email")
+            accounts.append({"name": email if isinstance(email, str) and email else path.stem,
+                             "state": account_state, "sharedPool": shared})
+            auth.append({"name": path.name, "provider": "claude", "connected": connected})
+            if not shared:
+                continue
+            # The pool serves requests while any shared account is connected.
+            rank = ("missing", "sign-in-required", "auth-expired", "connected")
+            if rank.index(account_state) > rank.index(pool["state"]):
+                pool["state"] = account_state
+            if expires_at is not None:
+                pool_expires.append(expires_at)
+            if last_refresh is not None:
+                pool_refreshes.append(last_refresh)
+    if pool_expires:
+        pool["expiresAt"] = auth_time_text(min(pool_expires))
+    if pool_refreshes:
+        pool["lastRefreshAt"] = auth_time_text(max(pool_refreshes))
+    statuses.append(pool)
     raw_ids = request.get("deploymentIds", [])
     if not isinstance(raw_ids, list):
         raise OnboardingError("deploymentIds must be a list")
@@ -756,7 +762,7 @@ def model_proxy_status(request, dry):
     )
     return {**plan, "status": "ready", "baseURL": f"http://127.0.0.1:{port}/v1", "providers": statuses,
             "deployments": [{"id": item, "keyConfigured": True} for item in deployment_ids],
-            "authFiles": auth}
+            "anthropicAccounts": accounts, "authFiles": auth}
 
 
 def claude_start(request, dry):

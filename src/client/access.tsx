@@ -11,6 +11,7 @@ import { Hint, LoadState, Section } from './widgets.tsx'
 type ModelProxy = ApiResponse<'GET gateway/model-proxy'>
 type ProxyProvider = ModelProxy['providers'][number]
 type WritableProvider = Extract<ProxyProvider['id'], 'one-nexus' | 'openai'>
+type ProxyPreset = Extract<ProxyProvider['id'], 'claude' | 'one-nexus'>
 
 const tone = (state: ProxyProvider['state']) => state === 'connected' || state === 'configured' ? 'success'
   : state === 'auth-expired' || state === 'error' ? 'danger' : state === 'missing' ? 'warning' : 'quiet'
@@ -31,6 +32,10 @@ export function AccessSettings() {
     const proxy = gateway.login ? await call('GET gateway/model-proxy') : undefined
     return { gateway, proxy }
   }, [call], 15_000)
+  const control = usePoll(
+    () => deployment && access.data?.proxy ? call('GET fleet/:id/providers', { id: deployment.id }) : Promise.resolve(undefined),
+    [call, deployment?.id, access.data?.proxy?.baseURL],
+  )
   const roles = usePoll(
     () => deployment ? call('GET settings') : Promise.resolve<SettingsView | undefined>(undefined),
     [call, deployment?.id],
@@ -45,16 +50,23 @@ export function AccessSettings() {
     [claudeWaiting, call],
     2_000,
   )
+  const register = useAction(async (preset: ProxyPreset) => {
+    if (!deployment) return
+    await call('POST fleet/:id/model-proxy/providers/:provider', { id: deployment.id, provider: preset })
+  }, { reload: async () => { await control.reload(); await roles.reload() } })
   useEffect(() => {
     if (claude.data?.state === 'connected') {
       setClaudeWaiting(false)
       setLoginUrl(undefined)
       notify(t('accessClaudeLinked'))
       void access.reload()
+      void register.run('claude')
     } else if (claude.data?.state === 'error') {
       setClaudeWaiting(false)
       if (claude.data.error) notify(claude.data.error)
     }
+    // Only a status change registers the provider; `register` is recreated on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [access, claude.data, notify, t])
   const saveAgent = useAction(async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -69,12 +81,8 @@ export function AccessSettings() {
     await call('PUT gateway/model-proxy/provider/:provider', { provider, body: { apiKey: providerKey } })
     setProviderKey('')
     notify(t('accessProviderSaved'))
+    if (provider === 'one-nexus') await register.run('one-nexus')
   }, { reload: access.reload })
-  const protect = useAction(async () => {
-    if (!deployment) return
-    await call('POST fleet/:id/model-proxy', { id: deployment.id })
-    notify(t('accessProtected'))
-  }, { reload: async () => { await access.reload(); await roles.reload() } })
   const signOut = useAction(async () => {
     await call('DELETE gateway/session')
     notify(t('accessSignedOut'))
@@ -95,6 +103,7 @@ export function AccessSettings() {
   if (!access.data) return <LoadState error={access.error} loading />
   const gateway = access.data.gateway
   const proxy = access.data.proxy
+  const unprotected = proxy ? control.data?.providers.filter(item => item.baseURL && item.baseURL !== proxy.baseURL) ?? [] : []
   return <div className="dt-form dt-access">
     {access.error && <p className="dt-error" role="status">{access.error.message}</p>}
     <p className="dt-hint">{t('accessIntro')}</p>
@@ -127,16 +136,26 @@ export function AccessSettings() {
           {proxy.providers.map(item => <article className="dt-card dt-access-card" key={item.id}>
             <div className="dt-card-head"><span className="dt-card-title">{item.label}</span><Tag tone={tone(item.state)}>{item.state}</Tag></div>
             <p className="dt-mono">{item.id}</p>
-            {item.id === 'claude' && item.state !== 'connected' && <div className="dt-row-buttons">
-              <Button variant="primary" size="sm" icon={<Icon name="shield" size={14} />} disabled={claudeWaiting}
-                onClick={() => { void connectClaude() }}>{claudeWaiting ? t('accessClaudeWaiting')
-                  : item.state === 'auth-expired' ? t('accessClaudeReconnect') : t('accessClaudeConnect')}</Button>
-              {claudeWaiting && <Button variant="ghost" size="sm" onClick={() => {
-                void call('DELETE gateway/model-proxy/claude/session').finally(() => {
-                  setClaudeWaiting(false); setLoginUrl(undefined); void access.reload()
-                })
-              }}>{t('accessClaudeCancel')}</Button>}
-            </div>}
+            {item.id === 'claude' && <>
+              {proxy.anthropicAccounts.length > 0 && <ul className="dt-access-accounts" aria-label={t('accessAnthropicAccounts')}>
+                {proxy.anthropicAccounts.map(account => <li key={account.name}>
+                  <span>{account.name}</span>
+                  <Tag tone={tone(account.state)}>{account.state}</Tag>
+                  {!account.sharedPool && <Tag tone="warning">{t('accessAnthropicNotShared')}</Tag>}
+                </li>)}
+              </ul>}
+              <div className="dt-row-buttons">
+                <Button variant={proxy.anthropicAccounts.length ? 'outline' : 'primary'} size="sm" icon={<Icon name="shield" size={14} />}
+                  disabled={claudeWaiting} onClick={() => { void connectClaude() }}>{claudeWaiting ? t('accessClaudeWaiting')
+                    : item.state === 'auth-expired' ? t('accessClaudeReconnect')
+                    : proxy.anthropicAccounts.length ? t('accessAnthropicAddAccount') : t('accessClaudeConnect')}</Button>
+                {claudeWaiting && <Button variant="ghost" size="sm" onClick={() => {
+                  void call('DELETE gateway/model-proxy/claude/session').finally(() => {
+                    setClaudeWaiting(false); setLoginUrl(undefined); void access.reload()
+                  })
+                }}>{t('accessClaudeCancel')}</Button>}
+              </div>
+            </>}
             {item.state === 'auth-expired' && <p className="dt-hint">
               {t('accessAuthExpired', { expiresAt: authTime(item.expiresAt, t('lang')) ?? t('unsetValue') })}
             </p>}
@@ -160,11 +179,8 @@ export function AccessSettings() {
           </Fields>
           <Button type="submit" variant="primary" disabled={saveProvider.busy || !providerKey}>{t('accessProviderSave')}</Button>
         </form>
-        <div className="dt-access-protect">
-          <div><strong>{t('accessProtectTitle')}</strong><p className="dt-hint">{t('accessProtectHint')}</p></div>
-          <Button variant="outline" size="sm" icon={<Icon name="shield" size={14} />}
-            disabled={protect.busy || !deployment} onClick={() => { void protect.run() }}>{t('accessProtect')}</Button>
-        </div>
+        {unprotected.length > 0 && <p className="dt-hint" role="status">
+          {t('accessUnprotected', { providers: unprotected.map(item => item.id).join(t('listSeparator')) })}</p>}
       </>}
     </Section>
     <Section title={t('accessRolesTitle')}>

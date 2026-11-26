@@ -18,7 +18,7 @@ export type ThreadFilter = typeof THREAD_FILTERS[number]
 interface Paged { offset?: number; limit?: number }
 /** Whether a context update was already injected into the main Session or is still pending delivery. */
 type Delivery = 'injected' | 'pending'
-export type ModelProxyProviderId = 'claude' | 'nexus13' | 'one-nexus' | 'openai'
+export type ModelProxyProviderId = 'claude' | 'one-nexus' | 'openai'
 export interface ModelProxyView {
   status: string
   baseURL: string
@@ -32,6 +32,12 @@ export interface ModelProxyView {
   deployments: {
     id: string
     keyConfigured: boolean
+  }[]
+  /** Anthropic subscription accounts signed in to the proxy; `sharedPool` is false for a prefixed account that unprefixed model ids cannot reach. */
+  anthropicAccounts: {
+    name: string
+    state: 'connected' | 'sign-in-required' | 'auth-expired'
+    sharedPool: boolean
   }[]
 }
 

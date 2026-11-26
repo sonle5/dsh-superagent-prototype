@@ -106,8 +106,9 @@ it('keeps provider edits isolated when Desktop switches deployments', async () =
   expect(text()).toContain('Inference only')
 })
 
-it('adds Claude in one step by signing in, without filling in the provider form', async () => {
+it('adds Anthropic in one step by signing in, without filling in the provider form', async () => {
   server.modelProxy.providers = server.modelProxy.providers.map(item => item.id === 'claude' ? { ...item, state: 'sign-in-required' } : item)
+  server.modelProxy.anthropicAccounts = []
   const opened = { opener: {}, location: { replace: vi.fn() }, close: vi.fn() }
   vi.stubGlobal('open', vi.fn(() => opened))
   onTestFinished(() => { vi.unstubAllGlobals() })
@@ -125,6 +126,20 @@ it('adds Claude in one step by signing in, without filling in the provider form'
   await vi.waitFor(() => expect(document.querySelector('.dt-provider-modal')).toBeNull())
   const added = server.providerControls['inference-support-loop']!.providers.find(item => item.id === 'claude')!
   expect(added.baseURL).toBe(server.modelProxy.baseURL)
+})
+
+it('lists connected Anthropic accounts and signs in another one through the same flow', async () => {
+  const opened = { opener: {}, location: { replace: vi.fn() }, close: vi.fn() }
+  vi.stubGlobal('open', vi.fn(() => opened))
+  onTestFinished(() => { vi.unstubAllGlobals() })
+  providersPage()
+  await mount()
+  await click(zh.providerAdd)
+  expect(text()).toContain('alice@example.com')
+  expect(text()).toContain(zh.accessAnthropicNotShared)
+  await click(zh.accessAnthropicAddAccount)
+  expect(opened.location.replace).toHaveBeenCalledWith('https://claude.example/authorize')
+  expect(server.claudeLogin.state).toBe('waiting')
 })
 
 it('adds OneNexus in one step from only its API key, which reaches the model proxy and not the deployment', async () => {

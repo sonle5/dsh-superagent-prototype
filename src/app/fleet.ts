@@ -138,7 +138,7 @@ const ModelProxy = z.object({
       && url.pathname === '/v1' && !url.search && !url.hash
   }, 'Loopback model proxy URL'),
   providers: z.array(z.object({
-    id: z.enum(['claude', 'nexus13', 'one-nexus', 'openai']),
+    id: z.enum(['claude', 'one-nexus', 'openai']),
     label: z.string().min(1),
     state: z.enum(['connected', 'configured', 'sign-in-required', 'auth-expired', 'missing', 'error']),
     expiresAt: z.string().datetime().optional(),
@@ -148,6 +148,11 @@ const ModelProxy = z.object({
     id: z.string().min(1),
     keyConfigured: z.boolean(),
   })),
+  anthropicAccounts: z.array(z.object({
+    name: z.string().min(1),
+    state: z.enum(['connected', 'sign-in-required', 'auth-expired']),
+    sharedPool: z.boolean(),
+  })).default([]),
 })
 const ClaudeConnect = z.object({
   url: z.string().url(),

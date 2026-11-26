@@ -274,9 +274,14 @@ it('reports expired Claude authorization as auth-expired', () => {
     '        "type": "claude", "access_token": "opaque", "expired": "2026-01-01T00:00:00Z",',
     '        "last_refresh": "2025-12-31T00:00:00Z"',
     '    }))',
+    '    (state / "config.yaml").write_text("force-model-prefix: true\\n")',
     '    (auth / "nexus13.json").write_text(json.dumps({',
     '        "type": "claude", "prefix": "nexus13", "access_token": "opaque",',
     '        "expired": "2099-01-01T00:00:00Z"',
+    '    }))',
+    '    (auth / "second.json").write_text(json.dumps({',
+    '        "type": "claude", "email": "bob@example.com", "access_token": "opaque",',
+    '        "expired": "2025-06-01T00:00:00Z"',
     '    }))',
     '    value = module["model_proxy_status"]({',
     '        "login": "alice", "gatewayUser": "gateway", "gatewayGroup": "gateway",',
@@ -285,13 +290,18 @@ it('reports expired Claude authorization as auth-expired', () => {
     '    print(json.dumps(value))',
   ].join('\n')], { encoding: 'utf8' })) as {
     providers: { id: string; state: string; expiresAt?: string }[]
+    anthropicAccounts: { name: string; state: string; sharedPool: boolean }[]
   }
 
   expect(result.providers).toMatchObject([
     expect.objectContaining({ id: 'one-nexus', state: 'missing' }),
     expect.objectContaining({ id: 'openai', state: 'missing' }),
-    expect.objectContaining({ id: 'claude', state: 'auth-expired', expiresAt: '2026-01-01T00:00:00Z' }),
-    expect.objectContaining({ id: 'nexus13', state: 'connected' }),
+    expect.objectContaining({ id: 'claude', label: 'Anthropic', state: 'auth-expired', expiresAt: '2025-06-01T00:00:00Z' }),
+  ])
+  expect(result.anthropicAccounts).toEqual([
+    { name: 'claude', state: 'auth-expired', sharedPool: true },
+    { name: 'nexus13', state: 'connected', sharedPool: false },
+    { name: 'bob@example.com', state: 'auth-expired', sharedPool: true },
   ])
 })
 

@@ -255,6 +255,21 @@ it('reuses the deployment\'s configured proxy credential instead of issuing anot
   }))
 })
 
+it('moves direct-key profiles behind the proxy with the added provider and retires their worker-readable key', async () => {
+  const view = await addProxyProvider(fleet, 'inference-support-loop', 'claude')
+  const ref = (native.nativePeerRpc.mock.calls.find(([, method]) => method === 'credentials/set')?.[2] as { ref: string }).ref
+  expect(native.nativePeerRpc).toHaveBeenCalledWith(target, 'settings/mutate', {
+    ns: 'llm-pi-ai', expectedRevision: 4,
+    ops: [
+      { op: 'set', path: ['providers', 'claude'], value: expect.objectContaining({ apiKeyEnv: ref }) },
+      { op: 'set', path: ['providers', 'one-nexus'], value: expect.objectContaining({
+        baseURL: 'http://127.0.0.1:8317/v1', apiKeyEnv: ref }) },
+    ],
+  })
+  expect(native.nativePeerRpc).toHaveBeenCalledWith(target, 'credentials/unset', { ref: 'ONENEXUS_API_KEY' })
+  expect(view.providers.map(item => item.baseURL)).toEqual(['http://127.0.0.1:8317/v1', 'http://127.0.0.1:8317/v1'])
+})
+
 it('refuses one-step setup until the provider is connected to the model proxy', async () => {
   emptyDeployment()
   await expect(addProxyProvider(fleet, 'inference-support-loop', 'one-nexus'))

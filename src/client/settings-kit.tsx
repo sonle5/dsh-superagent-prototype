@@ -224,6 +224,7 @@ export function ModelField({ id, value, onChange }: { id: string; value: RoleMod
       {value && <Button variant="ghost" size="sm" onClick={() => onChange(null)}>{t('modelUseDefault')}</Button>}
     </div>
     {error && <p className="dt-error">{t('modelCatalogError', { error })}</p>}
+    {catalog && !catalog.groups.length && <p className="dt-model-note">{t('modelCatalogEmpty')}</p>}
     <div className="dt-grid3 dt-model-fields">
       <Field label={t('modelProvider')}><ModelCombobox id={`${id}-provider`} label={t('modelProvider')} value={current.provider}
         choices={providers} placeholder={t('modelInherit')} noSuggestions={t('modelNoProviderSuggestions')}

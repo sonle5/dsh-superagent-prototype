@@ -78,7 +78,7 @@ function QuickSetup({ onAdded }: { onAdded: () => Promise<void> }) {
   const add = useAction(async (preset: 'claude' | 'one-nexus') => {
     if (!deployment) return
     await call('POST fleet/:id/model-proxy/providers/:provider', { id: deployment.id, provider: preset })
-    notify(t('providerQuickAdded', { provider: preset === 'claude' ? 'Claude' : 'OneNexus' }))
+    notify(t('providerQuickAdded', { provider: preset === 'claude' ? 'Anthropic' : 'OneNexus' }))
     await onAdded()
   })
   const addNexus = useAction(async (event: FormEvent<HTMLFormElement>) => {
@@ -101,7 +101,6 @@ function QuickSetup({ onAdded }: { onAdded: () => Promise<void> }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [claude.data, notify])
   const connectClaude = async () => {
-    if (ready(state('claude'))) return void add.run('claude')
     const opened = window.open('about:blank', 'dsh-claude-login')
     if (opened) opened.opener = null
     try {
@@ -117,12 +116,26 @@ function QuickSetup({ onAdded }: { onAdded: () => Promise<void> }) {
     return proxy.error ? <Hint>{t('providerQuickUnavailable')}</Hint> : <LoadState loading />
   }
   const busy = add.busy || addNexus.busy || !deployment
+  const accounts = proxy.data.anthropicAccounts
   return <div className="dt-provider-quick">
     <article className="dt-provider-quick-item">
-      <div><strong>Claude</strong><p className="dt-hint">{t('providerQuickClaudeHint')}</p></div>
-      <Button variant="primary" size="sm" disabled={busy || claudeWaiting} onClick={() => { void connectClaude() }}>
-        {claudeWaiting ? t('accessClaudeWaiting') : ready(state('claude')) ? t('providerQuickAddClaude') : t('accessClaudeConnect')}
-      </Button>
+      <div>
+        <strong>Anthropic</strong><p className="dt-hint">{t('providerQuickClaudeHint')}</p>
+        {accounts.length > 0 && <ul className="dt-access-accounts" aria-label={t('accessAnthropicAccounts')}>
+          {accounts.map(account => <li key={account.name}>
+            <span>{account.name}</span>
+            {!account.sharedPool && <Tag tone="warning">{t('accessAnthropicNotShared')}</Tag>}
+          </li>)}
+        </ul>}
+      </div>
+      <div className="dt-row-buttons">
+        {ready(state('claude')) && <Button variant="primary" size="sm" disabled={busy || claudeWaiting}
+          onClick={() => { void add.run('claude') }}>{t('providerQuickAddClaude')}</Button>}
+        <Button variant={ready(state('claude')) ? 'outline' : 'primary'} size="sm" disabled={busy || claudeWaiting}
+          onClick={() => { void connectClaude() }}>
+          {claudeWaiting ? t('accessClaudeWaiting') : accounts.length ? t('accessAnthropicAddAccount') : t('accessClaudeConnect')}
+        </Button>
+      </div>
     </article>
     <form className="dt-provider-quick-item" onSubmit={event => { void addNexus.run(event) }}>
       <div><strong>OneNexus</strong><p className="dt-hint">{t('providerQuickNexusHint')}</p></div>

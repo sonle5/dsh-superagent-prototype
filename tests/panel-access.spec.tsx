@@ -18,7 +18,10 @@ it('shows cloud identity, protected providers, and the effective deployment rout
   await mount()
   expect(text()).toContain('@fixture-user')
   expect(text()).toContain('OneNexus')
-  expect(text()).toContain('Claude')
+  expect(text()).toContain('Anthropic')
+  expect(text()).toContain('alice@example.com')
+  expect(text()).toContain(zh.accessAnthropicNotShared)
+  expect(text()).toContain(zh.accessAnthropicAddAccount)
   expect(text()).toContain('one-nexus / glm-5.3-sontinh')
   expect(text()).toContain('claude / claude-opus-5-5(auto)')
 })
@@ -38,19 +41,20 @@ it('writes agent and model credentials without redisplaying them', async () => {
   await click(zh.accessProviderSave)
   expect(server.requests.find(request => request.path === 'gateway/model-proxy/provider/one-nexus'))
     .toMatchObject({ method: 'PUT', body: { apiKey: 'sk-one-nexus-private' } })
+  await vi.waitFor(() => expect(server.requests).toContainEqual(
+    { path: 'fleet/inference-support-loop/model-proxy/providers/one-nexus', method: 'POST' }))
   expect(text()).not.toContain('agent-token-value')
   expect(text()).not.toContain('sk-one-nexus-private')
 })
 
-it('protects the selected deployment and signs out only the local cloud session', async () => {
+it('warns about direct-key providers without a manual protect step, and signs out only the local cloud session', async () => {
   server.gatewayStatus = {
     configured: true, url: 'https://superagent.example', organization: 'example-org', login: 'fixture-user', person: true,
   }
   accessPage()
   await mount()
-  await click(zh.accessProtect)
-  expect(server.requests).toContainEqual({ path: 'fleet/inference-support-loop/model-proxy', method: 'POST' })
-  expect(JSON.stringify(server.providerControls['inference-support-loop'])).not.toContain('sk-')
+  expect(text()).toContain(zh.accessUnprotected.replace('{providers}', 'one-nexus'))
+  expect(server.requests).not.toContainEqual({ path: 'fleet/inference-support-loop/model-proxy', method: 'POST' })
 
   await click(zh.accessSignOut)
   expect(server.requests).toContainEqual({ path: 'gateway/session', method: 'DELETE' })
@@ -76,5 +80,8 @@ it('opens one browser window for Claude and polls the existing callback listener
   expect(server.claudeLogin.state).toBe('waiting')
   expect(text()).toContain(zh.accessClaudeWaiting)
   server.claudeLogin = { state: 'connected' }
+  server.modelProxy.providers = server.modelProxy.providers.map(item => item.id === 'claude' ? { ...item, state: 'connected' } : item)
   await vi.waitFor(() => expect(text()).toContain(zh.accessClaudeLinked), { timeout: 3_500 })
+  await vi.waitFor(() => expect(server.requests).toContainEqual(
+    { path: 'fleet/inference-support-loop/model-proxy/providers/claude', method: 'POST' }))
 })

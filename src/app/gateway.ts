@@ -146,7 +146,7 @@ const DeploymentLogs = z.object({
   tail: z.string(),
 })
 const ModelProxyProvider = z.object({
-  id: z.enum(['claude', 'nexus13', 'one-nexus', 'openai']),
+  id: z.enum(['claude', 'one-nexus', 'openai']),
   label: z.string().min(1),
   state: z.enum(['connected', 'configured', 'sign-in-required', 'auth-expired', 'missing', 'error']),
   expiresAt: z.string().datetime().optional(),
@@ -156,6 +156,11 @@ const ModelProxyStatus = z.object({
   status: z.string().min(1),
   baseURL: z.string().url(),
   providers: z.array(ModelProxyProvider).default([]),
+  anthropicAccounts: z.array(z.object({
+    name: z.string().min(1),
+    state: z.enum(['connected', 'sign-in-required', 'auth-expired']),
+    sharedPool: z.boolean(),
+  })).default([]),
   deployments: z.array(z.object({
     id: z.string().min(1),
     keyConfigured: z.boolean(),
@@ -720,6 +725,7 @@ export function registerGateway(ctx: Context, stateDir: string, fetcher: FetchLi
           baseURL: status.baseURL,
           providers: status.providers,
           deployments: status.deployments,
+          anthropicAccounts: status.anthropicAccounts,
         })
         return
       }

@@ -283,7 +283,7 @@ function initial(): PanelServer {
         { id: 'dsv41f-thuytinh', name: 'DeepSeek V4.1 Flash', reasoning: true, image: false }],
       active: true, configured: true, removable: true,
     }, {
-      id: 'claude', displayName: 'Claude', api: 'anthropic-messages', baseURL: 'http://127.0.0.1:8317',
+      id: 'claude', displayName: 'Claude', api: 'anthropic-messages', baseURL: 'http://127.0.0.1:8317/v1',
       credentialRef: 'CLAUDE_API_KEY', credential: { configured: true, source: 'user', writable: true },
       models: [{ id: 'claude-opus-5-5(auto)', name: 'Claude Opus 5.5', contextWindow: 200000, maxTokens: 65000,
         reasoning: true, image: true }],
@@ -322,14 +322,17 @@ function initial(): PanelServer {
       status: 'ready',
       baseURL: 'http://127.0.0.1:8317/v1',
       providers: [
-        { id: 'claude', label: 'Claude', state: 'connected' },
-        { id: 'nexus13', label: 'Nexus13', state: 'connected' },
+        { id: 'claude', label: 'Anthropic', state: 'connected' },
         { id: 'one-nexus', label: 'OneNexus', state: 'configured' },
         { id: 'openai', label: 'OpenAI', state: 'missing' },
       ],
       deployments: [
         { id: 'inference-support-loop', keyConfigured: true },
         { id: 'sglang', keyConfigured: true },
+      ],
+      anthropicAccounts: [
+        { name: 'alice@example.com', state: 'connected', sharedPool: true },
+        { name: 'nexus13-legacy', state: 'connected', sharedPool: false },
       ],
     },
     claudeLogin: { state: 'idle' },
@@ -475,9 +478,12 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
     if (upstream?.state !== 'connected' && upstream?.state !== 'configured') {
       return refuse(409, `${upstream?.label ?? params.provider} is not connected to the model proxy`)
     }
-    control.providers = [...control.providers.filter(item => item.id !== params.provider), {
+    const credentialRef = `DSH_MODEL_PROXY_${params.id.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_FIXTURE`
+    const protectedProviders = control.providers.filter(item => item.id !== params.provider).map(item =>
+      item.baseURL === server.modelProxy.baseURL ? item : { ...item, baseURL: server.modelProxy.baseURL, credentialRef })
+    control.providers = [...protectedProviders, {
       id: params.provider, displayName: upstream.label, api: 'openai-completions', baseURL: server.modelProxy.baseURL,
-      credentialRef: `DSH_MODEL_PROXY_${params.id.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_FIXTURE`,
+      credentialRef,
       credential: { configured: true, source: 'user', writable: true },
       models: [{ id: `${params.provider}-model`, name: `${upstream.label} model`, reasoning: false, image: false }],
       active: true, configured: true, removable: true,
