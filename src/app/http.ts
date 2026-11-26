@@ -30,7 +30,7 @@ import { executorLoad, ticketDetail, ticketList } from './views/tickets.ts'
 import { Fleet, FleetControlError, managementApi, redactSensitive, type FleetAction, type FleetNativeTarget } from './fleet.ts'
 import { INTERNAL_HEADER } from './native-transport.ts'
 import { matchesNativeToken } from './native-auth.ts'
-import { ProviderControlError, addProxyProvider, providerControl, resetProvider, saveProvider,
+import { ProviderControlError, addProxyProvider, providerControl, resetProvider, saveProvider, syncProxyProviders,
   setProviderCredential } from './providers.ts'
 import { LIMITS } from '../limits.ts'
 
@@ -292,6 +292,14 @@ function controllerRoutes(fleet: Fleet): ControllerRoutes {
       throw error
     }
   }
+  // Model setup lives in the person's model proxy; its ready upstreams reach deployments without a manual add step.
+  const sync = async (deployments?: string[]): Promise<string | undefined> => {
+    try {
+      return (await syncProxyProviders(fleet, deployments)).find(result => result.error !== undefined)?.error
+    } catch (error) {
+      return redactSensitive(error instanceof Error ? error.message : String(error))
+    }
+  }
   return {
     'GET fleet': () => fleet.view(),
     'GET gateway/status': () => fleet.gatewayStatus(),
@@ -303,14 +311,20 @@ function controllerRoutes(fleet: Fleet): ControllerRoutes {
     'DELETE gateway/session': () => gateway(() => fleet.signOutGateway()),
     'GET gateway/model-proxy': () => gateway(() => fleet.modelProxyStatus()),
     'POST gateway/model-proxy/claude/connect': () => gateway(() => fleet.startClaudeLogin()),
-    'GET gateway/model-proxy/claude/status': () => gateway(() => fleet.claudeLoginStatus()),
+    'GET gateway/model-proxy/claude/status': () => gateway(async () => {
+      const status = await fleet.claudeLoginStatus()
+      if (status.state === 'connected') await sync()
+      return status
+    }),
     'DELETE gateway/model-proxy/claude/session': () => gateway(() => fleet.cancelClaudeLogin()),
     'DELETE gateway/model-proxy/claude/accounts/:id': ({ params }) =>
       gateway(() => fleet.removeAnthropicAccount(params.id)),
     'PUT gateway/model-proxy/provider/:provider': async ({ params, body }) => gateway(async () => {
       const provider = z.enum(['one-nexus', 'openai']).parse(params.provider)
       const request = z.object({ apiKey: z.string().min(1).max(16_384) }).parse(await body())
-      return fleet.setModelProviderKey(provider, request.apiKey)
+      const saved = await fleet.setModelProviderKey(provider, request.apiKey)
+      await sync()
+      return saved
     }),
     'POST gateway/person': () => gateway(() => fleet.createGatewayPerson()),
     'POST gateway/deployment': async ({ body }) => gateway(async () => {
@@ -318,7 +332,9 @@ function controllerRoutes(fleet: Fleet): ControllerRoutes {
         id: z.string().regex(/^[a-z0-9][a-z0-9-]*$/, 'lowercase deployment id'),
         repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/, 'owner/repository'),
       }).parse(await body())
-      return fleet.createGatewayDeployment(request.id, request.repository)
+      const created = await fleet.createGatewayDeployment(request.id, request.repository)
+      await sync([created.deployment.id])
+      return created
     }),
     'POST gateway/deployment/:id/credentials': async ({ params, body }) => gateway(async () => {
       const request = z.object({ githubToken: z.string().regex(/^[A-Za-z0-9_-]{20,255}$/, 'GitHub token') })
@@ -330,7 +346,11 @@ function controllerRoutes(fleet: Fleet): ControllerRoutes {
     'POST fleet/:id/stop': ({ params }) => control(params.id, 'stop'),
     'POST fleet/:id/restart': ({ params }) => control(params.id, 'restart'),
     'POST fleet/:id/model-proxy/providers/:provider': ({ params }) => addProxyProvider(fleet, params.id, params.provider),
-    'GET fleet/:id/providers': ({ params }) => providerControl(fleet, params.id),
+    'GET fleet/:id/providers': async ({ params }) => {
+      const syncError = await sync([params.id])
+      const view = await providerControl(fleet, params.id)
+      return syncError === undefined ? view : { ...view, syncError }
+    },
     'PUT fleet/:id/providers/:provider': async ({ params, body }) =>
       saveProvider(fleet, params.id, params.provider, await body()),
     'POST fleet/:id/providers/:provider/credential': async ({ params, body }) =>

@@ -12,7 +12,7 @@ const native = vi.hoisted(() => {
 vi.mock('../src/app/native-transport.ts', () => native)
 
 import {
-  addProxyProvider, providerControl, resetProvider, saveProvider, setProviderCredential,
+  addProxyProvider, providerControl, resetProvider, saveProvider, setProviderCredential, syncProxyProviders,
 } from '../src/app/providers.ts'
 
 const target = {
@@ -42,7 +42,10 @@ const createModelProxyKey = vi.fn(async () => ({
 }))
 const revokeModelProxyKey = vi.fn(async () => undefined)
 const finalizeModelProxyKey = vi.fn(async () => undefined)
-const fleet = { managementTarget, modelProxyStatus, createModelProxyKey, revokeModelProxyKey, finalizeModelProxyKey } as unknown as Fleet
+const view = vi.fn(async () => ({ deployments: [{ id: 'inference-support-loop' }] }))
+const fleet = {
+  managementTarget, modelProxyStatus, createModelProxyKey, revokeModelProxyKey, finalizeModelProxyKey, view,
+} as unknown as Fleet
 const catalog = {
   default: { provider: 'one-nexus', model: 'glm-5.3-sontinh', reasoningEffort: 'max' },
   routableProviders: ['one-nexus'],
@@ -245,4 +248,35 @@ it('removes the new provider, credential, and proxy key when one-step setup cann
   })
   expect(native.nativePeerRpc).toHaveBeenCalledWith(target, 'credentials/unset', { ref })
   expect(revokeModelProxyKey).toHaveBeenCalledWith('inference-support-loop', 'dsh-inference-support-loop-a-new-private-proxy-key')
+})
+
+it('adds each ready proxy upstream to every fleet deployment that lacks it and leaves proxied ones unchanged', async () => {
+  emptyDeployment()
+  expect(await syncProxyProviders(fleet)).toEqual([{ id: 'inference-support-loop', added: ['claude'] }])
+  expect(native.nativePeerRpc).toHaveBeenCalledWith(target, 'settings/mutate', expect.objectContaining({
+    ops: [expect.objectContaining({ path: ['providers', 'claude'] })],
+  }))
+
+  native.nativePeerRpc.mockClear()
+  const proxied = { ...structuredClone(profile), baseURL: 'http://127.0.0.1:8317/v1', apiKeyEnv: 'DSH_MODEL_PROXY_EXISTING' }
+  described = { writable: true, namespaces: [{ ns: 'llm-pi-ai', value: { providers: { claude: proxied } },
+    user: { providers: { claude: proxied } }, revision: 4 }] }
+  expect(await syncProxyProviders(fleet)).toEqual([{ id: 'inference-support-loop', added: [] }])
+  expect(native.nativePeerRpc).not.toHaveBeenCalledWith(target, 'settings/mutate', expect.anything())
+})
+
+it('reports one deployment\'s failure without stopping the others, and adds nothing without a ready proxy', async () => {
+  emptyDeployment()
+  managementTarget.mockRejectedValueOnce(new Error('Deployment not found: gone'))
+  expect(await syncProxyProviders(fleet, ['gone', 'inference-support-loop'])).toEqual([
+    { id: 'gone', added: [], error: 'Deployment not found: gone' },
+    { id: 'inference-support-loop', added: ['claude'] },
+  ])
+
+  native.nativePeerRpc.mockClear()
+  modelProxyStatus.mockRejectedValueOnce(new Error('Gateway sign-in required'))
+  expect(await syncProxyProviders(fleet)).toEqual([])
+  modelProxyStatus.mockResolvedValueOnce({ status: 'unavailable', baseURL: '', providers: [], deployments: [] })
+  expect(await syncProxyProviders(fleet)).toEqual([])
+  expect(native.nativePeerRpc).not.toHaveBeenCalled()
 })

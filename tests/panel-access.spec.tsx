@@ -41,8 +41,7 @@ it('writes agent and model credentials without redisplaying them', async () => {
   await click(zh.accessProviderSave)
   expect(server.requests.find(request => request.path === 'gateway/model-proxy/provider/one-nexus'))
     .toMatchObject({ method: 'PUT', body: { apiKey: 'sk-one-nexus-private' } })
-  await vi.waitFor(() => expect(server.requests).toContainEqual(
-    { path: 'fleet/inference-support-loop/model-proxy/providers/one-nexus', method: 'POST' }))
+  expect(server.requests.some(request => request.path.includes('/model-proxy/providers/'))).toBe(false)
   expect(text()).not.toContain('agent-token-value')
   expect(text()).not.toContain('sk-one-nexus-private')
 })
@@ -81,8 +80,7 @@ it('opens one browser window for Claude and polls the existing callback listener
   server.claudeLogin = { state: 'connected' }
   server.modelProxy.providers = server.modelProxy.providers.map(item => item.id === 'claude' ? { ...item, state: 'connected' } : item)
   await vi.waitFor(() => expect(text()).toContain(zh.accessClaudeLinked), { timeout: 3_500 })
-  await vi.waitFor(() => expect(server.requests).toContainEqual(
-    { path: 'fleet/inference-support-loop/model-proxy/providers/claude', method: 'POST' }))
+  expect(server.requests.some(request => request.path.includes('/model-proxy/providers/'))).toBe(false)
 })
 
 it('removes one Anthropic account from the pool only after confirmation', async () => {

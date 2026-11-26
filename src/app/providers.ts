@@ -98,6 +98,8 @@ export interface ProviderControlView {
   providers: ProviderView[]
   catalog: ModelCatalog
   credentialError?: string
+  /** Why the person's ready model-proxy upstreams could not be added to this deployment. */
+  syncError?: string
 }
 
 /** A provider-control refusal that retains the HTTP status the management route should expose. */
@@ -429,6 +431,48 @@ export async function addProxyProvider(fleet: Fleet, deployment: string, provide
     await fleet.revokeModelProxyKey(deployment, created.value).catch(() => undefined)
     throw error
   }
+}
+
+/** The outcome of adding the person's ready model-proxy upstreams to one deployment. */
+export interface ProxySyncResult {
+  id: string
+  added: ProxyPreset[]
+  error?: string
+}
+
+/**
+ * Add every upstream that is connected or configured in the person's model proxy to each listed deployment, or to every
+ * deployment in the fleet when none are listed. A deployment that already has a preset profile behind the proxy is left
+ * unchanged. One deployment's failure is reported in its result and does not stop the others; an unavailable proxy
+ * adds nothing.
+ */
+export async function syncProxyProviders(fleet: Fleet, deployments?: readonly string[]): Promise<ProxySyncResult[]> {
+  // Without a signed-in, reachable proxy there is nothing to add; the Access page reports the proxy state.
+  const proxy = await fleet.modelProxyStatus().catch(() => undefined)
+  if (proxy?.status !== 'ready') return []
+  const ready = PROXY_PRESETS.filter(preset => {
+    const state = proxy.providers.find(item => item.id === preset)?.state
+    return state === 'connected' || state === 'configured'
+  })
+  if (ready.length === 0) return []
+  const ids = deployments ?? (await fleet.view()).deployments.map(item => item.id)
+  const results: ProxySyncResult[] = []
+  for (const id of ids) {
+    const added: ProxyPreset[] = []
+    try {
+      const namespace = (await settings(await targetOf(fleet, id))).namespaces.find(item => item.ns === 'llm-pi-ai')
+      const profiles = namespace ? providerProfiles(namespace.value) : {}
+      for (const preset of ready) {
+        if (profiles[preset]?.baseURL === proxy.baseURL) continue
+        await addProxyProvider(fleet, id, preset)
+        added.push(preset)
+      }
+      results.push({ id, added })
+    } catch (error) {
+      results.push({ id, added, error: redactSensitive(error instanceof Error ? error.message : String(error)) })
+    }
+  }
+  return results
 }
 
 /** Remove this deployment's user-layer provider override; a composition base profile remains effective. */

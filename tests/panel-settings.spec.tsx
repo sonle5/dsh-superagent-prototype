@@ -91,14 +91,14 @@ it('keeps the model catalog browsable and clears an incompatible route when the 
   expect(effort).toHaveProperty('value', 'max')
 })
 
-it('points an empty model catalog at the Models page, where Anthropic is added in one step', async () => {
+it('points an empty model catalog at the Models page, which sends model setup to Access', async () => {
   server.models = { default: { provider: 'host', model: 'default' }, routableProviders: [], failures: [], groups: [] }
   await mount()
   await click(zh['tab.execution'])
   await click(find(zh['tab.settings'], '.dt-status-head button'))
   expect(text()).toContain(zh.modelCatalogEmpty)
   await click(zh.modelOpenProviders)
-  expect(text()).toContain(zh.providerQuickAddClaude)
+  expect(text()).toContain(zh.providerOpenAccess)
 })
 
 it('supports keyboard selection and still saves a free-form model route', async () => {

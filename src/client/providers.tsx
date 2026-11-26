@@ -3,7 +3,8 @@ import { useEffect, useState, type FormEvent } from 'react'
 import type { ApiResponse } from '../app/api.ts'
 import { usePoll } from './api.ts'
 import { Button, Icon, Input, Modal, Tag } from './controls.tsx'
-import { useAction, usePanel } from './provider.tsx'
+import { usePanel } from './provider.tsx'
+import { settingsRoute } from './route.ts'
 import { Field, Fields } from './settings-kit.tsx'
 import { errorText } from './text.ts'
 import { ConfirmButton, Hint, LoadState } from './widgets.tsx'
@@ -12,8 +13,6 @@ type ProviderControl = ApiResponse<'GET fleet/:id/providers'>
 type Provider = ProviderControl['providers'][number]
 type ProviderModel = Provider['models'][number]
 type ProviderApi = 'openai-completions' | 'anthropic-messages' | 'openai-responses'
-type ProxyProvider = ApiResponse<'GET gateway/model-proxy'>['providers'][number]
-type ProxyState = ProxyProvider['state']
 
 interface ModelDraft {
   id: string
@@ -83,87 +82,15 @@ export function AnthropicAccounts({ accounts, onRemoved }: { accounts: Anthropic
   </ul>
 }
 
-const ready = (state: ProxyState | undefined) => state === 'connected' || state === 'configured'
-
-/** One-step setup for upstreams the protected model proxy holds: sign in or paste a key, and the provider is added. */
-function QuickSetup({ onAdded }: { onAdded: () => Promise<void> }) {
-  const { t, call, deployment, notify } = usePanel()
-  const proxy = usePoll(() => call('GET gateway/model-proxy'), [call], 15_000)
-  const [claudeWaiting, setClaudeWaiting] = useState(false)
-  const [nexusKey, setNexusKey] = useState('')
-  const claude = usePoll(
-    () => claudeWaiting ? call('GET gateway/model-proxy/claude/status') : Promise.resolve(undefined),
-    [claudeWaiting, call],
-    2_000,
-  )
-  const state = (id: ProxyProvider['id']) => proxy.data?.providers.find(item => item.id === id)?.state
-  const add = useAction(async (preset: 'claude' | 'one-nexus') => {
-    if (!deployment) return
-    await call('POST fleet/:id/model-proxy/providers/:provider', { id: deployment.id, provider: preset })
-    notify(t('providerQuickAdded', { provider: preset === 'claude' ? 'Anthropic' : 'OneNexus' }))
-    await onAdded()
-  })
-  const addNexus = useAction(async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-    if (nexusKey) {
-      await call('PUT gateway/model-proxy/provider/:provider', { provider: 'one-nexus', body: { apiKey: nexusKey } })
-      setNexusKey('')
-    }
-    await add.run('one-nexus')
-  })
-  useEffect(() => {
-    if (claude.data?.state === 'connected') {
-      setClaudeWaiting(false)
-      void add.run('claude')
-    } else if (claude.data?.state === 'error') {
-      setClaudeWaiting(false)
-      if (claude.data.error) notify(claude.data.error)
-    }
-    // Only a status change starts the add; `add` is recreated on every render.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [claude.data, notify])
-  const connectClaude = async () => {
-    const opened = window.open('about:blank', 'dsh-claude-login')
-    if (opened) opened.opener = null
-    try {
-      const started = await call('POST gateway/model-proxy/claude/connect')
-      setClaudeWaiting(true)
-      if (opened) opened.location.replace(started.url)
-    } catch (failure) {
-      opened?.close()
-      notify(errorText(failure))
-    }
-  }
-  if (!proxy.data) {
-    return proxy.error ? <Hint>{t('providerQuickUnavailable')}</Hint> : <LoadState loading />
-  }
-  const busy = add.busy || addNexus.busy || !deployment
-  const accounts = proxy.data.anthropicAccounts
+/** Points model setup to Access, where the person's model proxy adds its ready upstreams to every deployment. */
+function ProxySetupLink({ syncError }: { syncError: string | undefined }) {
+  const { t, navigate } = usePanel()
   return <div className="dt-provider-quick">
     <article className="dt-provider-quick-item">
-      <div>
-        <strong>Anthropic</strong><p className="dt-hint">{t('providerQuickClaudeHint')}</p>
-        <AnthropicAccounts accounts={accounts} onRemoved={proxy.reload} />
-      </div>
-      <div className="dt-row-buttons">
-        {ready(state('claude')) && <Button variant="primary" size="sm" disabled={busy || claudeWaiting}
-          onClick={() => { void add.run('claude') }}>{t('providerQuickAddClaude')}</Button>}
-        <Button variant={ready(state('claude')) ? 'outline' : 'primary'} size="sm" disabled={busy || claudeWaiting}
-          onClick={() => { void connectClaude() }}>
-          {claudeWaiting ? t('accessClaudeWaiting') : accounts.length ? t('accessAnthropicAddAccount') : t('accessClaudeConnect')}
-        </Button>
-      </div>
+      <p className="dt-hint">{t('providerProxyHint')}</p>
+      <Button variant="outline" size="sm" onClick={() => navigate(settingsRoute('access'))}>{t('providerOpenAccess')}</Button>
     </article>
-    <form className="dt-provider-quick-item" onSubmit={event => { void addNexus.run(event) }}>
-      <div><strong>OneNexus</strong><p className="dt-hint">{t('providerQuickNexusHint')}</p></div>
-      <div className="dt-provider-quick-key">
-        <Input type="password" autoComplete="new-password" aria-label={t('providerQuickNexusKey')} value={nexusKey}
-          placeholder={ready(state('one-nexus')) ? t('providerKeyConfiguredPlaceholder') : t('providerQuickNexusKey')}
-          disabled={busy} onChange={event => setNexusKey(event.target.value)} />
-        <Button type="submit" variant="primary" size="sm" disabled={busy || (!nexusKey && !ready(state('one-nexus')))}>
-          {t('providerQuickAddNexus')}</Button>
-      </div>
-    </form>
+    {syncError && <p className="dt-error" role="alert">{t('providerSyncError', { error: syncError })}</p>}
   </div>
 }
 
@@ -422,7 +349,7 @@ export function ProvidersSettings() {
       {data.writable && <Button variant="outline" size="sm" icon={<Icon name="plus" size={14} />}
         onClick={() => setAdding(true)}>{t('providerAdd')}</Button>}
     </div>
-    {data.writable && <QuickSetup onAdded={reload} />}
+    {data.writable && <ProxySetupLink syncError={data.syncError} />}
     <div className="dt-provider-list">
       {data.providers.map(provider => <ProviderCard key={provider.id} provider={provider} revision={data.revision}
         writable={data.writable} onReload={reload} />)}

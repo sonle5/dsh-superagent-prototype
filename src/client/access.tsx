@@ -12,7 +12,6 @@ import { Hint, LoadState, Section } from './widgets.tsx'
 type ModelProxy = ApiResponse<'GET gateway/model-proxy'>
 type ProxyProvider = ModelProxy['providers'][number]
 type WritableProvider = Extract<ProxyProvider['id'], 'one-nexus' | 'openai'>
-type ProxyPreset = Extract<ProxyProvider['id'], 'claude' | 'one-nexus'>
 
 const tone = (state: ProxyProvider['state']) => state === 'connected' || state === 'configured' ? 'success'
   : state === 'auth-expired' || state === 'error' ? 'danger' : state === 'missing' ? 'warning' : 'quiet'
@@ -51,22 +50,20 @@ export function AccessSettings() {
     [claudeWaiting, call],
     2_000,
   )
-  const register = useAction(async (preset: ProxyPreset) => {
-    if (!deployment) return
-    await call('POST fleet/:id/model-proxy/providers/:provider', { id: deployment.id, provider: preset })
-  }, { reload: async () => { await control.reload(); await roles.reload() } })
+  // The gateway adds ready proxy upstreams to every deployment; reloading shows the result here.
+  const refreshModels = async () => { await control.reload(); await roles.reload() }
   useEffect(() => {
     if (claude.data?.state === 'connected') {
       setClaudeWaiting(false)
       setLoginUrl(undefined)
       notify(t('accessClaudeLinked'))
       void access.reload()
-      void register.run('claude')
+      void refreshModels()
     } else if (claude.data?.state === 'error') {
       setClaudeWaiting(false)
       if (claude.data.error) notify(claude.data.error)
     }
-    // Only a status change registers the provider; `register` is recreated on every render.
+    // Only a status change refreshes; `refreshModels` is recreated on every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [access, claude.data, notify, t])
   const saveAgent = useAction(async (event: FormEvent<HTMLFormElement>) => {
@@ -82,8 +79,7 @@ export function AccessSettings() {
     await call('PUT gateway/model-proxy/provider/:provider', { provider, body: { apiKey: providerKey } })
     setProviderKey('')
     notify(t('accessProviderSaved'))
-    if (provider === 'one-nexus') await register.run('one-nexus')
-  }, { reload: access.reload })
+  }, { reload: async () => { await access.reload(); await refreshModels() } })
   const signOut = useAction(async () => {
     await call('DELETE gateway/session')
     notify(t('accessSignedOut'))

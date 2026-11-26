@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 // Deployment-scoped provider, credential, and model management.
-import { expect, it, onTestFinished, vi } from 'vitest'
+import { expect, it } from 'vitest'
 import { zh } from '../src/client/locales.ts'
 import { all, at, click, field, find, mount, settle, text, type, usePanel } from './fixtures/panel.tsx'
 import { server } from './fixtures/panel-server.ts'
@@ -106,50 +106,13 @@ it('keeps provider edits isolated when Desktop switches deployments', async () =
   expect(text()).toContain('Inference only')
 })
 
-it('adds Anthropic from the Models page in one step by signing in, without opening the provider form', async () => {
-  server.modelProxy.providers = server.modelProxy.providers.map(item => item.id === 'claude' ? { ...item, state: 'sign-in-required' } : item)
-  server.modelProxy.anthropicAccounts = []
-  const opened = { opener: {}, location: { replace: vi.fn() }, close: vi.fn() }
-  vi.stubGlobal('open', vi.fn(() => opened))
-  onTestFinished(() => { vi.unstubAllGlobals() })
+it('sends model setup to Access, which adds ready proxy upstreams, and reports a failed automatic add', async () => {
+  server.providerControls['inference-support-loop']!.syncError = 'OneNexus is not connected to the model proxy'
   providersPage()
   await mount()
-  await click(zh.accessClaudeConnect)
-  expect(opened.location.replace).toHaveBeenCalledWith('https://claude.example/authorize')
-  expect(text()).toContain(zh.accessClaudeWaiting)
-  server.claudeLogin = { state: 'connected' }
-  server.modelProxy.providers = server.modelProxy.providers.map(item => item.id === 'claude' ? { ...item, state: 'connected' } : item)
-  await vi.waitFor(() => expect(server.requests.some(request =>
-    request.method === 'POST' && request.path === 'fleet/inference-support-loop/model-proxy/providers/claude')).toBe(true),
-  { timeout: 3_500 })
-  const added = server.providerControls['inference-support-loop']!.providers.find(item => item.id === 'claude')!
-  expect(added.baseURL).toBe(server.modelProxy.baseURL)
-})
-
-it('lists connected Anthropic accounts and signs in another one through the same flow', async () => {
-  const opened = { opener: {}, location: { replace: vi.fn() }, close: vi.fn() }
-  vi.stubGlobal('open', vi.fn(() => opened))
-  onTestFinished(() => { vi.unstubAllGlobals() })
-  providersPage()
-  await mount()
-  expect(text()).toContain('alice@example.com')
-  expect(text()).toContain(zh.accessAnthropicNotShared)
-  await click(zh.accessAnthropicAddAccount)
-  expect(opened.location.replace).toHaveBeenCalledWith('https://claude.example/authorize')
-  expect(server.claudeLogin.state).toBe('waiting')
-})
-
-it('adds OneNexus in one step from only its API key, which reaches the model proxy and not the deployment', async () => {
-  server.modelProxy.providers = server.modelProxy.providers.map(item => item.id === 'one-nexus' ? { ...item, state: 'missing' } : item)
-  providersPage()
-  await mount()
-  await type(document.querySelector<HTMLInputElement>(`input[aria-label="${zh.providerQuickNexusKey}"]`)!, 'sk-onenexus-private')
-  await click(zh.providerQuickAddNexus)
-  expect(server.requests.find(request => request.path === 'gateway/model-proxy/provider/one-nexus')).toMatchObject({
-    method: 'PUT', body: { apiKey: 'sk-onenexus-private' },
-  })
-  expect(server.requests.some(request =>
-    request.method === 'POST' && request.path === 'fleet/inference-support-loop/model-proxy/providers/one-nexus')).toBe(true)
-  expect(JSON.stringify(server.providerControls['inference-support-loop'])).not.toContain('sk-onenexus-private')
-  expect(text()).toContain(zh.providerQuickAdded.replace('{provider}', 'OneNexus'))
+  expect(text()).toContain(zh.providerProxyHint)
+  expect(text()).toContain(zh.providerSyncError.replace('{error}', 'OneNexus is not connected to the model proxy'))
+  expect(document.querySelector('input[type="password"]')).toBeNull()
+  await click(zh.providerOpenAccess)
+  expect(text()).toContain(zh.accessModelsHint)
 })
