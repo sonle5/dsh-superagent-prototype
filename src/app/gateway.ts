@@ -425,6 +425,26 @@ async function deploymentJson(
   return value
 }
 
+/**
+ * Report whether the signed-in user can push to a repository that already has a deployment.
+ * The sign-in token carries only `read:org`, so private repositories always report no access.
+ * @param fetcher GitHub HTTP client.
+ * @param registry Gateway registry that lists the deployed repositories.
+ * @param authorization `Bearer` header for the signed-in user's token.
+ * @returns Whether any deployed repository grants the user push access.
+ */
+async function canPushDeployedRepository(fetcher: FetchLike, registry: RegistryConfig, authorization: string): Promise<boolean> {
+  const repositories = new Set(allDeployments(registry).map(deployment => deployment.repository.toLowerCase()))
+  for (const repository of repositories) {
+    const response = await fetcher(`https://api.github.com/repos/${repository}`,
+      { headers: { accept: 'application/vnd.github+json', authorization } })
+    const access = response.ok ? RepositoryPermissions.safeParse(await response.json().catch(() => undefined)) : undefined
+    if (!response.ok) await response.body?.cancel()
+    if (access?.success === true && access.data.permissions?.push === true) return true
+  }
+  return false
+}
+
 async function issueSession(
   fetcher: FetchLike,
   req: IncomingMessage,
@@ -449,8 +469,8 @@ async function issueSession(
   const member = await fetcher(`https://api.github.com/orgs/${encodeURIComponent(registry.organization)}/members/${encodeURIComponent(user.login)}`,
     { headers: { accept: 'application/vnd.github+json', authorization } })
   await member.body?.cancel()
-  if (member.status !== 204) {
-    json(res, 403, { error: `GitHub account is not a member of ${registry.organization}` })
+  if (member.status !== 204 && !await canPushDeployedRepository(fetcher, registry, authorization)) {
+    json(res, 403, { error: `GitHub account is not a member of ${registry.organization} or a collaborator with write access on a deployed repository` })
     return
   }
   const session = setSession(res, stateDir, user.login, secure)

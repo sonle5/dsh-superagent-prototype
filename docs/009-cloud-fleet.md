@@ -78,7 +78,7 @@ Desktop stores no Superagent state for server deployments. It loads a snapshot a
 
 ## Sign-in
 
-The gateway uses GitHub device sign-in and runs it itself. Desktop shows a code, the person enters it at GitHub, and the gateway receives the result directly from GitHub. It checks membership of the configured organization, then issues its own session to Desktop. No GitHub token is stored on the operator's computer.
+The gateway uses GitHub device sign-in and runs it itself. Desktop shows a code, the person enters it at GitHub, and the gateway receives the result directly from GitHub. It admits members of the configured organization and people with write access to a public repository that already has a deployment, then issues its own session to Desktop. No GitHub token is stored on the operator's computer.
 
 This needs one OAuth app with device flow enabled. It requests read access to organization membership and nothing else.
 

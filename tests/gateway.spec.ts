@@ -30,13 +30,17 @@ Promise<{ server: Server; url: string }> {
   return { server, url: `http://127.0.0.1:${(server.address() as AddressInfo).port}` }
 }
 
-function gatewayFetch(member = true, login = 'member', agents: Record<string, { login: string; push: boolean }> = {}) {
+function gatewayFetch(member = true, login = 'member', agents: Record<string, { login: string; push: boolean }> = {},
+  pushable: string[] = []) {
   const orgUrl = `https://api.github.com/orgs/example-org/members/${login}`
   return vi.fn(async (url: string, init?: RequestInit): Promise<Response> => {
     const agent = agents[String((init?.headers as Record<string, string> | undefined)?.authorization).replace(/^Bearer /, '')]
     if (agent && url === USER_URL) return Response.json({ login: agent.login })
     if (agent && url.startsWith('https://api.github.com/repos/')) {
       return agent.push ? Response.json({ permissions: { push: true } }) : Response.json({ message: 'Not Found' }, { status: 404 })
+    }
+    if (url.startsWith('https://api.github.com/repos/')) {
+      return Response.json({ permissions: { push: pushable.includes(url.slice('https://api.github.com/repos/'.length)) } })
     }
     if (url === DEVICE_URL) return Response.json({ device_code: 'device-code', user_code: 'USER-1', verification_uri: 'https://github.com/login/device', expires_in: 900, interval: 5 })
     if (url === TOKEN_URL) return Response.json({ access_token: 'github-token' })
@@ -296,7 +300,20 @@ it('refuses a GitHub account outside the configured organization without a sessi
   const gateway = await serveGateway(state, gatewayFetch(false))
   await gateway.call('POST', '/gateway/api/device')
   const session = await gateway.call('POST', '/gateway/api/session', { device_code: 'device-code' })
-  expect(session).toMatchObject({ status: 403, setCookie: null, body: { error: 'GitHub account is not a member of example-org' } })
+  expect(session).toMatchObject({ status: 403, setCookie: null, body: {
+    error: 'GitHub account is not a member of example-org or a collaborator with write access on a deployed repository',
+  } })
+})
+
+it('signs in a non-member who can push to a deployed repository', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'dsh-gateway-collaborator-'))
+  cleanup.push(() => rmSync(state, { recursive: true, force: true }))
+  registry(state, 'http://127.0.0.1:9')
+  const gateway = await serveGateway(state, gatewayFetch(false, 'outside', {}, ['example-org/sglang']))
+  await gateway.call('POST', '/gateway/api/device')
+  const session = await gateway.call('POST', '/gateway/api/session', { device_code: 'device-code' })
+  expect(session).toMatchObject({ status: 200, body: { login: 'outside' } })
+  expect(session.setCookie).not.toBeNull()
 })
 
 it('keeps model-provider operations behind the trusted controller and never returns write-only secrets', async () => {
