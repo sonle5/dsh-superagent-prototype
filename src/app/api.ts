@@ -35,6 +35,8 @@ export interface ModelProxyView {
   }[]
   /** Anthropic subscription accounts signed in to the proxy; `sharedPool` is false for a prefixed account that unprefixed model ids cannot reach. */
   anthropicAccounts: {
+    /** Credential file name; pass it to `DELETE gateway/model-proxy/claude/accounts/:id`. */
+    id: string
     name: string
     state: 'connected' | 'sign-in-required' | 'auth-expired'
     sharedPool: boolean
@@ -89,11 +91,11 @@ export interface Api {
     error?: string
   } }
   'DELETE gateway/model-proxy/claude/session': { response: { cancelled: boolean } }
+  'DELETE gateway/model-proxy/claude/accounts/:id': { response: { removed: true } }
   'PUT gateway/model-proxy/provider/:provider': { body: { apiKey: string }; response: {
     provider: 'one-nexus' | 'openai'
     configured: true
   } }
-  'POST fleet/:id/model-proxy': { response: ProviderControlView }
   'POST fleet/:id/model-proxy/providers/:provider': { response: ProviderControlView }
   'POST deployments/:id/select': { response: { selected: string } }
   'POST fleet/:id/start': { response: { id: string; action: 'start'; code: number; output: string } }
@@ -157,8 +159,8 @@ export const FLEET_ROUTES = [
   'POST gateway/model-proxy/claude/connect',
   'GET gateway/model-proxy/claude/status',
   'DELETE gateway/model-proxy/claude/session',
+  'DELETE gateway/model-proxy/claude/accounts/:id',
   'PUT gateway/model-proxy/provider/:provider',
-  'POST fleet/:id/model-proxy',
   'POST fleet/:id/model-proxy/providers/:provider',
   'POST deployments/:id/select',
   'POST fleet/:id/start',

@@ -331,8 +331,8 @@ function initial(): PanelServer {
         { id: 'sglang', keyConfigured: true },
       ],
       anthropicAccounts: [
-        { name: 'alice@example.com', state: 'connected', sharedPool: true },
-        { name: 'nexus13-legacy', state: 'connected', sharedPool: false },
+        { id: 'claude-alice@example.com.json', name: 'alice@example.com', state: 'connected', sharedPool: true },
+        { id: 'nexus13-legacy.json', name: 'nexus13-legacy', state: 'connected', sharedPool: false },
       ],
     },
     claudeLogin: { state: 'idle' },
@@ -408,6 +408,12 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
     server.claudeLogin = { state: 'idle' }
     return { cancelled }
   } },
+  'DELETE gateway/model-proxy/claude/accounts/:id': { answer: ({ params }) => {
+    const before = server.modelProxy.anthropicAccounts.length
+    server.modelProxy.anthropicAccounts = server.modelProxy.anthropicAccounts.filter(item => item.id !== params.id)
+    if (server.modelProxy.anthropicAccounts.length === before) return refuse(404, `Anthropic account not found: ${params.id}`)
+    return { removed: true as const }
+  } },
   'PUT gateway/model-proxy/provider/:provider': { body: true, answer: ({ params }) => {
     const provider = server.modelProxy.providers.find(item => item.id === params.provider)
     if (provider?.id !== 'one-nexus' && provider?.id !== 'openai') return refuse(404, 'Provider not found')
@@ -454,22 +460,6 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
     if (!item) return refuse(404, `Deployment not found: ${params.id}`)
     item.status = 'starting'; item.detail = 'Starting'
     return { id: params.id, action: 'restart', code: 0, output: 'Restarted' }
-  } },
-  'POST fleet/:id/model-proxy': { answer: ({ params }) => {
-    const control = controlOf(params.id)
-    if (!control) return refuse(404, `Deployment not found: ${params.id}`)
-    control.providers = control.providers.map(provider => ({
-      ...provider,
-      baseURL: server.modelProxy.baseURL,
-      credentialRef: `DSH_MODEL_PROXY_${params.id.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_FIXTURE`,
-      credential: { configured: true, source: 'user', writable: true },
-    }))
-    control.revision++
-    server.modelProxy.deployments = [
-      ...server.modelProxy.deployments.filter(item => item.id !== params.id),
-      { id: params.id, keyConfigured: true },
-    ]
-    return providerControl(params.id)!
   } },
   'POST fleet/:id/model-proxy/providers/:provider': { answer: ({ params }) => {
     const control = controlOf(params.id)

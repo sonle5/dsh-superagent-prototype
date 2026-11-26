@@ -4,6 +4,7 @@ import type { ApiResponse } from '../app/api.ts'
 import { usePoll, type SettingsView } from './api.ts'
 import { Button, Icon, Input, Tag } from './controls.tsx'
 import { useAction, usePanel } from './provider.tsx'
+import { AnthropicAccounts } from './providers.tsx'
 import { Field, Fields } from './settings-kit.tsx'
 import { errorText, when } from './text.ts'
 import { Hint, LoadState, Section } from './widgets.tsx'
@@ -137,13 +138,7 @@ export function AccessSettings() {
             <div className="dt-card-head"><span className="dt-card-title">{item.label}</span><Tag tone={tone(item.state)}>{item.state}</Tag></div>
             <p className="dt-mono">{item.id}</p>
             {item.id === 'claude' && <>
-              {proxy.anthropicAccounts.length > 0 && <ul className="dt-access-accounts" aria-label={t('accessAnthropicAccounts')}>
-                {proxy.anthropicAccounts.map(account => <li key={account.name}>
-                  <span>{account.name}</span>
-                  <Tag tone={tone(account.state)}>{account.state}</Tag>
-                  {!account.sharedPool && <Tag tone="warning">{t('accessAnthropicNotShared')}</Tag>}
-                </li>)}
-              </ul>}
+              <AnthropicAccounts accounts={proxy.anthropicAccounts} onRemoved={access.reload} />
               <div className="dt-row-buttons">
                 <Button variant={proxy.anthropicAccounts.length ? 'outline' : 'primary'} size="sm" icon={<Icon name="shield" size={14} />}
                   disabled={claudeWaiting} onClick={() => { void connectClaude() }}>{claudeWaiting ? t('accessClaudeWaiting')

@@ -290,7 +290,7 @@ it('reports expired Claude authorization as auth-expired', () => {
     '    print(json.dumps(value))',
   ].join('\n')], { encoding: 'utf8' })) as {
     providers: { id: string; state: string; expiresAt?: string }[]
-    anthropicAccounts: { name: string; state: string; sharedPool: boolean }[]
+    anthropicAccounts: { id: string; name: string; state: string; sharedPool: boolean }[]
   }
 
   expect(result.providers).toMatchObject([
@@ -299,10 +299,50 @@ it('reports expired Claude authorization as auth-expired', () => {
     expect.objectContaining({ id: 'claude', label: 'Anthropic', state: 'auth-expired', expiresAt: '2025-06-01T00:00:00Z' }),
   ])
   expect(result.anthropicAccounts).toEqual([
-    { name: 'claude', state: 'auth-expired', sharedPool: true },
-    { name: 'nexus13', state: 'connected', sharedPool: false },
-    { name: 'bob@example.com', state: 'auth-expired', sharedPool: true },
+    { id: 'claude.json', name: 'claude', state: 'auth-expired', sharedPool: true },
+    { id: 'nexus13.json', name: 'nexus13', state: 'connected', sharedPool: false },
+    { id: 'second.json', name: 'bob@example.com', state: 'auth-expired', sharedPool: true },
   ])
+})
+
+it('removes only an existing Anthropic credential through the proxy management API', () => {
+  const result = JSON.parse(execFileSync('python3', ['-c', [
+    'import json, runpy, tempfile',
+    'from pathlib import Path',
+    `module = runpy.run_path(${JSON.stringify(script)})`,
+    'overrides = module["claude_remove"].__globals__',
+    'overrides["config"] = lambda _request: ("gateway", "gateway", "/opt/dsh-superagent", _request["baseDir"])',
+    'def model_proxy_plan(_login, _base):',
+    '    return ("model-user", Path(_base) / "model-proxies" / "alice", None, {})',
+    'overrides["model_proxy_plan"] = model_proxy_plan',
+    'calls = []',
+    'overrides["management_request"] = lambda _state, method, suffix, _body=None: calls.append([method, suffix])',
+    'def attempt(account):',
+    '    try:',
+    '        return module["claude_remove"]({"login": "alice", "account": account, "baseDir": base}, False)',
+    '    except module["OnboardingError"] as error:',
+    '        return str(error)',
+    'with tempfile.TemporaryDirectory() as base:',
+    '    auth = Path(base) / "model-proxies" / "alice" / "auth"',
+    '    auth.mkdir(parents=True)',
+    '    (auth / "claude-bob@example.com.json").write_text(json.dumps({"type": "claude"}))',
+    '    (auth / "codex.json").write_text(json.dumps({"type": "codex"}))',
+    '    print(json.dumps({',
+    '        "removed": attempt("claude-bob@example.com.json"),',
+    '        "missing": attempt("absent.json"),',
+    '        "other": attempt("codex.json"),',
+    '        "traversal": attempt("../alice.json"),',
+    '        "calls": calls,',
+    '    }))',
+  ].join('\n')], { encoding: 'utf8' })) as Record<string, unknown>
+
+  expect(result).toEqual({
+    removed: { removed: true },
+    missing: 'Anthropic account is not signed in to the model proxy',
+    other: 'credential is not an Anthropic account',
+    traversal: expect.stringContaining('Anthropic account'),
+    calls: [['DELETE', '/credentials?name=claude-bob%40example.com.json']],
+  })
 })
 
 it('allocates stable, distinct proxy ports for multiple protected people', async () => {

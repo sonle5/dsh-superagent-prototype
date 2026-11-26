@@ -61,6 +61,28 @@ const providerDraft = (provider?: Provider): ProviderDraft => provider ? {
   models: [blankModel()],
 }
 
+type AnthropicAccount = ApiResponse<'GET gateway/model-proxy'>['anthropicAccounts'][number]
+const accountTone = (state: AnthropicAccount['state']) => state === 'connected' ? 'success' : state === 'auth-expired' ? 'danger' : 'quiet'
+
+/** Anthropic subscription accounts in the model proxy pool, each removable after confirmation. */
+export function AnthropicAccounts({ accounts, onRemoved }: { accounts: AnthropicAccount[]; onRemoved: () => Promise<unknown> }) {
+  const { t, call, notify } = usePanel()
+  if (accounts.length === 0) return null
+  return <ul className="dt-access-accounts" aria-label={t('accessAnthropicAccounts')}>
+    {accounts.map(account => <li key={account.id}>
+      <span>{account.name}</span>
+      <Tag tone={accountTone(account.state)}>{account.state}</Tag>
+      {!account.sharedPool && <Tag tone="warning">{t('accessAnthropicNotShared')}</Tag>}
+      <ConfirmButton icon="trash" label={t('accessAnthropicRemove')} title={t('accessAnthropicRemoveTitle')}
+        message={t('accessAnthropicRemoveMessage', { account: account.name })} onConfirm={async () => {
+          await call('DELETE gateway/model-proxy/claude/accounts/:id', { id: account.id })
+          notify(t('accessAnthropicRemoved', { account: account.name }))
+          await onRemoved()
+        }} />
+    </li>)}
+  </ul>
+}
+
 const ready = (state: ProxyState | undefined) => state === 'connected' || state === 'configured'
 
 /** One-step setup for upstreams the protected model proxy holds: sign in or paste a key, and the provider is added. */
@@ -121,12 +143,7 @@ function QuickSetup({ onAdded }: { onAdded: () => Promise<void> }) {
     <article className="dt-provider-quick-item">
       <div>
         <strong>Anthropic</strong><p className="dt-hint">{t('providerQuickClaudeHint')}</p>
-        {accounts.length > 0 && <ul className="dt-access-accounts" aria-label={t('accessAnthropicAccounts')}>
-          {accounts.map(account => <li key={account.name}>
-            <span>{account.name}</span>
-            {!account.sharedPool && <Tag tone="warning">{t('accessAnthropicNotShared')}</Tag>}
-          </li>)}
-        </ul>}
+        <AnthropicAccounts accounts={accounts} onRemoved={proxy.reload} />
       </div>
       <div className="dt-row-buttons">
         {ready(state('claude')) && <Button variant="primary" size="sm" disabled={busy || claudeWaiting}

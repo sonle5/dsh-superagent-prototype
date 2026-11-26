@@ -30,7 +30,7 @@ import { executorLoad, ticketDetail, ticketList } from './views/tickets.ts'
 import { Fleet, FleetControlError, managementApi, redactSensitive, type FleetAction, type FleetNativeTarget } from './fleet.ts'
 import { INTERNAL_HEADER } from './native-transport.ts'
 import { matchesNativeToken } from './native-auth.ts'
-import { ProviderControlError, addProxyProvider, configureDeploymentModelProxy, providerControl, resetProvider, saveProvider,
+import { ProviderControlError, addProxyProvider, providerControl, resetProvider, saveProvider,
   setProviderCredential } from './providers.ts'
 import { LIMITS } from '../limits.ts'
 
@@ -149,10 +149,11 @@ interface Input<K extends keyof Api> {
 }
 type GatewayRouteKey = 'GET gateway/status' | 'POST gateway/device' | 'POST gateway/session' | 'DELETE gateway/session'
   | 'GET gateway/model-proxy' | 'POST gateway/model-proxy/claude/connect' | 'GET gateway/model-proxy/claude/status'
-  | 'DELETE gateway/model-proxy/claude/session' | 'PUT gateway/model-proxy/provider/:provider'
+  | 'DELETE gateway/model-proxy/claude/session' | 'DELETE gateway/model-proxy/claude/accounts/:id'
+  | 'PUT gateway/model-proxy/provider/:provider'
   | 'POST gateway/person' | 'POST gateway/deployment' | 'POST gateway/deployment/:id/credentials'
 type FleetRouteKey = 'GET fleet' | 'POST deployments/:id/select' | 'POST fleet/:id/start' | 'POST fleet/:id/stop'
-  | 'POST fleet/:id/restart' | 'POST fleet/:id/model-proxy' | 'POST fleet/:id/model-proxy/providers/:provider'
+  | 'POST fleet/:id/restart' | 'POST fleet/:id/model-proxy/providers/:provider'
 type ControllerRouteKey = GatewayRouteKey | FleetRouteKey
 type ProviderRouteKey = 'GET fleet/:id/providers' | 'PUT fleet/:id/providers/:provider'
   | 'POST fleet/:id/providers/:provider/credential' | 'DELETE fleet/:id/providers/:provider'
@@ -197,7 +198,6 @@ function routes(runtime: HttpHost, fleet: Fleet): Routes {
     'POST fleet/:id/start': ({ params }) => control(params.id, 'start'),
     'POST fleet/:id/stop': ({ params }) => control(params.id, 'stop'),
     'POST fleet/:id/restart': ({ params }) => control(params.id, 'restart'),
-    'POST fleet/:id/model-proxy': ({ params }) => configureDeploymentModelProxy(fleet, params.id),
     'POST fleet/:id/model-proxy/providers/:provider': ({ params }) => addProxyProvider(fleet, params.id, params.provider),
     'GET state': () => stateView(runtime),
     'GET overview': () => overview(views(runtime), runtime.health, policyVersion(store.settings()),
@@ -293,6 +293,8 @@ function controllerRoutes(fleet: Fleet): ControllerRoutes {
     'POST gateway/model-proxy/claude/connect': () => gateway(() => fleet.startClaudeLogin()),
     'GET gateway/model-proxy/claude/status': () => gateway(() => fleet.claudeLoginStatus()),
     'DELETE gateway/model-proxy/claude/session': () => gateway(() => fleet.cancelClaudeLogin()),
+    'DELETE gateway/model-proxy/claude/accounts/:id': ({ params }) =>
+      gateway(() => fleet.removeAnthropicAccount(params.id)),
     'PUT gateway/model-proxy/provider/:provider': async ({ params, body }) => gateway(async () => {
       const provider = z.enum(['one-nexus', 'openai']).parse(params.provider)
       const request = z.object({ apiKey: z.string().min(1).max(16_384) }).parse(await body())
@@ -315,7 +317,6 @@ function controllerRoutes(fleet: Fleet): ControllerRoutes {
     'POST fleet/:id/start': ({ params }) => control(params.id, 'start'),
     'POST fleet/:id/stop': ({ params }) => control(params.id, 'stop'),
     'POST fleet/:id/restart': ({ params }) => control(params.id, 'restart'),
-    'POST fleet/:id/model-proxy': ({ params }) => configureDeploymentModelProxy(fleet, params.id),
     'POST fleet/:id/model-proxy/providers/:provider': ({ params }) => addProxyProvider(fleet, params.id, params.provider),
     'GET fleet/:id/providers': ({ params }) => providerControl(fleet, params.id),
     'PUT fleet/:id/providers/:provider': async ({ params, body }) =>

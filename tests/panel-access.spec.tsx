@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { expect, it, onTestFinished, vi } from 'vitest'
 import { zh } from '../src/client/locales.ts'
-import { click, field, mount, text, type, usePanel } from './fixtures/panel.tsx'
+import { all, click, field, find, mount, text, type, usePanel } from './fixtures/panel.tsx'
 import { server } from './fixtures/panel-server.ts'
 
 usePanel()
@@ -54,7 +54,6 @@ it('warns about direct-key providers without a manual protect step, and signs ou
   accessPage()
   await mount()
   expect(text()).toContain(zh.accessUnprotected.replace('{providers}', 'one-nexus'))
-  expect(server.requests).not.toContainEqual({ path: 'fleet/inference-support-loop/model-proxy', method: 'POST' })
 
   await click(zh.accessSignOut)
   expect(server.requests).toContainEqual({ path: 'gateway/session', method: 'DELETE' })
@@ -84,4 +83,20 @@ it('opens one browser window for Claude and polls the existing callback listener
   await vi.waitFor(() => expect(text()).toContain(zh.accessClaudeLinked), { timeout: 3_500 })
   await vi.waitFor(() => expect(server.requests).toContainEqual(
     { path: 'fleet/inference-support-loop/model-proxy/providers/claude', method: 'POST' }))
+})
+
+it('removes one Anthropic account from the pool only after confirmation', async () => {
+  server.gatewayStatus = {
+    configured: true, url: 'https://superagent.example', organization: 'example-org', login: 'fixture-user', person: true,
+  }
+  accessPage()
+  await mount()
+  const row = all('.dt-access-accounts li').find(item => item.textContent?.includes('nexus13-legacy'))!
+  await click(row.querySelector('button')!)
+  expect(server.requests).not.toContainEqual(expect.objectContaining({ method: 'DELETE',
+    path: 'gateway/model-proxy/claude/accounts/nexus13-legacy.json' }))
+  await click(find(zh.confirm))
+  expect(server.requests).toContainEqual(expect.objectContaining({ method: 'DELETE',
+    path: 'gateway/model-proxy/claude/accounts/nexus13-legacy.json' }))
+  expect(all('.dt-access-accounts li').map(item => item.querySelector('span')?.textContent)).toEqual(['alice@example.com'])
 })

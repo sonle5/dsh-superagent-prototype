@@ -157,6 +157,7 @@ const ModelProxyStatus = z.object({
   baseURL: z.string().url(),
   providers: z.array(ModelProxyProvider).default([]),
   anthropicAccounts: z.array(z.object({
+    id: z.string().min(1),
     name: z.string().min(1),
     state: z.enum(['connected', 'sign-in-required', 'auth-expired']),
     sharedPool: z.boolean(),
@@ -670,6 +671,7 @@ export function registerGateway(ctx: Context, stateDir: string, fetcher: FetchLi
   const proxyDeploymentPath = /^\/gateway\/api\/model-proxy\/deployment\/([a-z0-9][a-z0-9-]*)\/key$/
   const proxyDeploymentFinalizePath = /^\/gateway\/api\/model-proxy\/deployment\/([a-z0-9][a-z0-9-]*)\/key\/finalize$/
   const proxyProviderPath = /^\/gateway\/api\/model-proxy\/provider\/([a-z0-9-]+)$/
+  const proxyAccountPath = /^\/gateway\/api\/model-proxy\/claude\/accounts\/([^/]+)$/
   const lifecyclePath = /^\/gateway\/api\/deployment\/([a-z0-9][a-z0-9-]*)\/lifecycle$/
   const logsPath = /^\/gateway\/api\/deployment\/([a-z0-9][a-z0-9-]*)\/logs$/
   const statusPath = /^\/gateway\/api\/deployment\/([a-z0-9][a-z0-9-]*)\/status$/
@@ -805,6 +807,19 @@ export function registerGateway(ctx: Context, stateDir: string, fetcher: FetchLi
         await modelProxyOperation(registry, controllerLogin, 'claude-cancel', { state: pending.state })
         pendingClaude.delete(controllerLogin)
         json(res, 200, { cancelled: true })
+        return
+      }
+      const proxyAccount = proxyAccountPath.exec(url.pathname)
+      if (proxyAccount && req.method === 'DELETE') {
+        const controllerLogin = requireNativeLogin()
+        let account: string
+        try { account = decodeURIComponent(proxyAccount[1]!) }
+        catch { throw new GatewayError(400, 'The Anthropic account id has a malformed escape') }
+        const result = await modelProxyOperation(registry, controllerLogin, 'claude-remove', { account })
+        if (!isRecord(result) || result.removed !== true) {
+          throw new GatewayError(502, 'Model proxy returned an invalid account removal result')
+        }
+        json(res, 200, { removed: true })
         return
       }
       const proxyProvider = proxyProviderPath.exec(url.pathname)

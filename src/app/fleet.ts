@@ -149,6 +149,7 @@ const ModelProxy = z.object({
     keyConfigured: z.boolean(),
   })),
   anthropicAccounts: z.array(z.object({
+    id: z.string().min(1),
     name: z.string().min(1),
     state: z.enum(['connected', 'sign-in-required', 'auth-expired']),
     sharedPool: z.boolean(),
@@ -908,6 +909,25 @@ export class Fleet {
       return value
     } catch (error) {
       throw new FleetControlError(502, `Claude login cancellation failed: ${reason(error)}`)
+    }
+  }
+
+  /**
+   * Remove one Anthropic account from the signed-in user's model proxy pool.
+   * @param id Credential file name reported in `anthropicAccounts[].id`.
+   * @returns Removal acknowledgement.
+   */
+  async removeAnthropicAccount(id: string): Promise<{ removed: true }> {
+    const session = this.authenticatedGatewaySession()
+    try {
+      return await requestJson(gatewayApi(session.url, `model-proxy/claude/accounts/${encodeURIComponent(id)}`),
+        z.object({ removed: z.literal(true) }), {
+          method: 'DELETE',
+          headers: { accept: 'application/json', 'x-orchestrator-request': '1',
+            'x-dsh-superagent-native': session.token },
+        })
+    } catch (error) {
+      throw new FleetControlError(502, `Anthropic account removal failed: ${reason(error)}`)
     }
   }
 

@@ -54,6 +54,7 @@ GRACEFUL_STOP_SECONDS = 300
 SYSTEMD_STOP_TIMEOUT_SECONDS = 330
 SYSTEMCTL_STOP_TIMEOUT_SECONDS = 340
 MODEL_PROXY_KEY = re.compile(r"^[A-Za-z0-9_-]{16,256}$")
+AUTH_FILE = re.compile(r"^[A-Za-z0-9_@+-][A-Za-z0-9._@+-]{0,250}\.json$")
 
 
 class OnboardingError(Exception):
@@ -732,7 +733,7 @@ def model_proxy_status(request, dry):
                 else "connected"
             shared = prefix.strip() == "" or not force_prefix
             email = item.get("email")
-            accounts.append({"name": email if isinstance(email, str) and email else path.stem,
+            accounts.append({"id": path.name, "name": email if isinstance(email, str) and email else path.stem,
                              "state": account_state, "sharedPool": shared})
             auth.append({"name": path.name, "provider": "claude", "connected": connected})
             if not shared:
@@ -833,6 +834,26 @@ def claude_cancel(request, dry):
     response = management_request(
         state, "DELETE", f"/oauth/session?{urllib.parse.urlencode({'state': state_token})}")
     return {"cancelled": bool(response.get("cancelled", True)) if isinstance(response, dict) else True}
+
+
+def claude_remove(request, dry):
+    login = require(request.get("login"), LOGIN, "login")
+    account = require(request.get("account"), AUTH_FILE, "Anthropic account")
+    _gateway_user, _gateway_group, _checkout, base = config(request)
+    _user, state, _legacy, _plan = model_proxy_plan(login, base)
+    if dry:
+        return {"removed": True}
+    path = state / "auth" / account
+    try:
+        item = json.loads(path.read_text())
+    except FileNotFoundError:
+        raise OnboardingError("Anthropic account is not signed in to the model proxy") from None
+    except (OSError, json.JSONDecodeError):
+        raise OnboardingError("Anthropic account file is unreadable") from None
+    if not isinstance(item, dict) or item.get("type") != "claude":
+        raise OnboardingError("credential is not an Anthropic account")
+    management_request(state, "DELETE", f"/credentials?{urllib.parse.urlencode({'name': account})}")
+    return {"removed": True}
 
 
 def deployment_key_create(request, dry):
@@ -953,6 +974,7 @@ def model_proxy(request, dry):
         "claude-callback": claude_callback,
         "claude-status": claude_status,
         "claude-cancel": claude_cancel,
+        "claude-remove": claude_remove,
         "deployment-key-create": deployment_key_create,
         "deployment-key-revoke": deployment_key_revoke,
         "deployment-key-prune": deployment_key_prune,

@@ -256,6 +256,7 @@ it('lets the signed-in controller call protected model-proxy routes and forwards
       baseURL: 'http://127.0.0.1:8317/v1',
       providers: [{ id: 'one-nexus', label: 'OneNexus', state: 'configured' }],
       deployments: [],
+      anthropicAccounts: [],
     },
   })
   const signedOut = serveControl(state, '127.0.0.1', () => 401)

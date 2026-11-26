@@ -163,6 +163,8 @@ elif request['operation'] == 'model-proxy':
         print(json.dumps({'accepted': True}))
     elif action == 'claude-cancel':
         print(json.dumps({'cancelled': True}))
+    elif action == 'claude-remove':
+        print(json.dumps({'removed': request['account'] == 'bob@example.com.json'}))
     elif action == 'provider-key-set':
         print(json.dumps({'provider': request['provider'], 'configured': True}))
     elif action == 'deployment-key-create':
@@ -345,6 +347,13 @@ it('keeps model-provider operations behind the trusted controller and never retu
   expect(key).toMatchObject({ status: 200, body: { provider: 'one-nexus', configured: true } })
   expect(JSON.stringify(key.body)).not.toContain('sk-one-nexus-write-only')
   expect(JSON.stringify(JSON.parse(readFileSync(join(state, 'gateway.json'), 'utf8')))).not.toContain('sk-one-nexus-write-only')
+
+  expect(await gateway.call('DELETE', '/gateway/api/model-proxy/claude/accounts/bob%40example.com.json', undefined,
+    { cookie })).toMatchObject({ status: 403 })
+  expect(await gateway.call('DELETE', '/gateway/api/model-proxy/claude/accounts/bob%40example.com.json', undefined,
+    { cookie, 'x-dsh-superagent-native': native })).toMatchObject({ status: 200, body: { removed: true } })
+  expect(await gateway.call('DELETE', '/gateway/api/model-proxy/claude/accounts/%E0', undefined,
+    { cookie, 'x-dsh-superagent-native': native })).toMatchObject({ status: 400 })
 
   const created = await gateway.call('POST', '/gateway/api/model-proxy/deployment/widgets/key', undefined,
     { cookie, 'x-dsh-superagent-native': native })
