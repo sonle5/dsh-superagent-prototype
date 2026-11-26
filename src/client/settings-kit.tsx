@@ -1,7 +1,6 @@
 /** Shared settings context, block draft hook, form controls, Source schema field renderer, and configuration history. */
 import { cloneElement, createContext, useContext, useEffect, useId, useLayoutEffect, useRef, useState, type ReactElement,
   type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react'
-import type { ApiResponse } from '../app/api.ts'
 import type { FieldSpec, Localized } from '../sources/kind.ts'
 import { usePoll, type HistoryView, type Settings, type SettingsView, type SourceView } from './api.ts'
 import { Button, DisclosureRow, Icon, InfoTip, Input, SegmentedControl, Switch } from './controls.tsx'
@@ -185,9 +184,9 @@ function ModelCombobox({ id: suppliedId, label, value, choices, placeholder, noS
 }
 export function ModelField({ id, value, onChange }: { id: string; value: RoleModel; onChange: (next: RoleModel) => void }) {
   const { t, call, navigate } = usePanel()
-  const [catalog, setCatalog] = useState<ApiResponse<'GET models'>>()
-  const [error, setError] = useState<string>()
-  useEffect(() => { call('GET models').then(setCatalog, failure => setError(errorText(failure))) }, [call])
+  // Polled so providers added under Models reach the pickers without reopening the page.
+  const { data: catalog, error: failure } = usePoll(() => call('GET models'), [call])
+  const error = failure && errorText(failure)
   const current = { provider: value?.provider ?? '', model: value?.model ?? '', effort: value?.reasoningEffort ?? '' }
   const set = (next: Partial<typeof current>) => {
     const { provider, model, effort } = { ...current, ...next }

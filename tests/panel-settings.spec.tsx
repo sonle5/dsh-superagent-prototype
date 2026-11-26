@@ -91,6 +91,22 @@ it('keeps the model catalog browsable and clears an incompatible route when the 
   expect(effort).toHaveProperty('value', 'max')
 })
 
+it('refreshes the model catalog so providers added under Models reach the open pickers', async () => {
+  server.models = { default: { provider: 'host', model: 'default' }, routableProviders: [], failures: [], groups: [] }
+  await mount()
+  await click(zh['tab.execution'])
+  await click(find(zh['tab.settings'], '.dt-status-head button'))
+  expect(text()).toContain(zh.modelCatalogEmpty)
+  server.models = undefined
+  await act(async () => { document.dispatchEvent(new Event('visibilitychange')) })
+  await settle()
+  expect(text()).not.toContain(zh.modelCatalogEmpty)
+  const providerBox = all('.dt-model input')[0]!.closest('.dt-combobox')!
+  await click(providerBox.querySelector<HTMLButtonElement>('.dt-combobox-toggle')!)
+  expect([...providerBox.querySelectorAll<HTMLElement>('[role="option"]')].map(option => option.dataset.value))
+    .toEqual(['worker-provider', 'claude', 'one-nexus'])
+})
+
 it('points an empty model catalog at the Models page, which sends model setup to Access', async () => {
   server.models = { default: { provider: 'host', model: 'default' }, routableProviders: [], failures: [], groups: [] }
   await mount()
