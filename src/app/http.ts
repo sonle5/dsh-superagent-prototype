@@ -89,6 +89,18 @@ export function sameOrigin(req: Pick<IncomingMessage, 'headers'>, port: number):
   if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) return false
   return req.headers['x-orchestrator-request'] === '1' && (req.headers.origin === undefined || req.headers.origin === `http://${host}`)
 }
+type HeaderSource = Headers | Readonly<Record<string, string | readonly string[] | undefined>>
+type ManagementRoute = {
+  readonly kind: 'prefix'
+  readonly path: string
+  readonly handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>
+  readonly auth?: (request: { readonly headers: HeaderSource }) => 'anonymous' | 'required'
+}
+function header(headers: HeaderSource, name: string): string | string[] | undefined {
+  if (headers instanceof Headers) return headers.get(name) ?? undefined
+  const value = headers[name]
+  return typeof value === 'string' || Array.isArray(value) ? value : undefined
+}
 /** Maps errors to HTTP status codes and structured payloads that the panel localizes in the interface language. */
 function failure(error: unknown): [number, Record<string, unknown>] {
   if (error instanceof z.ZodError) {
@@ -380,13 +392,17 @@ function registerManagement(ctx: Context, stateDir: string, runtime?: HttpHost):
     try { return { status: response.status, body: JSON.parse(response.ok ? text : redactSensitive(text)) as unknown } }
     catch { return { status: response.status, body: { error: redactSensitive(text || response.statusText) } } }
   }
-  const disposers = [
-    ctx.webServer.register({ kind: 'prefix', path: '/orchestrator', handler: async (req, res) => {
+  const managementRoute: ManagementRoute = {
+    kind: 'prefix',
+    path: '/orchestrator',
+    // Deployment-to-controller native requests authenticate with their per-deployment capability and enter
+    // anonymously. DSH hosts that predate route `auth` ignore this rule, so the handler also checks sign-in.
+    auth: request => matchesNativeToken(stateDir, header(request.headers, INTERNAL_HEADER)) ? 'anonymous' : 'required',
+    handler: async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://localhost')
       if (!url.pathname.startsWith('/orchestrator/api/')) { res.writeHead(404); res.end(); return }
       if (!sameOrigin(req, ctx.webServer.port)) { json(res, 403, { error: 'Same-origin management request required' }); return }
-      const native = matchesNativeToken(stateDir, req.headers[INTERNAL_HEADER])
-      if (!native) {
+      if (!matchesNativeToken(stateDir, req.headers[INTERNAL_HEADER])) {
         const rejection = ctx.connection.requestRejection(req)
         if (rejection !== undefined) {
           json(res, rejection, { error: rejection === 401
@@ -407,7 +423,9 @@ function registerManagement(ctx: Context, stateDir: string, runtime?: HttpHost):
         const query = Object.fromEntries(url.searchParams)
         json(res, 200, await route.run({ params: route.params as never, query, body: maxBytes => readBody(req, maxBytes) }))
       } catch (error) { json(res, ...failure(error)) }
-    } })]
+    },
+  }
+  const disposers = [ctx.webServer.register(managementRoute)]
   return () => {
     for (const dispose of disposers) dispose()
     fleet.dispose()

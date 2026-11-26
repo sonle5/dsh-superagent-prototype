@@ -113,6 +113,44 @@ it('answers only a same-origin request from the panel on the loopback address', 
   expect(() => serve({}, '0.0.0.0')).toThrow('Orchestrator management requires a loopback Web server')
 })
 
+it('registers authenticated panel and native management policies', () => {
+  const state = mkdtempSync(join(tmpdir(), 'dsh-management-policy-'))
+  cleanup.push(() => { rmSync(state, { recursive: true, force: true }) })
+  let route: {
+    auth?: (request: {
+      headers: Headers | Readonly<Record<string, string | readonly string[] | undefined>>
+      method?: string
+      url: URL
+      transport: 'http' | 'upgrade'
+    }) => 'anonymous' | 'required' | 'deny'
+  } = {}
+  const ctx = {
+    webServer: {
+      host: '127.0.0.1',
+      port: 3082,
+      register: (registered: typeof route) => {
+        route = registered
+        return () => {}
+      },
+    },
+  }
+  registerControlHttp(ctx as never, state)
+  const request = (headers: Record<string, string | undefined>) => ({
+    headers,
+    method: 'GET',
+    url: new URL('http://127.0.0.1:3082/orchestrator/api/fleet'),
+    transport: 'http' as const,
+  })
+
+  expect(route.auth).toBeTypeOf('function')
+  expect(route.auth!(request({ host: '127.0.0.1:3082', 'x-orchestrator-request': '1' }))).toBe('required')
+  expect(route.auth!(request({
+    host: '127.0.0.1:3082',
+    'x-orchestrator-request': '1',
+    'x-dsh-superagent-native': nativeToken(state),
+  }))).toBe('anonymous')
+})
+
 it('admits the panel session or the deployment native capability', async () => {
   const state = mkdtempSync(join(tmpdir(), 'dsh-management-auth-'))
   cleanup.push(() => { rmSync(state, { recursive: true, force: true }) })

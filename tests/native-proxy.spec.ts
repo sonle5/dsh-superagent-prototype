@@ -12,6 +12,8 @@ import { nativeToken } from '../src/app/native-auth.ts'
 
 type Handler = (request: IncomingMessage, response: ServerResponse) => void | Promise<void>
 type UpgradeHandler = (request: IncomingMessage, socket: import('node:stream').Duplex, head: Buffer) => void
+type AuthenticatedRoute = { handler: Handler; auth?: (request: { headers: IncomingMessage['headers'] }) => string }
+type AuthenticatedUpgradeRoute = { handler: UpgradeHandler; auth?: (request: { headers: IncomingMessage['headers'] }) => string }
 type RpcEnvelope = {
   type: 'client-request'
   rpcId: string
@@ -80,22 +82,27 @@ async function controllerHarness(state: string, local: LocalDesktop = {}): Promi
   provisionFleet(state)
   let connectionRequest: ((request: IncomingMessage, response: ServerResponse, next: () => Promise<void>) => Promise<void>) | undefined
   let controllerUpgrade: UpgradeHandler | undefined
-  let localNative: Handler | undefined
+  let localNative: AuthenticatedRoute | undefined
+  let controllerUpgradeRoute: AuthenticatedUpgradeRoute | undefined
   const ctx = {
     webServer: {
       host: '127.0.0.1' as const,
       port: 0,
-      register: (route: { handler: Handler }) => {
-        localNative = route.handler
+      register: (route: AuthenticatedRoute) => {
+        localNative = route
         return () => { localNative = undefined }
       },
-      registerUpgrade: (route: { handler: UpgradeHandler }) => {
+      registerUpgrade: (route: AuthenticatedUpgradeRoute) => {
+        controllerUpgradeRoute = route
         controllerUpgrade = route.handler
-        return () => { controllerUpgrade = undefined }
+        return () => { controllerUpgradeRoute = undefined; controllerUpgrade = undefined }
       },
     },
     connection: { requestRejection: () => undefined, authenticatedUrl: (base: string) => `${base}/login` },
     logger: { warn: vi.fn() },
+    emit: (name: string, base: string, entries: { label: string; url: string; open?: boolean }[]) => {
+      if (name === 'webserver/entry-url') entries.push({ label: 'dsh web', url: `${base}?token=local`, open: true })
+    },
     on: (_event: string, handler: NonNullable<typeof connectionRequest>) => {
       connectionRequest = handler
       return () => { connectionRequest = undefined }
@@ -120,15 +127,25 @@ async function controllerHarness(state: string, local: LocalDesktop = {}): Promi
     response.writeHead(200, { 'content-type': 'application/json' })
     response.end(body)
   }
+  const routePolicy = (route: AuthenticatedRoute | AuthenticatedUpgradeRoute | undefined, request: IncomingMessage): string => {
+    return typeof route?.auth === 'function'
+      ? route.auth({ headers: request.headers })
+      : route?.auth ?? 'required'
+  }
   const server = createServer((request, response) => {
     const path = new URL(request.url ?? '/', 'http://127.0.0.1').pathname
-    if (path === '/login') {
+    if (path === '/login' || path === '/connect') {
       response.writeHead(303, { location: '/', 'set-cookie': 'dsh-auth-test=local; HttpOnly; Path=/' }).end()
       return
     }
     if (path.startsWith('/orchestrator/native/api')) {
       if (localNative === undefined) throw new Error('controller local native route is not installed')
-      void localNative(request, response)
+      const policy = routePolicy(localNative, request)
+      if (policy !== 'anonymous') {
+        response.writeHead(policy === 'deny' ? 403 : 401).end()
+        return
+      }
+      void localNative.handler(request, response)
       return
     }
     if (connectionRequest === undefined) throw new Error('controller native HTTP interceptor is not installed')
@@ -160,6 +177,11 @@ async function controllerHarness(state: string, local: LocalDesktop = {}): Promi
       return
     }
     if (controllerUpgrade === undefined) throw new Error('controller native upgrade route is not installed')
+    const policy = routePolicy(controllerUpgradeRoute, request)
+    if (policy === 'deny' || policy === 'required' && request.headers.cookie !== 'dsh-auth-test=local') {
+      socket.destroy()
+      return
+    }
     controllerUpgrade(request, socket, head)
   })
   const url = await listen(server)
@@ -272,7 +294,9 @@ function frameReader(socket: WebSocket): () => Promise<Record<string, unknown>> 
 }
 
 async function openMux(url: string): Promise<{ socket: WebSocket; next: () => Promise<Record<string, unknown>> }> {
-  const socket = new WebSocket(`${url.replace('http:', 'ws:')}/orchestrator/native/remote.mux`)
+  const socket = new WebSocket(`${url.replace('http:', 'ws:')}/orchestrator/native/remote.mux`, {
+    headers: { cookie: 'dsh-auth-test=local' },
+  })
   cleanup.push(() => socket.terminate())
   await socketOpen(socket)
   return { socket, next: frameReader(socket) }
@@ -352,6 +376,9 @@ it('keeps unscoped API traffic on the Desktop profile and authenticates a deploy
       admit,
     },
     logger: { warn: vi.fn() },
+    emit: (name: string, base: string, entries: { label: string; url: string; open?: boolean }[]) => {
+      if (name === 'webserver/entry-url') entries.push({ label: 'dsh web', url: `${base}?token=test`, open: true })
+    },
   }
   const localMux = new WebSocketServer({ noServer: true })
   cleanup.push(() => new Promise<void>(resolve => localMux.close(() => resolve())))
@@ -440,6 +467,9 @@ it('keeps unscoped API traffic on the Desktop profile and authenticates a deploy
     },
     connection: { requestRejection: () => undefined, authenticatedUrl: (base: string) => `${base}/?token=test` },
     logger: { warn: vi.fn() },
+    emit: (name: string, base: string, entries: { label: string; url: string; open?: boolean }[]) => {
+      if (name === 'webserver/entry-url') entries.push({ label: 'dsh web', url: `${base}?token=test`, open: true })
+    },
     on: (_event: string, handler: NonNullable<typeof connectionRequest>) => {
       connectionRequest = handler
       return () => { connectionRequest = undefined }
@@ -476,7 +506,9 @@ it('keeps unscoped API traffic on the Desktop profile and authenticates a deploy
   expect(admit).not.toHaveBeenCalled()
   expect(received).toEqual([])
 
-  const socket = new WebSocket(`${controllerUrl.replace('http:', 'ws:')}/orchestrator/native/remote.mux`)
+  const socket = new WebSocket(`${controllerUrl.replace('http:', 'ws:')}/orchestrator/native/remote.mux`, {
+    headers: { cookie: 'dsh-auth-test=local' },
+  })
   cleanup.push(() => socket.terminate())
   await socketOpen(socket)
   const echoed = new Promise<unknown>((resolve, reject) => {
@@ -2341,6 +2373,9 @@ it('sends an event result as the operator that opened its event stream', async (
     },
     connection: { authenticatedUrl: (base: string) => `${base}/?token=test`, admit: vi.fn() },
     logger: { warn: vi.fn() },
+    emit: (name: string, base: string, entries: { label: string; url: string; open?: boolean }[]) => {
+      if (name === 'webserver/entry-url') entries.push({ label: 'dsh web', url: `${base}?token=test`, open: true })
+    },
   }
   cleanup.push(registerNativeTransport(ctx as never, state, 'repository'))
   const mux = new WebSocketServer({ noServer: true })

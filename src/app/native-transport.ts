@@ -25,6 +25,13 @@ import {
 } from './native-aggregate.ts'
 import { matchesNativeToken, nativeToken } from './native-auth.ts'
 
+/** Newer DSH releases publish launch URLs through an event that older peer types omits. */
+declare module '@deepseek-ai/cordis' {
+  interface Events {
+    'webserver/entry-url'(baseUrl: string, entries: { label: string; url: string; open?: boolean }[]): void
+  }
+}
+
 const NATIVE_API = '/orchestrator/native/api'
 const NATIVE_MUX = '/orchestrator/native/remote.mux'
 const PEER_NATIVE_MUX = 'orchestrator/native/remote.mux'
@@ -104,18 +111,58 @@ function withoutDeploymentSessions(target: FleetNativeTarget, value: unknown, ta
   return { ...value, items: value.items.filter(item => !isRecord(item) || !deploymentOwnedPath(target, item.cwd, targets)) }
 }
 
-function requestTarget(request: IncomingMessage): { host: string; origin?: string } | undefined {
-  const host = request.headers.host
+type HeaderSource = Headers | Readonly<Record<string, string | readonly string[] | undefined>>
+type WebAuthPolicy = 'anonymous' | 'required' | 'deny'
+type WebAuthRequest = { readonly headers: HeaderSource }
+type AuthenticatedWebRoute = {
+  readonly kind: 'prefix'
+  readonly path: string
+  readonly handler: (request: IncomingMessage, response: ServerResponse) => void | Promise<void>
+  readonly auth?: (request: WebAuthRequest) => WebAuthPolicy
+}
+type AuthenticatedWebUpgradeRoute = {
+  readonly path: string
+  readonly handler: (request: IncomingMessage, socket: Duplex, head: Buffer) => void | Promise<void>
+  readonly auth?: (request: WebAuthRequest) => WebAuthPolicy
+}
+
+function header(headers: HeaderSource, name: string): string | undefined {
+  if (headers instanceof Headers) return headers.get(name) ?? undefined
+  const value = headers[name]
+  return typeof value === 'string' ? value : value?.join(', ')
+}
+
+function requestTarget(headers: HeaderSource): { host: string; origin?: string } | undefined {
+  const host = header(headers, 'host')
   if (host === undefined) return undefined
-  const origin = request.headers.origin
+  const origin = header(headers, 'origin')
   return { host, ...typeof origin === 'string' ? { origin } : {} }
 }
 
-function internalRequest(request: IncomingMessage, port: number, stateDir: string): boolean {
-  const target = requestTarget(request)
+function internalRequest(request: { readonly headers: HeaderSource }, port: number, stateDir: string): boolean {
+  const target = requestTarget(request.headers)
   if (target === undefined || target.host !== `127.0.0.1:${port}` && target.host !== `localhost:${port}`) return false
-  if (request.headers[INTERNAL_REQUEST_HEADER] !== '1' || !matchesNativeToken(stateDir, request.headers[INTERNAL_HEADER])) return false
+  if (header(request.headers, INTERNAL_REQUEST_HEADER) !== '1'
+    || !matchesNativeToken(stateDir, header(request.headers, INTERNAL_HEADER))) return false
   return target.origin === undefined || target.origin === `http://${target.host}`
+}
+
+/** Native API routes accept only the controller capability and deny browser callers before their handler. */
+function nativeApiAuthorization(
+  request: WebAuthRequest,
+  port: number,
+  stateDir: string,
+): 'anonymous' | 'deny' {
+  return internalRequest(request, port, stateDir) ? 'anonymous' : 'deny'
+}
+
+/** The controller mux is native-only to its own local peer and browser-authenticated for Desktop clients. */
+function nativeMuxAuthorization(
+  request: WebAuthRequest,
+  port: number,
+  stateDir: string,
+): 'anonymous' | 'required' {
+  return internalRequest(request, port, stateDir) ? 'anonymous' : 'required'
 }
 
 function responseHeaders(response: Response): Record<string, string> {
@@ -1216,6 +1263,7 @@ function aggregateEventsStream(
 function controllerUpgrade(ctx: Context, stateDir: string, server: WebSocketServer, state: NativeControllerState) {
   const fleet = new Fleet(stateDir)
   return (request: IncomingMessage, socket: Duplex, head: Buffer): void => {
+    // DSH hosts that predate route `auth` do not enforce the mux rule, so browser peers are checked here too.
     if (ctx.connection.requestRejection(request) !== undefined) {
       socket.destroy()
       return
@@ -1452,10 +1500,14 @@ function controllerUpgrade(ctx: Context, stateDir: string, server: WebSocketServ
 function repositoryAuth(ctx: Context) {
   const mint = async (interactions: 'none' | 'answer'): Promise<string> => {
     const base = `http://127.0.0.1:${ctx.webServer.port}`
-    const login = new URL(ctx.connection.authenticatedUrl(base))
+    const entries: { label: string; url: string; open?: boolean }[] = []
+    ctx.emit('webserver/entry-url', `${base}/`, entries)
+    const entry = entries.find(candidate => candidate.url.startsWith(`${base}/`))
+    // Published DSH versions before entry-url expose the same launch URL on Connection.
+    const login = new URL(entry?.url ?? ctx.connection.authenticatedUrl(base))
+    login.pathname = '/connect'
     const operatorPeers = typeof (ctx.connection as { admit?: unknown }).admit === 'function'
     if (operatorPeers) {
-      login.pathname = '/connect'
       login.searchParams.set('interactions', interactions)
     }
     const response = await fetch(login, { redirect: 'manual' })
@@ -1682,25 +1734,37 @@ export function registerNativeTransport(ctx: Context, stateDir: string, role: Na
     const control = controllerUpgrade(ctx, stateDir, server, state)
     const local = repositoryUpgrade(ctx, stateDir, server, auth, eventCookies)
     disposers.push(ctx.on('connection/request', controlHttp(ctx, stateDir, state, localNonce)))
-    disposers.push(ctx.webServer.register({
+    const apiRoute: AuthenticatedWebRoute = {
       kind: 'prefix',
       path: NATIVE_API,
+      auth: request => nativeApiAuthorization(request, ctx.webServer.port, stateDir),
       handler: repositoryHttp(ctx, stateDir, auth, eventCookies, { [LOCAL_HEADER]: localNonce }),
-    }))
-    disposers.push(ctx.webServer.registerUpgrade({
+    }
+    disposers.push(ctx.webServer.register(apiRoute))
+    const muxRoute: AuthenticatedWebUpgradeRoute = {
       path: NATIVE_MUX,
+      auth: request => nativeMuxAuthorization(request, ctx.webServer.port, stateDir),
       handler: (request, socket, head) => {
         if (internalRequest(request, ctx.webServer.port, stateDir)) local(request, socket, head)
         else control(request, socket, head)
       },
-    }))
+    }
+    disposers.push(ctx.webServer.registerUpgrade(muxRoute))
   } else {
     const auth = repositoryAuth(ctx)
-    disposers.push(ctx.webServer.register({ kind: 'prefix', path: NATIVE_API, handler: repositoryHttp(ctx, stateDir, auth, eventCookies) }))
-    disposers.push(ctx.webServer.registerUpgrade({
+    const apiRoute: AuthenticatedWebRoute = {
+      kind: 'prefix',
+      path: NATIVE_API,
+      auth: request => nativeApiAuthorization(request, ctx.webServer.port, stateDir),
+      handler: repositoryHttp(ctx, stateDir, auth, eventCookies),
+    }
+    disposers.push(ctx.webServer.register(apiRoute))
+    const muxRoute: AuthenticatedWebUpgradeRoute = {
       path: NATIVE_MUX,
+      auth: request => nativeApiAuthorization(request, ctx.webServer.port, stateDir),
       handler: repositoryUpgrade(ctx, stateDir, server, auth, eventCookies),
-    }))
+    }
+    disposers.push(ctx.webServer.registerUpgrade(muxRoute))
   }
   return () => {
     for (const dispose of disposers.reverse()) dispose()
