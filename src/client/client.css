@@ -396,7 +396,6 @@ div.dt-preview-head { color: var(--dsw-alias-label-secondary); }
 .dt-provider-quick-item { display: flex; align-items: center; justify-content: space-between; gap: 10px 16px; flex-wrap: wrap; padding: 12px; border: 0.5px solid var(--dsw-alias-border-l2); border-radius: 12px; }
 .dt-provider-quick-item strong { font-size: 13px; line-height: 20px; font-weight: 600; }
 .dt-provider-quick-key { display: flex; align-items: center; gap: 8px; min-width: min(100%, 320px); }
-.dt-provider-custom-title { display: block; padding-bottom: 8px; font-size: 13px; line-height: 20px; font-weight: 600; }
 .dt-provider-form-grid { display: grid; grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr) minmax(180px, 0.8fr); gap: 12px; }
 .dt-provider-secret-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
 .dt-provider-models-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 10px 16px; flex-wrap: wrap; padding-top: 4px; }

@@ -106,7 +106,7 @@ it('keeps provider edits isolated when Desktop switches deployments', async () =
   expect(text()).toContain('Inference only')
 })
 
-it('adds Anthropic in one step by signing in, without filling in the provider form', async () => {
+it('adds Anthropic from the Models page in one step by signing in, without opening the provider form', async () => {
   server.modelProxy.providers = server.modelProxy.providers.map(item => item.id === 'claude' ? { ...item, state: 'sign-in-required' } : item)
   server.modelProxy.anthropicAccounts = []
   const opened = { opener: {}, location: { replace: vi.fn() }, close: vi.fn() }
@@ -114,7 +114,6 @@ it('adds Anthropic in one step by signing in, without filling in the provider fo
   onTestFinished(() => { vi.unstubAllGlobals() })
   providersPage()
   await mount()
-  await click(zh.providerAdd)
   await click(zh.accessClaudeConnect)
   expect(opened.location.replace).toHaveBeenCalledWith('https://claude.example/authorize')
   expect(text()).toContain(zh.accessClaudeWaiting)
@@ -123,7 +122,6 @@ it('adds Anthropic in one step by signing in, without filling in the provider fo
   await vi.waitFor(() => expect(server.requests.some(request =>
     request.method === 'POST' && request.path === 'fleet/inference-support-loop/model-proxy/providers/claude')).toBe(true),
   { timeout: 3_500 })
-  await vi.waitFor(() => expect(document.querySelector('.dt-provider-modal')).toBeNull())
   const added = server.providerControls['inference-support-loop']!.providers.find(item => item.id === 'claude')!
   expect(added.baseURL).toBe(server.modelProxy.baseURL)
 })
@@ -134,7 +132,6 @@ it('lists connected Anthropic accounts and signs in another one through the same
   onTestFinished(() => { vi.unstubAllGlobals() })
   providersPage()
   await mount()
-  await click(zh.providerAdd)
   expect(text()).toContain('alice@example.com')
   expect(text()).toContain(zh.accessAnthropicNotShared)
   await click(zh.accessAnthropicAddAccount)
@@ -146,8 +143,7 @@ it('adds OneNexus in one step from only its API key, which reaches the model pro
   server.modelProxy.providers = server.modelProxy.providers.map(item => item.id === 'one-nexus' ? { ...item, state: 'missing' } : item)
   providersPage()
   await mount()
-  await click(zh.providerAdd)
-  await type(modalField(zh.providerQuickNexusKey), 'sk-onenexus-private')
+  await type(document.querySelector<HTMLInputElement>(`input[aria-label="${zh.providerQuickNexusKey}"]`)!, 'sk-onenexus-private')
   await click(zh.providerQuickAddNexus)
   expect(server.requests.find(request => request.path === 'gateway/model-proxy/provider/one-nexus')).toMatchObject({
     method: 'PUT', body: { apiKey: 'sk-onenexus-private' },
@@ -155,6 +151,5 @@ it('adds OneNexus in one step from only its API key, which reaches the model pro
   expect(server.requests.some(request =>
     request.method === 'POST' && request.path === 'fleet/inference-support-loop/model-proxy/providers/one-nexus')).toBe(true)
   expect(JSON.stringify(server.providerControls['inference-support-loop'])).not.toContain('sk-onenexus-private')
-  expect(document.querySelector('.dt-provider-modal')).toBeNull()
   expect(text()).toContain(zh.providerQuickAdded.replace('{provider}', 'OneNexus'))
 })

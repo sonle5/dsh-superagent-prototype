@@ -123,6 +123,11 @@ const SettingsSources = z.object({
       config: z.record(z.string(), z.unknown()),
     }),
   })),
+  blocks: z.object({ policy: z.object({
+    revision: z.number().int().nonnegative(),
+    value: z.object({ sources: z.record(z.string(), z.object({ allowed: z.array(z.unknown()) }).passthrough()).default({}) })
+      .passthrough(),
+  }) }).optional(),
 })
 const SettingsSave = z.object({
   saved: z.boolean(),
@@ -1030,6 +1035,15 @@ export function registerGateway(ctx: Context, stateDir: string, fetcher: FetchLi
         const settings = SettingsSources.parse(await deploymentJson(deployment, 'settings'))
         const github = settings.sources.find(source => source.id === 'github')
         if (github === undefined) throw new GatewayError(502, 'Deployment has no GitHub Source')
+        // A deployment without allowed senders can never turn a request into a Ticket, so its owner may originate work first.
+        const policy = settings.blocks?.policy
+        if (policy !== undefined && !Object.values(policy.value.sources).some(part => part.allowed.length > 0)) {
+          await deploymentJson(deployment, 'settings/policy', { method: 'PUT', body: JSON.stringify({
+            revision: policy.revision,
+            value: { ...policy.value, sources: { ...policy.value.sources,
+              github: { ...policy.value.sources.github, allowed: [{ id: login }] } } },
+          }) })
+        }
         const saved = SettingsSave.parse(await deploymentJson(deployment, 'settings/source:github', {
           method: 'PUT',
           body: JSON.stringify({

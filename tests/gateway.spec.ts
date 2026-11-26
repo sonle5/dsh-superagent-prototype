@@ -374,6 +374,7 @@ it('onboards a person and deployment without exposing another person’s registr
   const deploymentToken = nativeToken(tokenDir)!
   const seen: { path?: string; native?: string }[] = []
   const savedSettings: { revision: number; value: { enabled: boolean; config: Record<string, unknown> } }[] = []
+  const savedPolicy: unknown[] = []
   const target = await listen((request, response) => {
     const native = request.headers['x-dsh-superagent-native']
     seen.push({ path: request.url, native: typeof native === 'string' ? native : native?.[0] })
@@ -382,7 +383,17 @@ it('onboards a person and deployment without exposing another person’s registr
         sources: [{ id: 'github', revision: 7, value: { enabled: true, config: {
           repository: 'example-org/old', cli: '/old/gh-agent', observeIssues: true,
         } } }],
+        blocks: { policy: { revision: 3, value: { rules: [], sources: {} } } },
       }))
+      return
+    }
+    if (request.method === 'PUT' && request.url === '/orchestrator/api/settings/policy') {
+      let body = ''
+      request.on('data', chunk => { body += chunk })
+      request.on('end', () => {
+        savedPolicy.push(JSON.parse(body))
+        response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ revision: 4, restarting: false }))
+      })
       return
     }
     if (request.method === 'PUT' && request.url === '/orchestrator/api/settings/source:github') {
@@ -509,6 +520,7 @@ it('onboards a person and deployment without exposing another person’s registr
       repository: 'example-org/widgets', cli: join(state, 'agent-widgets'), observeIssues: true,
     },
   } }])
+  expect(savedPolicy).toEqual([{ revision: 3, value: { rules: [], sources: { github: { allowed: [{ id: 'member' }] } } } }])
   const helperRequests = readFileSync(join(state, 'onboard-requests'), 'utf8').trim().split('\n')
     .map(line => JSON.parse(line) as {
     operation: string; githubToken?: string

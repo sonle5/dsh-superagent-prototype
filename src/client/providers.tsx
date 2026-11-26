@@ -232,10 +232,6 @@ function ProviderEditor({ provider, revision, onClose, onSaved }: {
       <Button variant="ghost" onClick={onClose}>{t('cancel')}</Button>
       <Button variant="primary" type="submit" form={form} disabled={busy}>{t('save')}</Button>
     </>}>
-    {!provider && <>
-      <QuickSetup onAdded={async () => { await onSaved(); onClose() }} />
-      <strong className="dt-provider-custom-title">{t('providerCustomTitle')}</strong>
-    </>}
     <form id={form} className="dt-form" onSubmit={event => { void submit(event) }}>
       <Fields disabled={busy}>
         <div className="dt-provider-form-grid">
@@ -423,9 +419,10 @@ export function ProvidersSettings() {
         <Hint>{t('providerIntro')}</Hint>
         {data.credentialError && <p className="dt-error" role="alert">{t('providerCredentialError', { error: data.credentialError })}</p>}
       </div>
-      {data.writable && <Button variant="primary" size="sm" icon={<Icon name="plus" size={14} />}
+      {data.writable && <Button variant="outline" size="sm" icon={<Icon name="plus" size={14} />}
         onClick={() => setAdding(true)}>{t('providerAdd')}</Button>}
     </div>
+    {data.writable && <QuickSetup onAdded={reload} />}
     <div className="dt-provider-list">
       {data.providers.map(provider => <ProviderCard key={provider.id} provider={provider} revision={data.revision}
         writable={data.writable} onReload={reload} />)}

@@ -184,7 +184,7 @@ function ModelCombobox({ id: suppliedId, label, value, choices, placeholder, noS
   </div>
 }
 export function ModelField({ id, value, onChange }: { id: string; value: RoleModel; onChange: (next: RoleModel) => void }) {
-  const { t, call } = usePanel()
+  const { t, call, navigate } = usePanel()
   const [catalog, setCatalog] = useState<ApiResponse<'GET models'>>()
   const [error, setError] = useState<string>()
   useEffect(() => { call('GET models').then(setCatalog, failure => setError(errorText(failure))) }, [call])
@@ -224,7 +224,8 @@ export function ModelField({ id, value, onChange }: { id: string; value: RoleMod
       {value && <Button variant="ghost" size="sm" onClick={() => onChange(null)}>{t('modelUseDefault')}</Button>}
     </div>
     {error && <p className="dt-error">{t('modelCatalogError', { error })}</p>}
-    {catalog && !catalog.groups.length && <p className="dt-model-note">{t('modelCatalogEmpty')}</p>}
+    {catalog && !catalog.groups.length && <p className="dt-model-note">{t('modelCatalogEmpty')}
+      <Button variant="outline" size="sm" onClick={() => navigate(settingsRoute('providers'))}>{t('modelOpenProviders')}</Button></p>}
     <div className="dt-grid3 dt-model-fields">
       <Field label={t('modelProvider')}><ModelCombobox id={`${id}-provider`} label={t('modelProvider')} value={current.provider}
         choices={providers} placeholder={t('modelInherit')} noSuggestions={t('modelNoProviderSuggestions')}
