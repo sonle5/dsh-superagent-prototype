@@ -38,6 +38,8 @@ const Deployment = z.object({
   workspace: z.string().refine(isAbsolute, 'Absolute path'),
   tokenDir: z.string().refine(isAbsolute, 'Absolute path').optional(),
   ownerLogin: organization.optional(),
+  /** GitHub login of the agent account whose token was saved through the credentials operation. */
+  agentLogin: z.string().regex(/^[A-Za-z0-9-]+$/, 'GitHub login').optional(),
 })
 const Person = z.object({
   login: z.string().regex(/^[A-Za-z0-9-]+$/, 'GitHub login'),
@@ -75,10 +77,13 @@ const Registry = z.object({
       seen.add(deployment[field])
     }
   }
-  const repositories = new Set(all.map(deployment => deployment.repository))
-  if (repositories.size !== all.length) {
+  const owned = [
+    ...value.deployments.map(deployment => `${deployment.ownerLogin ?? ''} ${deployment.repository}`),
+    ...value.people.flatMap(person => person.deployments.map(deployment => `${person.login} ${deployment.repository}`)),
+  ]
+  if (new Set(owned).size !== owned.length) {
     context.addIssue({ code: 'custom', path: ['deployments'],
-      message: 'Each repository may have only one deployment' })
+      message: 'Each person may have only one deployment per repository' })
   }
   const logins = new Set(value.people.map(person => person.login))
   if (logins.size !== value.people.length) {
@@ -104,6 +109,7 @@ const OnboardingDeployment = Deployment.extend({
   id: z.string().regex(/^[a-z0-9][a-z0-9-]*$/, 'lowercase deployment id'),
   tokenDir: z.string().refine(isAbsolute, 'Absolute path'),
 })
+const RepositoryPermissions = z.object({ permissions: z.object({ push: z.boolean() }).optional() })
 const OnboardingCredentials = z.object({
   id: z.string().regex(/^[a-z0-9][a-z0-9-]*$/, 'lowercase deployment id'),
   cli: z.string().refine(isAbsolute, 'Absolute path'),
@@ -358,6 +364,40 @@ async function githubJson<T extends z.ZodType>(fetcher: FetchLike, url: string, 
   try { value = JSON.parse(text) } catch { throw new GatewayError(502, 'GitHub returned an invalid response') }
   if (!response.ok) throw new GatewayError(502, `GitHub request failed with ${response.status}`)
   try { return schema.parse(value) } catch { throw new GatewayError(502, 'GitHub returned an unexpected response') }
+}
+
+/**
+ * Resolve the agent account a GitHub token signs in to and require that it can act for `deployment` on its own.
+ * @param fetcher GitHub HTTP client.
+ * @param registry Gateway registry that lists the other deployments on the repository.
+ * @param login Person who owns `deployment`.
+ * @param deployment Deployment that will use the token.
+ * @param token Agent GitHub token; it is sent only to GitHub.
+ * @returns The agent account login.
+ * @throws GatewayError 400 when the token signs in to the owner on a repository that another deployment shares, to another
+ *   deployment's agent on the same repository, or to an account without push access to the repository.
+ */
+async function verifyAgentAccount(
+  fetcher: FetchLike, registry: RegistryConfig, login: string, deployment: DeploymentConfig, token: string,
+): Promise<string> {
+  const headers = { accept: 'application/vnd.github+json', authorization: `Bearer ${token}` }
+  const agent = (await githubJson(fetcher, GITHUB_USER_URL, GithubUser, { headers })).login
+  const others = allDeployments(registry).filter(other => other.id !== deployment.id
+    && other.repository.toLowerCase() === deployment.repository.toLowerCase())
+  if (others.length > 0 && agent.toLowerCase() === login.toLowerCase()) {
+    throw new GatewayError(400, `The token signs in to your own account ${agent}, and ${deployment.repository} is shared; use a separate agent GitHub account`)
+  }
+  const shared = others.find(other => other.agentLogin?.toLowerCase() === agent.toLowerCase())
+  if (shared !== undefined) {
+    throw new GatewayError(400, `${agent} is already the agent of deployment ${shared.id} on ${deployment.repository}; use a separate agent GitHub account`)
+  }
+  const repository = await fetcher(`https://api.github.com/repos/${deployment.repository}`, { headers })
+  const access = repository.ok ? RepositoryPermissions.safeParse(await repository.json().catch(() => undefined)) : undefined
+  if (access?.success !== true || access.data.permissions?.push !== true) {
+    if (!repository.ok) await repository.body?.cancel()
+    throw new GatewayError(400, `${agent} cannot push to ${deployment.repository}; invite ${agent} as a collaborator with write access and accept the invitation as ${agent}`)
+  }
+  return agent
 }
 
 async function deploymentJson(
@@ -825,8 +865,8 @@ export function registerGateway(ctx: Context, stateDir: string, fetcher: FetchLi
           if (known.some(deployment => deployment.id === request.id)) {
             throw new GatewayError(409, `Deployment id already exists: ${request.id}`)
           }
-          if (known.some(deployment => deployment.repository === request.repository)) {
-            throw new GatewayError(409, `Repository already has a deployment: ${request.repository}`)
+          if (personDeployments(registry, login).some(deployment => deployment.repository === request.repository)) {
+            throw new GatewayError(409, `You already have a deployment for ${request.repository}`)
           }
           let person = registry.people.find(item => item.login === login)
           if (person === undefined) {
@@ -936,6 +976,7 @@ export function registerGateway(ctx: Context, stateDir: string, fetcher: FetchLi
         const request = z.object({
           githubToken: z.string().regex(/^[A-Za-z0-9_-]{20,255}$/, 'GitHub token'),
         }).parse(await jsonBody(req))
+        const agentLogin = await verifyAgentAccount(fetcher, registry, login, deployment, request.githubToken)
         const created = OnboardingCredentials.parse(await runOnboarding(registry.onboarding, {
           operation: 'credentials', login, id: deployment.id, githubToken: request.githubToken,
           ...registry.onboarding,
@@ -943,6 +984,8 @@ export function registerGateway(ctx: Context, stateDir: string, fetcher: FetchLi
         if (created.id !== deployment.id) {
           throw new GatewayError(502, 'Self-service onboarding returned a different deployment')
         }
+        deployment.agentLogin = agentLogin
+        saveRegistry(stateDir, registry)
         const settings = SettingsSources.parse(await deploymentJson(deployment, 'settings'))
         const github = settings.sources.find(source => source.id === 'github')
         if (github === undefined) throw new GatewayError(502, 'Deployment has no GitHub Source')

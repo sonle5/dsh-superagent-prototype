@@ -99,7 +99,7 @@ The Fleet controller's `<stateDir>/gateway.json` is different from the gateway's
 
 - `Create my cloud account` creates the person's Linux user and registry entry.
 - Adding a deployment creates its profile and service and starts it.
-- A repository has one deployment. Two deployments for one repository would both answer on GitHub, so people who share a repository share its deployment.
+- Each person may have one deployment per repository, and several people may each deploy their own Superagent on a shared repository, as human collaborators do. Each deployment on a shared repository needs its own agent GitHub account, so a mention, review request or assignment addresses exactly one Superagent. Turn on the GitHub Source's repository-wide **Receive …** switches on at most one deployment per repository; with them off, a deployment works only on what addresses its own agent account.
 
 ### Credentials
 
@@ -113,6 +113,8 @@ Each person brings an agent GitHub account and model-provider access.
 Grant the PAT Contents, Issues and Pull requests read/write; Actions and Commit statuses read-only; and Metadata read. GitHub does not expose the account notification inbox or the Checks API to fine-grained PATs, so set the GitHub Source's **Read the account notification inbox** off and enable **Receive new Issues** and **Receive comments**. DSH reads check runs when the token supports them and otherwise falls back to repository Actions workflow runs plus Commit statuses. Repository polling therefore remains least-privilege; do not replace the PAT with an over-broad classic token merely to make notification or CI polling succeed.
 
 The PAT may belong to a dedicated agent account or the signed-in operator. Same-account operation requires an explicit mention on a new Issue or PR; comments are accepted when they do not carry the hidden marker every Superagent reply receives. This keeps single-account fleets usable without turning the agent's own replies into new Tickets.
+
+Before the helper writes the wrapper, the gateway asks GitHub which account the token signs in to and records that login on the deployment. It refuses the token, without storing it, when the account cannot push to the repository, when the account is another deployment's agent on the same repository, or when the repository is shared and the account is the signed-in person's own. The error names the account to invite as a collaborator with write access; accept the invitation as that account, then save the token again. Mutual review on a shared repository works because each Superagent is a separate collaborator: GitHub does not let a pull request's author approve it.
 
 Token-based agent credentials are still reachable by that person's worker because the worker runs as that Linux user. That is the intended agent-account boundary, not an isolation boundary against prompt injection; use a dedicated agent GitHub account with least-privilege access.
 

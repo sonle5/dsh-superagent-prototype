@@ -30,9 +30,14 @@ Promise<{ server: Server; url: string }> {
   return { server, url: `http://127.0.0.1:${(server.address() as AddressInfo).port}` }
 }
 
-function gatewayFetch(member = true, login = 'member') {
+function gatewayFetch(member = true, login = 'member', agents: Record<string, { login: string; push: boolean }> = {}) {
   const orgUrl = `https://api.github.com/orgs/example-org/members/${login}`
-  return vi.fn(async (url: string): Promise<Response> => {
+  return vi.fn(async (url: string, init?: RequestInit): Promise<Response> => {
+    const agent = agents[String((init?.headers as Record<string, string> | undefined)?.authorization).replace(/^Bearer /, '')]
+    if (agent && url === USER_URL) return Response.json({ login: agent.login })
+    if (agent && url.startsWith('https://api.github.com/repos/')) {
+      return agent.push ? Response.json({ permissions: { push: true } }) : Response.json({ message: 'Not Found' }, { status: 404 })
+    }
     if (url === DEVICE_URL) return Response.json({ device_code: 'device-code', user_code: 'USER-1', verification_uri: 'https://github.com/login/device', expires_in: 900, interval: 5 })
     if (url === TOKEN_URL) return Response.json({ access_token: 'github-token' })
     if (url === USER_URL) return Response.json({ login })
@@ -383,7 +388,9 @@ it('onboards a person and deployment without exposing another person’s registr
   })
   const helper = onboardingHelper(state, target.url)
   onboardingRegistry(state, helper, 'http://127.0.0.1:9')
-  const gateway = await serveGateway(state, gatewayFetch())
+  const gateway = await serveGateway(state, gatewayFetch(true, 'member', {
+    'agent-github-token-1234': { login: 'widgets-agent', push: true },
+  }))
 
   await gateway.call('POST', '/gateway/api/device')
   const session = await gateway.call('POST', '/gateway/api/session', { device_code: 'device-code' })
@@ -468,6 +475,8 @@ it('onboards a person and deployment without exposing another person’s registr
   }, { cookie: cookie! })
   expect(credentials).toMatchObject({ status: 200, body: { saved: true, revision: 8, restarting: true } })
   expect(credentials.body).not.toHaveProperty('githubToken')
+  expect(JSON.parse(readFileSync(join(state, 'gateway.json'), 'utf8')).people[0].deployments[0])
+    .toMatchObject({ id: 'widgets', agentLogin: 'widgets-agent' })
   expect(savedSettings).toEqual([{ revision: 7, value: {
     enabled: true,
     config: {
@@ -503,4 +512,40 @@ it('onboards a person and deployment without exposing another person’s registr
     { cookie: otherCookie! })).toMatchObject({ status: 404, body: { error: 'Deployment not found: widgets' } })
   expect(await gateway.call('GET', '/gateway/api/deployment/widgets/logs?lines=81', undefined, { cookie: cookie! }))
     .toMatchObject({ status: 400 })
+})
+
+it('lets each person deploy on a shared repository with a separate agent account that can push', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'dsh-gateway-shared-'))
+  cleanup.push(() => rmSync(state, { recursive: true, force: true }))
+  const helper = onboardingHelper(state, 'http://127.0.0.1:10')
+  writeFileSync(join(state, 'gateway.json'), JSON.stringify({
+    version: 1, organization: 'example-org', githubClientId: 'a'.repeat(20),
+    onboarding: { command: [helper], gatewayUser: 'gateway-user', gatewayGroup: 'gateway-group',
+      checkout: '/opt/dsh-superagent', baseDir: '/var/lib/dsh-superagent' },
+    people: [{ login: 'other-owner', deployments: [{ id: 'other-widgets', profile: 'superagent-other-widgets',
+      repository: 'example-org/widgets', url: 'http://127.0.0.1:9', stateDir: join(state, 'other-state'),
+      workspace: '/srv/work/other', agentLogin: 'other-agent' }] }],
+  }))
+  const gateway = await serveGateway(state, gatewayFetch(true, 'member', {
+    'own-account-token-0000000': { login: 'Member', push: true },
+    'other-agent-token-00000000': { login: 'other-agent', push: true },
+    'read-only-token-0000000000': { login: 'widgets-agent', push: false },
+  }))
+  await gateway.call('POST', '/gateway/api/device')
+  const session = await gateway.call('POST', '/gateway/api/session', { device_code: 'device-code' })
+  const cookie = session.setCookie!.split(';', 1)[0]!
+  expect(await gateway.call('POST', '/gateway/api/deployment', { id: 'widgets', repository: 'example-org/widgets' }, { cookie }))
+    .toMatchObject({ status: 201, body: { deployment: { id: 'widgets', repository: 'example-org/widgets' } } })
+  expect(await gateway.call('POST', '/gateway/api/deployment', { id: 'widgets-2', repository: 'example-org/widgets' }, { cookie }))
+    .toMatchObject({ status: 409, body: { error: 'You already have a deployment for example-org/widgets' } })
+
+  const save = (githubToken: string) => gateway.call('POST', '/gateway/api/deployment/widgets/credentials', { githubToken }, { cookie })
+  expect(await save('own-account-token-0000000')).toMatchObject({ status: 400,
+    body: { error: 'The token signs in to your own account Member, and example-org/widgets is shared; use a separate agent GitHub account' } })
+  expect(await save('other-agent-token-00000000')).toMatchObject({ status: 400,
+    body: { error: 'other-agent is already the agent of deployment other-widgets on example-org/widgets; use a separate agent GitHub account' } })
+  expect(await save('read-only-token-0000000000')).toMatchObject({ status: 400,
+    body: { error: 'widgets-agent cannot push to example-org/widgets; invite widgets-agent as a collaborator with write access and accept the invitation as widgets-agent' } })
+  const requests = readFileSync(join(state, 'onboard-requests'), 'utf8').trim().split('\n').map(line => JSON.parse(line) as { operation: string })
+  expect(requests.map(request => request.operation)).not.toContain('credentials')
 })
