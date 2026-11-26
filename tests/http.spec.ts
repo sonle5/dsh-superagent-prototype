@@ -40,11 +40,12 @@ function serve(
     return { status, body: JSON.parse(text) as Record<string, unknown> }
   }
 }
-function serveControl(stateDir: string, host = '127.0.0.1', requestRejection: () => number | undefined = () => undefined) {
+function serveControl(stateDir: string, host = '127.0.0.1',
+  requestRejection: (() => number | undefined) | null = () => undefined) {
   let handler: Handler = async () => {}
   const ctx = {
     webServer: { host, port: 3082, register: (route: { handler: Handler }) => { handler = route.handler; return () => {} } },
-    connection: { requestRejection },
+    connection: requestRejection === null ? {} : { requestRejection },
   }
   registerControlHttp(ctx as never, stateDir)
   return async (method: string, path: string, body?: unknown, headers: Headers = {}) => {
@@ -302,6 +303,9 @@ it('lets the signed-in controller call protected model-proxy routes and forwards
     status: 401,
     body: { error: 'Signed-in management request required' },
   })
+  // DSH hosts with route `auth` admit the request before the handler and no longer offer requestRejection.
+  const routeAuthHost = serveControl(state, '127.0.0.1', null)
+  expect(await routeAuthHost('GET', 'gateway/model-proxy')).toMatchObject({ status: 200, body: { status: 'ready' } })
 })
 
 it('signs the Fleet controller in to a gateway and stores only the gateway session', async () => {

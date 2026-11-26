@@ -32,6 +32,20 @@ export function nativeToken(stateDir: string, create = true): string | undefined
   }
 }
 
+/**
+ * Sign-in rejection for a browser request on DSH hosts that predate route `auth`. Hosts without
+ * `Connection.requestRejection` enforce the route rule before calling the handler, so this returns undefined there.
+ * @param connection - The host Connection service.
+ * @param request - Request headers to check.
+ * @returns 401 or 403 when a legacy host refuses the request, otherwise undefined.
+ */
+export function legacyRequestRejection<R>(
+  connection: { readonly requestRejection?: (request: R) => 401 | 403 | undefined },
+  request: R,
+): 401 | 403 | undefined {
+  return typeof connection.requestRejection === 'function' ? connection.requestRejection(request) : undefined
+}
+
 /** Compare one presented controller capability without exposing token contents. */
 export function matchesNativeToken(stateDir: string, presented: string | string[] | undefined): boolean {
   if (typeof presented !== 'string') return false

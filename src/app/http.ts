@@ -29,7 +29,7 @@ import { decisionList, search, threadDetail, threadList } from './views/threads.
 import { executorLoad, ticketDetail, ticketList } from './views/tickets.ts'
 import { Fleet, FleetControlError, managementApi, redactSensitive, type FleetAction, type FleetNativeTarget } from './fleet.ts'
 import { INTERNAL_HEADER } from './native-transport.ts'
-import { matchesNativeToken } from './native-auth.ts'
+import { legacyRequestRejection, matchesNativeToken } from './native-auth.ts'
 import { ProviderControlError, addProxyProvider, providerControl, resetProvider, saveProvider, syncProxyProviders,
   setProviderCredential } from './providers.ts'
 import { LIMITS } from '../limits.ts'
@@ -423,7 +423,7 @@ function registerManagement(ctx: Context, stateDir: string, runtime?: HttpHost):
       if (!url.pathname.startsWith('/orchestrator/api/')) { res.writeHead(404); res.end(); return }
       if (!sameOrigin(req, ctx.webServer.port)) { json(res, 403, { error: 'Same-origin management request required' }); return }
       if (!matchesNativeToken(stateDir, req.headers[INTERNAL_HEADER])) {
-        const rejection = ctx.connection.requestRejection(req)
+        const rejection = legacyRequestRejection(ctx.connection, req)
         if (rejection !== undefined) {
           json(res, rejection, { error: rejection === 401
             ? 'Signed-in management request required' : 'Trusted management request required' })

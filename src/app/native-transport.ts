@@ -23,7 +23,7 @@ import {
   requestDeployments,
   requestOwner,
 } from './native-aggregate.ts'
-import { matchesNativeToken, nativeToken } from './native-auth.ts'
+import { legacyRequestRejection, matchesNativeToken, nativeToken } from './native-auth.ts'
 
 /** Newer DSH releases publish launch URLs through an event that older peer types omits. */
 declare module '@deepseek-ai/cordis' {
@@ -1264,7 +1264,7 @@ function controllerUpgrade(ctx: Context, stateDir: string, server: WebSocketServ
   const fleet = new Fleet(stateDir)
   return (request: IncomingMessage, socket: Duplex, head: Buffer): void => {
     // DSH hosts that predate route `auth` do not enforce the mux rule, so browser peers are checked here too.
-    if (ctx.connection.requestRejection(request) !== undefined) {
+    if (legacyRequestRejection(ctx.connection, request) !== undefined) {
       socket.destroy()
       return
     }
