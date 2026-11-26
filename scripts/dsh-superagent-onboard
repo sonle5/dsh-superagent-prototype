@@ -39,14 +39,18 @@ ACTIONS = {"start", "stop", "restart"}
 MODEL_PROXY_PROVIDERS = {"one-nexus", "openai"}
 MODEL_PROXY_PROVIDER_MODELS = {
     "one-nexus": [
-        {"name": "glm-5.3-sontinh", "alias": "glm-5.3-sontinh"},
-        {"name": "dsv41f-thuytinh", "alias": "dsv41f-thuytinh"},
+        {"name": "glm-5.3", "alias": "glm-5.3"},
+        {"name": "dsv41f", "alias": "dsv41f"},
     ],
     "openai": [
         {"name": "gpt-6.1-terra", "alias": "gpt-6.1-terra"},
         {"name": "gpt-6.1-sol", "alias": "gpt-6.1-sol"},
         {"name": "gpt-5.6-sol", "alias": "gpt-5.6-sol"},
     ],
+}
+MODEL_PROXY_PROVIDER_BASE_URLS = {
+    "one-nexus": "https://catalog.onenexus.cloud/v1",
+    "openai": "https://api.openai.com/v1",
 }
 MAX_LOG_LINES = 80
 MAX_OUTPUT = 64 * 1024
@@ -969,6 +973,7 @@ def provider_key_set(request, dry):
             }
             item = {
                 **item,
+                "base-url": MODEL_PROXY_PROVIDER_BASE_URLS[provider],
                 "keys": [{"api-key": api_key}],
                 "models": [
                     *models,
@@ -979,20 +984,12 @@ def provider_key_set(request, dry):
             found = True
         updated.append(item)
     if not found:
-        if provider == "one-nexus":
-            updated.append({
-                "name": "one-nexus",
-                "base-url": "https://onenexus-ws.onenexus.cloud/v1",
-                "keys": [{"api-key": api_key}],
-                "models": MODEL_PROXY_PROVIDER_MODELS["one-nexus"],
-            })
-        else:
-            updated.append({
-                "name": "openai",
-                "base-url": "https://api.openai.com/v1",
-                "keys": [{"api-key": api_key}],
-                "models": MODEL_PROXY_PROVIDER_MODELS["openai"],
-            })
+        updated.append({
+            "name": provider,
+            "base-url": MODEL_PROXY_PROVIDER_BASE_URLS[provider],
+            "keys": [{"api-key": api_key}],
+            "models": MODEL_PROXY_PROVIDER_MODELS[provider],
+        })
     management_request(state, "PATCH", "/config/api-keys/openai-compatibility", updated)
     return {"provider": provider, "configured": True}
 

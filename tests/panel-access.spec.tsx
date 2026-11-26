@@ -12,7 +12,7 @@ it('shows cloud identity, protected providers, and the effective deployment rout
   server.gatewayStatus = {
     configured: true, url: 'https://superagent.example', organization: 'example-org', login: 'fixture-user', person: true,
   }
-  server.settings.eval = { ...server.settings.eval, model: { provider: 'one-nexus', model: 'glm-5.3-sontinh' } }
+  server.settings.eval = { ...server.settings.eval, model: { provider: 'one-nexus', model: 'glm-5.3' } }
   server.settings.executor = { ...server.settings.executor, model: { provider: 'claude', model: 'claude-opus-5-5(auto)' } }
   accessPage()
   await mount()
@@ -22,7 +22,7 @@ it('shows cloud identity, protected providers, and the effective deployment rout
   expect(text()).toContain('alice@example.com')
   expect(text()).toContain(zh.accessAnthropicNotShared)
   expect(text()).toContain(zh.accessAnthropicAddAccount)
-  expect(text()).toContain('one-nexus / glm-5.3-sontinh')
+  expect(text()).toContain('one-nexus / glm-5.3')
   expect(text()).toContain('claude / claude-opus-5-5(auto)')
 })
 

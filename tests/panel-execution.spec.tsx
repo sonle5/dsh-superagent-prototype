@@ -89,7 +89,7 @@ it('opens the Ticket worker and its deployment main Session through aggregate na
 })
 
 it('shows a failed Ticket\'s stage, provider route, and recovery attempts', async () => {
-  const failure = { stage: 'timeout', provider: 'one-nexus', model: 'glm-5.3-sontinh', attempt: 4, maxAttempts: 4,
+  const failure = { stage: 'timeout', provider: 'one-nexus', model: 'glm-5.3', attempt: 4, maxAttempts: 4,
     providerRetries: 5, providerRetryLimit: 5 }
   const detail = server.ticketDetails.t1!
   server.ticketDetails.t1 = { ...detail, stage: 'person', action: 'failed', actions: { retry: true, stop: true },
@@ -101,7 +101,7 @@ it('shows a failed Ticket\'s stage, provider route, and recovery attempts', asyn
   expect(document.querySelector('.dt-banner')?.textContent).toContain('请求超时')
   expect(document.querySelector('.dt-banner')?.textContent).toContain('供应商已重试 5/5')
   expect(document.querySelector('.dt-banner-detail')?.textContent).toBe(
-    'one-nexus / glm-5.3-sontinh · 请求超时 · 执行尝试 4/4 · 供应商已重试 5/5')
+    'one-nexus / glm-5.3 · 请求超时 · 执行尝试 4/4 · 供应商已重试 5/5')
 })
 
 it('reports a missing Ticket instead of rendering an empty page', async () => {

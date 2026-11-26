@@ -87,7 +87,7 @@ it('opens the rule list for an invalid field inside it only', async () => {
 
 it('shows whether the role model is inherited or overridden, and restores the deployment default', async () => {
   server.settings = { ...server.settings, eval: { ...server.settings.eval,
-    model: { provider: 'one-nexus', model: 'glm-5.3-sontinh', reasoningEffort: 'max' } } }
+    model: { provider: 'one-nexus', model: 'glm-5.3', reasoningEffort: 'max' } } }
   await mount()
   await click(tab(zh['tab.settings']))
   await click(find(zh['term.eval'], '.dt-settings-link'))

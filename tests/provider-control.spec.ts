@@ -48,17 +48,17 @@ const fleet = {
   managementTarget, modelProxyStatus, createModelProxyKey, revokeModelProxyKey, finalizeModelProxyKey, view,
 } as unknown as Fleet
 const catalog = {
-  default: { provider: 'one-nexus', model: 'glm-5.3-sontinh', reasoningEffort: 'max' },
+  default: { provider: 'one-nexus', model: 'glm-5.3', reasoningEffort: 'max' },
   routableProviders: ['one-nexus'],
   failures: [],
-  groups: [{ id: 'one-nexus', name: 'One Nexus', models: [{ id: 'glm-5.3-sontinh', name: 'GLM 5.3' }] }],
+  groups: [{ id: 'one-nexus', name: 'One Nexus', models: [{ id: 'glm-5.3', name: 'GLM 5.3' }] }],
 }
 const profile = {
   displayName: 'One Nexus',
   api: 'openai-completions',
   baseURL: 'https://onenexus.example/v1',
   apiKeyEnv: 'ONENEXUS_API_KEY',
-  models: [{ id: 'glm-5.3-sontinh', name: 'GLM 5.3', contextWindow: 330000, maxTokens: 65000,
+  models: [{ id: 'glm-5.3', name: 'GLM 5.3', contextWindow: 330000, maxTokens: 65000,
     input: ['text'], reasoningEfforts: { high: 'high', max: 'max' } }],
 }
 let described: Record<string, unknown>
@@ -120,7 +120,7 @@ it('reads one deployment provider view with credential presence but no secret ma
       displayName: 'One Nexus',
       credentialRef: 'ONENEXUS_API_KEY',
       credential: { configured: true, source: 'user', writable: true },
-      models: [{ id: 'glm-5.3-sontinh', contextWindow: 330000, maxTokens: 65000, reasoning: true, image: false }],
+      models: [{ id: 'glm-5.3', contextWindow: 330000, maxTokens: 65000, reasoning: true, image: false }],
       active: true,
       configured: true,
       removable: true,
@@ -162,7 +162,7 @@ it('maps DSH revision conflicts to an HTTP conflict without mutating credentials
     baseURL: 'https://onenexus.example/v1',
     credentialRef: 'ONENEXUS_API_KEY',
     apiKey: 'sk-must-not-be-stored',
-    models: [{ id: 'glm-5.3-sontinh', name: 'GLM 5.3', reasoning: true, image: false }],
+    models: [{ id: 'glm-5.3', name: 'GLM 5.3', reasoning: true, image: false }],
     revision: 3,
   })).rejects.toMatchObject({ status: 409 })
   expect(native.nativePeerRpc.mock.calls.some(([, method]) => method === 'credentials/set')).toBe(false)

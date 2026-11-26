@@ -263,13 +263,13 @@ function initial(): PanelServer {
     en: 'Feishu message' } }
   const defaults = { revision: 0, previousRevision: null, savedAt: '', source: 'defaults' }
   const modelCatalog = {
-    default: { provider: 'one-nexus', model: 'glm-5.3-sontinh', reasoningEffort: 'max' },
+    default: { provider: 'one-nexus', model: 'glm-5.3', reasoningEffort: 'max' },
     routableProviders: ['one-nexus', 'claude'],
     failures: [],
     groups: [{
-      id: 'one-nexus', name: 'One Nexus', models: [{ id: 'glm-5.3-sontinh', name: 'GLM 5.3',
+      id: 'one-nexus', name: 'One Nexus', models: [{ id: 'glm-5.3', name: 'GLM 5.3',
         reasoning: { efforts: [{ id: 'high', name: 'High' }, { id: 'max', name: 'Max' }], defaultEffort: 'max' } },
-      { id: 'dsv41f-thuytinh', name: 'DeepSeek V4.1 Flash', reasoning: { efforts: [{ id: 'high', name: 'High' }] } }],
+      { id: 'dsv41f', name: 'DeepSeek V4.1 Flash', reasoning: { efforts: [{ id: 'high', name: 'High' }] } }],
     }, {
       id: 'claude', name: 'Claude', models: [{ id: 'claude-opus-5-5(auto)', name: 'Opus 5.5',
         reasoning: { efforts: [{ id: 'high', name: 'High' }, { id: 'max', name: 'Max' }], defaultEffort: 'max' } }],
@@ -281,8 +281,8 @@ function initial(): PanelServer {
     providers: [{
       id: 'one-nexus', displayName: 'One Nexus', api: 'openai-completions', baseURL: 'https://onenexus.test/v1',
       credentialRef: 'ONENEXUS_API_KEY', credential: { configured: true, source: 'user', writable: true },
-      models: [{ id: 'glm-5.3-sontinh', name: 'GLM 5.3', contextWindow: 330000, maxTokens: 65000, reasoning: true, image: false },
-        { id: 'dsv41f-thuytinh', name: 'DeepSeek V4.1 Flash', reasoning: true, image: false }],
+      models: [{ id: 'glm-5.3', name: 'GLM 5.3', contextWindow: 330000, maxTokens: 65000, reasoning: true, image: false },
+        { id: 'dsv41f', name: 'DeepSeek V4.1 Flash', reasoning: true, image: false }],
       active: true, configured: true, removable: true,
     }, {
       id: 'claude', displayName: 'Claude', api: 'anthropic-messages', baseURL: 'http://127.0.0.1:8317/v1',
@@ -631,7 +631,7 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
       id: 'claude', name: 'Claude', models: [{ id: 'claude-opus-5-5', name: 'Opus 5.5',
         reasoning: { efforts: [{ id: 'high', name: 'High' }, { id: 'max', name: 'Max' }], defaultEffort: 'max' } }],
     }, {
-      id: 'one-nexus', name: 'One Nexus', models: [{ id: 'glm-5.3-sontinh', name: 'GLM 5.3',
+      id: 'one-nexus', name: 'One Nexus', models: [{ id: 'glm-5.3', name: 'GLM 5.3',
         reasoning: { efforts: [{ id: 'high', name: 'High' }, { id: 'max', name: 'Max' }], defaultEffort: 'max' } }],
     }] }) },
   'GET prompts': { query: ['revision', 'offset'], answer: () => server.prompts },

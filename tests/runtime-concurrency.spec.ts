@@ -214,7 +214,7 @@ it('continues after normalized provider retries exhaust following a completed to
   const ticket = () => h.runtime.store.tickets.get(one.ticket.id)!
   const session = (agent as unknown as { session: { requestHeader: () => unknown; snapshotEvents: () => unknown[] } }).session
   Object.assign(session, {
-    requestHeader: () => ({ config: { provider: 'one-nexus', model: 'glm-5.3-sontinh' } }),
+    requestHeader: () => ({ config: { provider: 'one-nexus', model: 'glm-5.3' } }),
     snapshotEvents: () => [
       { type: 'tool/result', data: { turn: 2, step: 1 } },
       { type: 'llm/retry', data: { turn: 2, step: 2, retry: 5, maxRetries: 5 } },
@@ -245,7 +245,7 @@ it('continues after normalized provider retries exhaust following a completed to
     failure: {
       stage: 'timeout',
       provider: 'one-nexus',
-      model: 'glm-5.3-sontinh',
+      model: 'glm-5.3',
       attempt: 4,
       maxAttempts: 4,
       providerRetries: 5,

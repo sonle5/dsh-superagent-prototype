@@ -168,7 +168,7 @@ it('retargets an idle persisted worker when its Executor model changes', async (
   worker.session.append.mockClear()
 
   const executor = settings.block('executor')
-  const next = { provider: 'one-nexus', model: 'glm-5.3-sontinh', reasoningEffort: 'max' }
+  const next = { provider: 'one-nexus', model: 'glm-5.3', reasoningEffort: 'max' }
   await settings.save('executor', { ...(executor.value as object), model: next }, executor.revision, 'panel')
 
   expect(resolve).toHaveBeenCalledWith(sessionId)

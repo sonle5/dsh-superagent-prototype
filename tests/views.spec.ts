@@ -140,11 +140,11 @@ it('keeps provider-neutral failure diagnostics with a failed Ticket', () => {
       id: 'ou_alice' }, scope: '' },
     origin: { triggerId: 'e1', triggerIds: ['e1'] }, assignments: [{ id: 'a1', state: 'running' as const, createdAt: at, startedAt: at,
       report: { state: 'failed' as const, summary: 'LlmError: Request timed out.', at, failure: { stage: 'timeout', provider: 'one-nexus',
-        model: 'glm-5.3-sontinh', attempt: 4, maxAttempts: 4, providerRetries: 5, providerRetryLimit: 5 } } }],
+        model: 'glm-5.3', attempt: 4, maxAttempts: 4, providerRetries: 5, providerRetryLimit: 5 } } }],
     inputs: [] as { id: string; kind: 'trigger'; triggerId: string; at: string; human?: true }[] }
   store.tickets.save(ticket)
   expect(ticketSummary(store.tickets.get('t1')!)).toMatchObject({ stage: 'person', action: 'failed',
-    failure: { stage: 'timeout', provider: 'one-nexus', model: 'glm-5.3-sontinh', attempt: 4, maxAttempts: 4 } })
+    failure: { stage: 'timeout', provider: 'one-nexus', model: 'glm-5.3', attempt: 4, maxAttempts: 4 } })
   expect(ticketDetail(host, 't1')!.assignments[0]!.report).toMatchObject({ failure: { providerRetries: 5, providerRetryLimit: 5 } })
 })
 

@@ -332,9 +332,9 @@ const PRESET_PROFILES: Record<ProxyPreset, JsonRecord> = {
   'one-nexus': {
     displayName: 'One Nexus',
     models: [
-      { id: 'glm-5.3-sontinh', name: 'GLM 5.3', contextWindow: 330000, maxTokens: 65000, input: ['text'],
+      { id: 'glm-5.3', name: 'GLM 5.3', contextWindow: 330000, maxTokens: 65000, input: ['text'],
         reasoningEfforts: reasoningEfforts() },
-      { id: 'dsv41f-thuytinh', name: 'DeepSeek V4.1 Flash', input: ['text'], reasoningEfforts: reasoningEfforts() },
+      { id: 'dsv41f', name: 'DeepSeek V4.1 Flash', input: ['text'], reasoningEfforts: reasoningEfforts() },
     ],
     compat: { maxTokensField: 'max_tokens', supportsReasoningEffort: true, thinkingFormat: 'qwen' },
   },
