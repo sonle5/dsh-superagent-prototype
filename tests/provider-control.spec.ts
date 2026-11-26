@@ -266,7 +266,7 @@ it('adds each ready proxy upstream to every fleet deployment that lacks it and l
   expect(native.nativePeerRpc).not.toHaveBeenCalledWith(target, 'settings/mutate', expect.anything())
 })
 
-it('adds one provider per connected Anthropic account behind the pooled profile and removes it once the account is gone', async () => {
+it('adds one provider per connected Anthropic account with the proxy credential and removes it once the account is gone', async () => {
   const proxied = { ...structuredClone(profile), baseURL: 'http://127.0.0.1:8317/v1', apiKeyEnv: 'DSH_MODEL_PROXY_EXISTING' }
   described = { writable: true, namespaces: [{ ns: 'llm-pi-ai', value: { providers: { claude: proxied } },
     user: { providers: { claude: proxied } }, revision: 4 }] }
@@ -291,6 +291,35 @@ it('adds one provider per connected Anthropic account behind the pooled profile 
   modelProxyStatus.mockResolvedValueOnce({ ...status, anthropicAccounts: [] })
   expect(await syncProxyProviders(fleet)).toEqual([{ id: 'inference-support-loop', added: [] }])
   expect(Object.keys(providers)).toEqual(['claude'])
+})
+
+it('replaces the pooled Anthropic profile with account profiles once the shared pool has no account', async () => {
+  const proxied = { ...structuredClone(profile), baseURL: 'http://127.0.0.1:8317/v1', apiKeyEnv: 'DSH_MODEL_PROXY_EXISTING' }
+  described = { writable: true, namespaces: [{ ns: 'llm-pi-ai', value: { providers: { claude: proxied, 'one-nexus': proxied } },
+    user: { providers: { claude: proxied, 'one-nexus': proxied } }, revision: 4 }] }
+  const status = await modelProxyStatus()
+  modelProxyStatus.mockResolvedValueOnce({ ...status,
+    providers: [{ id: 'claude', label: 'Claude', state: 'missing' }, { id: 'one-nexus', label: 'OneNexus', state: 'configured' }],
+    anthropicAccounts: [{ id: 'claude-bob.json', name: 'bob@example.com', state: 'connected', sharedPool: false, prefix: 'bob' }] })
+  expect(await syncProxyProviders(fleet)).toEqual([{ id: 'inference-support-loop', added: ['claude-bob'] }])
+  expect(createModelProxyKey).not.toHaveBeenCalled()
+  const providers = (described.namespaces as Array<{ value: { providers: Record<string, Record<string, unknown>> } }>)[0]!.value.providers
+  expect(Object.keys(providers).sort()).toEqual(['claude-bob', 'one-nexus'])
+  expect(providers['claude-bob']).toMatchObject({ apiKeyEnv: 'DSH_MODEL_PROXY_EXISTING',
+    models: [expect.objectContaining({ id: 'bob/claude-opus-5-5(auto)' })] })
+})
+
+it('gives account profiles a new protected proxy key on a deployment without a proxied profile', async () => {
+  emptyDeployment()
+  const status = await modelProxyStatus()
+  modelProxyStatus.mockResolvedValueOnce({ ...status, providers: [{ id: 'claude', label: 'Claude', state: 'missing' }],
+    anthropicAccounts: [{ id: 'claude-bob.json', name: 'bob@example.com', state: 'connected', sharedPool: false, prefix: 'bob' }] })
+  expect(await syncProxyProviders(fleet)).toEqual([{ id: 'inference-support-loop', added: ['claude-bob'] }])
+  const ref = (native.nativePeerRpc.mock.calls.find(([, method]) => method === 'credentials/set')?.[2] as { ref: string }).ref
+  expect(finalizeModelProxyKey).toHaveBeenCalledWith('inference-support-loop', 'dsh-inference-support-loop-a-new-private-proxy-key')
+  const providers = (described.namespaces as Array<{ value: { providers: Record<string, Record<string, unknown>> } }>)[0]!.value.providers
+  expect(Object.keys(providers)).toEqual(['claude-bob'])
+  expect(providers['claude-bob']).toMatchObject({ apiKeyEnv: ref })
 })
 
 it('reports one deployment\'s failure without stopping the others, and adds nothing without a ready proxy', async () => {

@@ -345,36 +345,28 @@ function presetProfile(preset: ProxyPreset, baseURL: string, credentialRef: stri
 }
 
 /**
- * Add one proxy-backed provider profile for an upstream the person already connected to their model proxy, and move
- * every other profile that still calls its upstream directly behind the proxy in the same settings mutation.
- * A deployment already behind the proxy reuses its proxy credential; otherwise a new deployment key is created,
- * and the key, credential, and profiles are rolled back together on failure. Direct keys of moved profiles are unset
- * only after the transition succeeds.
+ * Set the given proxy-backed profiles, unset the listed ones, and move every other profile that still calls its upstream
+ * directly behind the proxy, all in one settings mutation. A deployment already behind the proxy reuses its proxy
+ * credential; otherwise a new deployment key is created, and the key, credential, and profiles are rolled back together
+ * on failure. Direct keys of moved profiles are unset only after the transition succeeds.
+ * @param build Returns the profiles to set for the proxy credential reference the deployment will use.
  */
-export async function addProxyProvider(fleet: Fleet, deployment: string, provider: string): Promise<ProviderControlView> {
-  const parsed = z.enum(PROXY_PRESETS).safeParse(provider)
-  if (!parsed.success) throw new ProviderControlError(404, `No one-step setup for provider: ${provider}`)
-  const preset = parsed.data
-  const target = await targetOf(fleet, deployment)
-  const proxy = await fleet.modelProxyStatus()
-  if (proxy.status !== 'ready') {
-    throw new ProviderControlError(409, `The protected model proxy is ${proxy.status}`)
-  }
-  const upstream = proxy.providers.find(item => item.id === preset)
-  if (upstream?.state !== 'connected' && upstream?.state !== 'configured') {
-    throw new ProviderControlError(409, `${upstream?.label ?? preset} is not connected to the model proxy`)
-  }
+async function setProxiedProfiles(
+  fleet: Fleet, deployment: string, target: FleetNativeTarget, proxy: ModelProxyView,
+  build: (credentialRef: string) => Record<string, JsonRecord>, unset: readonly string[] = [],
+): Promise<void> {
   const described = await settings(target)
   const namespace = described.namespaces.find(item => item.ns === 'llm-pi-ai')
   if (!namespace) throw new ProviderControlError(502, 'This deployment has no llm-pi-ai settings namespace')
   const profiles = providerProfiles(namespace.value)
-  const previous = profiles[preset]
-  // Profiles still calling an upstream directly move behind the proxy with the added one.
-  const unprotected = Object.entries(profiles).filter(([id, profile]) => id !== preset && profile.baseURL !== proxy.baseURL)
+  const touched = new Set([...Object.keys(build('')), ...unset])
+  // Profiles still calling an upstream directly move behind the proxy with the set ones.
+  const unprotected = Object.entries(profiles).filter(([id, profile]) => !touched.has(id) && profile.baseURL !== proxy.baseURL)
   const set = (credentialRef: string, expectedRevision: number) => rpc(target, 'settings/mutate', {
     ns: 'llm-pi-ai',
     ops: [
-      { op: 'set', path: ['providers', preset], value: presetProfile(preset, proxy.baseURL, credentialRef) },
+      ...Object.entries(build(credentialRef)).map(([id, value]) => ({ op: 'set', path: ['providers', id], value })),
+      ...unset.map(id => ({ op: 'unset', path: ['providers', id] })),
       ...unprotected.map(([id, profile]) => ({
         op: 'set', path: ['providers', id], value: protectedProfile(id, profile, credentialRef, proxy.baseURL),
       })),
@@ -399,7 +391,7 @@ export async function addProxyProvider(fleet: Fleet, deployment: string, provide
     if (reusable !== undefined) {
       await set(reusable, namespace.revision)
       await retire(reusable)
-      return readView(target)
+      return
     }
   }
 
@@ -414,15 +406,14 @@ export async function addProxyProvider(fleet: Fleet, deployment: string, provide
     settingsRevision = mutated.revision
     await fleet.finalizeModelProxyKey(deployment, created.value)
     await retire(credentialRef)
-    return await readView(target)
   } catch (error) {
     if (settingsRevision !== undefined) {
       await rpc(target, 'settings/mutate', {
         ns: 'llm-pi-ai',
         ops: [
-          previous === undefined
-            ? { op: 'unset', path: ['providers', preset] }
-            : { op: 'set', path: ['providers', preset], value: previous },
+          ...[...touched].map(id => profiles[id] === undefined
+            ? { op: 'unset', path: ['providers', id] }
+            : { op: 'set', path: ['providers', id], value: profiles[id] }),
           ...unprotected.map(([id, profile]) => ({ op: 'set', path: ['providers', id], value: profile })),
         ],
         expectedRevision: settingsRevision,
@@ -432,6 +423,28 @@ export async function addProxyProvider(fleet: Fleet, deployment: string, provide
     await fleet.revokeModelProxyKey(deployment, created.value).catch(() => undefined)
     throw error
   }
+}
+
+/**
+ * Add one proxy-backed provider profile for an upstream the person already connected to their model proxy, moving
+ * every other directly-called profile behind the proxy with it.
+ */
+export async function addProxyProvider(fleet: Fleet, deployment: string, provider: string): Promise<ProviderControlView> {
+  const parsed = z.enum(PROXY_PRESETS).safeParse(provider)
+  if (!parsed.success) throw new ProviderControlError(404, `No one-step setup for provider: ${provider}`)
+  const preset = parsed.data
+  const target = await targetOf(fleet, deployment)
+  const proxy = await fleet.modelProxyStatus()
+  if (proxy.status !== 'ready') {
+    throw new ProviderControlError(409, `The protected model proxy is ${proxy.status}`)
+  }
+  const upstream = proxy.providers.find(item => item.id === preset)
+  if (upstream?.state !== 'connected' && upstream?.state !== 'configured') {
+    throw new ProviderControlError(409, `${upstream?.label ?? preset} is not connected to the model proxy`)
+  }
+  await setProxiedProfiles(fleet, deployment, target, proxy,
+    credentialRef => ({ [preset]: presetProfile(preset, proxy.baseURL, credentialRef) }))
+  return readView(target)
 }
 
 /** The outcome of adding the person's ready model-proxy upstreams to one deployment. */
@@ -447,43 +460,43 @@ const accountProviderId = (prefix: string) => `claude-${prefix}`
 
 /**
  * Set one `claude-<prefix>` profile per connected, prefixed Anthropic account and unset account profiles whose account
- * is gone, so Eval and Executor can pick a specific account. Account profiles share the pooled `claude` profile's proxy
- * credential and are left alone until that profile is behind the proxy.
+ * is gone, so Eval and Executor can pick a specific account. While the proxy's shared Anthropic pool has no account,
+ * the pooled `claude` profile is unset with them, since every account is reachable only through its own profile.
  * @returns The account provider ids added.
  */
-async function syncAccountProviders(target: FleetNativeTarget, proxy: ModelProxyView): Promise<string[]> {
+async function syncAccountProviders(fleet: Fleet, deployment: string, target: FleetNativeTarget, proxy: ModelProxyView): Promise<string[]> {
   const namespace = (await settings(target)).namespaces.find(item => item.ns === 'llm-pi-ai')
   if (!namespace) return []
   const profiles = providerProfiles(namespace.value)
-  const pool = profiles.claude
-  if (pool?.baseURL !== proxy.baseURL || typeof pool.apiKeyEnv !== 'string' || pool.apiKeyEnv === '') return []
-  const wanted = new Map(proxy.anthropicAccounts
-    .filter(account => account.state === 'connected' && account.prefix !== '')
-    .map(account => {
-      const base = PRESET_PROFILES.claude
-      const [model] = base.models as JsonRecord[]
-      return [accountProviderId(account.prefix), {
-        ...structuredClone(base),
-        displayName: `Claude · ${account.name}`,
-        models: [{ ...structuredClone(model), id: `${account.prefix}/${String(model!.id)}` }],
-        api: 'openai-completions', baseURL: proxy.baseURL, apiKeyEnv: pool.apiKeyEnv,
-      } satisfies JsonRecord] as const
-    }))
+  const accounts = proxy.anthropicAccounts.filter(account => account.state === 'connected' && account.prefix !== '')
+  const build = (credentialRef: string) => Object.fromEntries(accounts.map(account => {
+    const base = PRESET_PROFILES.claude
+    const [model] = base.models as JsonRecord[]
+    return [accountProviderId(account.prefix), {
+      ...structuredClone(base),
+      displayName: `Claude · ${account.name}`,
+      models: [{ ...structuredClone(model), id: `${account.prefix}/${String(model!.id)}` }],
+      api: 'openai-completions', baseURL: proxy.baseURL, apiKeyEnv: credentialRef,
+    } satisfies JsonRecord]
+  }))
+  const wanted = Object.keys(build(''))
   // An account profile is a claude-* profile behind this proxy whose models all carry an account prefix.
-  const stale = Object.entries(profiles).filter(([id, profile]) => id.startsWith('claude-') && !wanted.has(id)
+  const stale = Object.entries(profiles).filter(([id, profile]) => id.startsWith('claude-') && !wanted.includes(id)
     && profile.baseURL === proxy.baseURL && Array.isArray(profile.models) && profile.models.length > 0
     && profile.models.every(model => isRecord(model) && typeof model.id === 'string' && model.id.includes('/')))
-  const added = [...wanted.keys()].filter(id => profiles[id] === undefined)
-  const changed = [...wanted].filter(([id, profile]) => JSON.stringify(profiles[id]) !== JSON.stringify(profile))
-  if (changed.length === 0 && stale.length === 0) return []
-  await rpc(target, 'settings/mutate', {
-    ns: 'llm-pi-ai',
-    ops: [
-      ...changed.map(([id, profile]) => ({ op: 'set', path: ['providers', id], value: profile })),
-      ...stale.map(([id]) => ({ op: 'unset', path: ['providers', id] })),
-    ],
-    expectedRevision: namespace.revision,
+    .map(([id]) => id)
+  const poolState = proxy.providers.find(item => item.id === 'claude')?.state
+  const poolGone = wanted.length > 0 && poolState !== 'connected' && poolState !== 'configured'
+    && profiles.claude?.baseURL === proxy.baseURL
+  const unset = poolGone ? [...stale, 'claude'] : stale
+  const added = wanted.filter(id => profiles[id] === undefined)
+  // Account profiles already set keep their credential, so an unchanged account set needs no mutation.
+  const changed = wanted.some(id => {
+    const ref = profiles[id]?.apiKeyEnv
+    return typeof ref !== 'string' || JSON.stringify(profiles[id]) !== JSON.stringify(build(ref)[id])
   })
+  if (!changed && unset.length === 0) return []
+  await setProxiedProfiles(fleet, deployment, target, proxy, build, unset)
   return added
 }
 
@@ -514,7 +527,7 @@ export async function syncProxyProviders(fleet: Fleet, deployments?: readonly st
         await addProxyProvider(fleet, id, preset)
         added.push(preset)
       }
-      added.push(...await syncAccountProviders(target, proxy))
+      added.push(...await syncAccountProviders(fleet, id, target, proxy))
       results.push({ id, added })
     } catch (error) {
       results.push({ id, added, error: redactSensitive(error instanceof Error ? error.message : String(error)) })

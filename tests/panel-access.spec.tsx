@@ -26,6 +26,19 @@ it('shows cloud identity, protected providers, and the effective deployment rout
   expect(text()).toContain('claude / claude-opus-5-5(auto)')
 })
 
+it('shows the Anthropic card as connected and drops the pool tag once every account has its own prefix', async () => {
+  server.gatewayStatus = {
+    configured: true, url: 'https://superagent.example', organization: 'example-org', login: 'fixture-user', person: true,
+  }
+  server.modelProxy.providers = server.modelProxy.providers.map(item => item.id === 'claude' ? { ...item, state: 'missing' } : item)
+  server.modelProxy.anthropicAccounts = server.modelProxy.anthropicAccounts.map(account => ({ ...account, sharedPool: false }))
+  accessPage()
+  await mount()
+  const card = all('.dt-access-card').find(item => item.textContent?.includes('Anthropic'))!
+  expect(card.querySelector('.dt-card-head')?.textContent).toContain('connected')
+  expect(text()).not.toContain(zh.accessAnthropicNotShared)
+})
+
 it('writes agent and model credentials without redisplaying them', async () => {
   server.gatewayStatus = {
     configured: true, url: 'https://superagent.example', organization: 'example-org', login: 'fixture-user', person: true,

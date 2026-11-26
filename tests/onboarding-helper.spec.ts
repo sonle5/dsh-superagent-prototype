@@ -261,9 +261,12 @@ it('reports expired Claude authorization as auth-expired', () => {
     'overrides["model_proxy_plan"] = model_proxy_plan',
     'overrides["allocate_model_proxy_port"] = lambda _login, _state, _start, _end: 8317',
     'overrides["systemctl_state"] = lambda _unit: "active"',
-    'def management_request(_state, _method, suffix, _body=None):',
+    'def management_request(_state, method, suffix, body=None):',
     '    if suffix == "/config/access/api-keys": return []',
     '    if suffix == "/config/api-keys/openai-compatibility": return []',
+    '    if method == "PATCH" and suffix == "/credentials/fields":',
+    '        if body["name"] == "claude.json": raise module["ManagementHTTPError"](404)',
+    '        return {"status": "ok"}',
     '    raise AssertionError(suffix)',
     'overrides["management_request"] = management_request',
     'with tempfile.TemporaryDirectory() as base:',
@@ -296,12 +299,12 @@ it('reports expired Claude authorization as auth-expired', () => {
   expect(result.providers).toMatchObject([
     expect.objectContaining({ id: 'one-nexus', state: 'missing' }),
     expect.objectContaining({ id: 'openai', state: 'missing' }),
-    expect.objectContaining({ id: 'claude', label: 'Anthropic', state: 'auth-expired', expiresAt: '2025-06-01T00:00:00Z' }),
+    expect.objectContaining({ id: 'claude', label: 'Anthropic', state: 'auth-expired', expiresAt: '2026-01-01T00:00:00Z' }),
   ])
   expect(result.anthropicAccounts).toEqual([
     { id: 'claude.json', name: 'claude', state: 'auth-expired', sharedPool: true, prefix: '' },
     { id: 'nexus13.json', name: 'nexus13', state: 'connected', sharedPool: false, prefix: 'nexus13' },
-    { id: 'second.json', name: 'bob@example.com', state: 'auth-expired', sharedPool: true, prefix: '' },
+    { id: 'second.json', name: 'bob@example.com', state: 'auth-expired', sharedPool: false, prefix: 'bob' },
   ])
 })
 

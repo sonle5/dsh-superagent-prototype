@@ -25,6 +25,13 @@ function route(value: unknown): string | undefined {
 
 const authTime = (value: string | undefined, lang: string) => value ? when(value, lang) : undefined
 
+/** The Anthropic card's state: the shared pool's, or the best account's when every account has its own prefix. */
+function cardState(item: ProxyProvider, accounts: ModelProxy['anthropicAccounts']): ProxyProvider['state'] {
+  if (item.id !== 'claude' || accounts.length === 0 || accounts.some(account => account.sharedPool)) return item.state
+  const rank = ['sign-in-required', 'auth-expired', 'connected'] as const
+  return rank[Math.max(...accounts.map(account => rank.indexOf(account.state)))]!
+}
+
 export function AccessSettings() {
   const { t, call, deployment, notify } = usePanel()
   const access = usePoll(async () => {
@@ -131,7 +138,8 @@ export function AccessSettings() {
       {!proxy ? <Hint>{t('gatewaySignIn')}</Hint> : <>
         <div className="dt-access-grid">
           {proxy.providers.map(item => <article className="dt-card dt-access-card" key={item.id}>
-            <div className="dt-card-head"><span className="dt-card-title">{item.label}</span><Tag tone={tone(item.state)}>{item.state}</Tag></div>
+            <div className="dt-card-head"><span className="dt-card-title">{item.label}</span>
+              <Tag tone={tone(cardState(item, proxy.anthropicAccounts))}>{cardState(item, proxy.anthropicAccounts)}</Tag></div>
             <p className="dt-mono">{item.id}</p>
             {item.id === 'claude' && <>
               <AnthropicAccounts accounts={proxy.anthropicAccounts} onRemoved={access.reload} />

@@ -744,8 +744,8 @@ def model_proxy_status(request, dry):
     for path, item in items:
         prefix = item.get("prefix").strip() if isinstance(item.get("prefix"), str) else ""
         # Each account gets its own "<prefix>/<model>" route. Without force-model-prefix a prefixed account still
-        # serves bare model ids, so it stays in the shared pool; with it, a new prefix would leave the pool.
-        if prefix == "" and not force_prefix:
+        # serves bare model ids, so it stays in the shared pool; with it, the account leaves the pool.
+        if prefix == "":
             email = item.get("email") if isinstance(item.get("email"), str) else ""
             candidate = account_prefix(email, path.stem, taken)
             try:

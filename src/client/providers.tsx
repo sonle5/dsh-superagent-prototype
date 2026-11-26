@@ -67,11 +67,13 @@ const accountTone = (state: AnthropicAccount['state']) => state === 'connected' 
 export function AnthropicAccounts({ accounts, onRemoved }: { accounts: AnthropicAccount[]; onRemoved: () => Promise<unknown> }) {
   const { t, call, notify } = usePanel()
   if (accounts.length === 0) return null
+  // The tag only distinguishes accounts while some still serve the shared pool.
+  const pooled = accounts.some(account => account.sharedPool)
   return <ul className="dt-access-accounts" aria-label={t('accessAnthropicAccounts')}>
     {accounts.map(account => <li key={account.id}>
       <span>{account.name}</span>
       <Tag tone={accountTone(account.state)}>{account.state}</Tag>
-      {!account.sharedPool && <Tag tone="warning">{t('accessAnthropicNotShared')}</Tag>}
+      {pooled && !account.sharedPool && <Tag tone="warning">{t('accessAnthropicNotShared')}</Tag>}
       <ConfirmButton icon="trash" label={t('accessAnthropicRemove')} title={t('accessAnthropicRemoveTitle')}
         message={t('accessAnthropicRemoveMessage', { account: account.name })} onConfirm={async () => {
           await call('DELETE gateway/model-proxy/claude/accounts/:id', { id: account.id })
