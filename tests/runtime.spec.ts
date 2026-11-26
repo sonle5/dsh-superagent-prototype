@@ -1155,6 +1155,13 @@ it('leaves auto-merge to the delivery requirements, with the agent\'s own gh and
   expect(runtime.prompts.preview(runtime.prompts.current().config).worker).not.toContain('gh-merge')
 })
 
+it('lets the agent approve as a requested reviewer, but never its own PR or for another reviewer', () => {
+  const delivery = runtime.prompts.current().config.delivery
+  expect(delivery).toContain('When the agent account is a requested reviewer of a PR it did not open, submit an approving review once no finding of yours is open at the head commit')
+  expect(delivery).toContain('Never approve a PR the agent account opened, approve or merge on behalf of another reviewer, or merge a PR you did not open.')
+  expect(delivery).not.toContain('Never approve or merge on behalf of a reviewer.')
+})
+
 it('runs the prepare command once for a new ticket, under the execution root with the ticket\'s environment, and fails the ticket with its output', async () => {
   const prepare = (command: string) => runtime.store.saveSettings({ ...runtime.store.settings(), executor: { ...runtime.store.settings().executor, prepare: command } })
   const runs = () => subprocess.spawn.mock.calls.map(([spec]) => spec as { argv: string[]; cwd: string; env?: Record<string, string> }).filter(spec => spec.argv[0] === 'sh')

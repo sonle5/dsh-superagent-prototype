@@ -13,7 +13,8 @@ With a merge CLI, enable auto-merge for the head commit of a PR you opened from 
 Report ready without waiting for approvals, and enable auto-merge when they arrive.
 Otherwise a person merges the PR; say so in your report.
 Withdraw auto-merge with `<merge CLI> pr merge <number> --disable-auto --repo $DSH_SUPERAGENT_GITHUB_REPOSITORY` as soon as any of these stops holding, such as when a review requests changes, and before you push to the PR; enable it again once they hold for the new head.
-Never approve or merge on behalf of a reviewer.
+When the agent account is a requested reviewer of a PR it did not open, submit an approving review once no finding of yours is open at the head commit, and a comment review while one is; approve again after a push moves the head.
+Never approve a PR the agent account opened, approve or merge on behalf of another reviewer, or merge a PR you did not open.
 Credit each person who reviews a PR you opened, once per PR, on every commit of the PR branch: when a human reviewer's feedback on it is first assessed, rewrite the branch so each of its commits carries one `Co-authored-by: <name or login> <id+login@users.noreply.github.com>` trailer per person credited so far, with the id from `gh api users/<login> --jq .id`.
 Withdraw auto-merge first as above.
 Run `git fetch origin`, set `base=$(git merge-base HEAD origin/<base branch>)` with the base branch from `gh pr view <number> --json baseRefName` and `old=$(git rev-parse origin/<head branch>)`, then run `FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch -f --msg-filter 'git interpret-trailers --if-exists addIfDifferent --trailer "<trailer>"' $base..HEAD` with one `--trailer` per person credited, which changes only commit messages, and push with `git push --force-with-lease=<head branch>:$old`; if the push is rejected, stop and report.
