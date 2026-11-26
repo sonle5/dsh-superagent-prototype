@@ -62,6 +62,8 @@ export function assessmentOutcome(assessment: Assessment, settings: Pick<Setting
 const DEFAULT_RULES = [
   { id: 'copy', name: 'Copy fixes', enabled: true, instruction: 'Explicit requests to correct a typo, wording, punctuation or existing translation. Preserve product promises and business meaning.' },
   { id: 'visual', name: 'Visual fixes', enabled: true, instruction: 'Explicit implementation requests for local spacing, alignment, overflow or styling, with a specified target or an objectively established existing standard/correct state to restore. Locating an element or calling it inconsistent, unattractive or hard to understand does not establish a target. Do not invent visual style, information hierarchy, rendering or interaction decisions. No redesign, new interaction or behavior. A known spacing defect does not authorize adjacent undefined restyling; assess only a clearly separable authorized scope. If direction or scope is unsettled, observe only: no acknowledgement, worker or unsolicited question.' },
+  { id: 'readiness-review', name: 'Read-only readiness review', enabled: true, instruction: 'Explicit, read-only requests to inspect a repository or pull request and report readiness, mergeability, current check status, or review findings. Do not change files, push commits, or alter review state. A request to implement or fix code is outside this rule.' },
+  { id: 'implementation', name: 'Focused implementation', enabled: true, instruction: 'Explicit implementation requests with a settled target and no open design decision. Before editing code, load the dsh-superagent-code-writing skill and follow it: read repository guidance and affected code/tests first; make the smallest complete change; preserve behavior, style and existing dependencies; avoid unrelated refactors; add focused regression coverage; run relevant checks; and inspect the final diff. If scope, behavior or design remains unsettled, observe only and report the smallest decision needed.' },
 ]
 /** An assessment rule; its instruction may also specify PR reviewers and whether to wait for their approval. */
 export const RuleSchema = z.object({ id: RuleIdSchema, name: z.string().trim().min(1).max(LIMITS.ruleName), enabled: z.boolean(),
@@ -81,8 +83,8 @@ export const PolicyConfigSchema = z.object({
   sources: z.record(z.string().regex(/^[a-z][a-z0-9-]*$/), SourcePolicySchema).default({}),
 }).strict()
 export const EvalConfigSchema = z.object({
-  mode: z.enum(['off', 'observe', 'auto']).default('observe'),
-  timeoutSeconds: z.number().int().min(LIMITS.evalTimeoutSeconds.min).max(LIMITS.evalTimeoutSeconds.max).default(120),
+  mode: z.enum(['off', 'observe', 'auto']).default('auto'),
+  timeoutSeconds: z.number().int().min(LIMITS.evalTimeoutSeconds.min).max(LIMITS.evalTimeoutSeconds.max).default(300),
   model: RoleModelSchema.nullable().default(null),
 }).strict()
 const CommandNameSchema = z.string().regex(/^[A-Za-z0-9._-]+$/).refine(name => name !== '.' && name !== '..', 'Not a command name')

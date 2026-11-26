@@ -180,7 +180,7 @@ it('leaves Feishu out of a GitHub-only deployment', async () => {
   await mount()
   await click(tab(zh.promptViewFull))
   expect([...field<HTMLSelectElement>(zh.promptPreviewTarget).options].map(option => option.textContent)).toEqual(['主 Session',
-    '执行器 Session', 'dsh-superagent-github'])
+    '执行器 Session', 'dsh-superagent-github', 'dsh-superagent-code-writing'])
 })
 
 it('shows the Sources waiting for the deployment check, and the problem on the Source that fixes it, with its link', async () => {

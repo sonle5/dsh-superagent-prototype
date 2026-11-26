@@ -100,10 +100,10 @@ The accept mode is part of the Policy:
 | Mode | Effect |
 | --- | --- |
 | `off` | Nothing inferred becomes a candidate, such as an unaddressed message, a bot's message or the follow-up of a person not on the list |
-| `observe` (default) | Inferred candidates are assessed; a positive assessment is recorded as ignore marked "would accept", and nothing is accepted |
-| `auto` | A positive assessment of an inferred candidate accepts it |
+| `observe` | Inferred candidates are assessed; a positive assessment is recorded as ignore marked "would accept", and nothing is accepted |
+| `auto` (default) | A positive assessment of an inferred candidate accepts it |
 
-Explicit requests work in every mode. Start in `observe` and switch to `auto` after reviewing the recorded Decisions. Each assessment judges every enabled rule exactly once, whether it matches or not. A proactive accept requires at least one matching rule.
+Explicit requests work in every mode. To review Decisions before anything inferred is accepted, switch to `observe`. Each assessment judges every enabled rule exactly once, whether it matches or not. A proactive accept requires at least one matching rule.
 
 Each rule describes a kind of proactive work. The Ticket's Mandate records the matched rules, and its Executor receives their names and instructions.
 
