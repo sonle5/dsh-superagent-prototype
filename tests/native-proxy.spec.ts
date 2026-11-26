@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { gzipSync } from 'node:zlib'
@@ -1920,6 +1920,35 @@ it('keeps carrier recovery open while a scoped deployment is temporarily unavail
     },
   }))
   expect(await closed).toEqual({ code: 1012, reason: 'Deployment is reconnecting' })
+})
+
+it('reconnects Desktop carriers when the gateway sign-in changes', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'dsh-native-gateway-signin-'))
+  cleanup.push(() => rmSync(state, { recursive: true, force: true }))
+  writeFileSync(join(state, 'fleet.json'), JSON.stringify({ version: 1, deployments: [] }))
+  const signedOut = JSON.stringify({ version: 1, url: 'http://127.0.0.1:9' })
+  writeFileSync(join(state, 'gateway.json'), signedOut)
+  const controller = await controllerHarness(state)
+  const { socket } = await openMux(controller)
+  let closed: { code: number; reason: string } | undefined
+  const close = new Promise<{ code: number; reason: string }>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Controller carrier remained open')), 5_000)
+    socket.once('close', (code, reason) => {
+      clearTimeout(timer)
+      closed = { code, reason: reason.toString() }
+      resolve(closed)
+    })
+  })
+
+  // Rewriting the same sign-in keeps the carrier open past the controller's one-second check.
+  writeFileSync(join(state, 'gateway.json'), signedOut)
+  await new Promise(resolve => setTimeout(resolve, 1_500))
+  expect(closed).toBeUndefined()
+
+  // Sign-in replaces the file atomically, as `completeGatewaySession` does.
+  writeFileSync(join(state, 'gateway.json.tmp'), JSON.stringify({ version: 1, url: 'http://127.0.0.1:9', token: 'gateway-session' }))
+  renameSync(join(state, 'gateway.json.tmp'), join(state, 'gateway.json'))
+  expect(await close).toEqual({ code: 1012, reason: 'Gateway sign-in changed' })
 })
 
 it('keeps Desktop Workspace, control, and event streams open when every deployment is offline', async () => {

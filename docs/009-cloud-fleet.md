@@ -95,6 +95,8 @@ The Fleet controller's `<stateDir>/gateway.json` is different from the gateway's
 
 `POST /orchestrator/api/gateway/device` starts the gateway's device flow. After the person finishes it at GitHub, `POST /orchestrator/api/gateway/session` stores the gateway token locally. The controller then reads `/gateway/api/fleet` and merges those deployments with its local `fleet.json`. Management requests use `<gateway>/gateway/api/deployment/<id>/<route>` and native Session requests use `<gateway>/gateway/native/<id>/…`; the deployment native tokens stay on the server.
 
+The controller checks `gateway.json` about once a second. When a sign-in or sign-out changes it, the controller closes Desktop's Session connections with code 1012. Desktop reconnects, and the merged Session list then includes the gateway's deployments for the current sign-in, with no app restart.
+
 ## People and deployments
 
 - `Create my cloud account` creates the person's Linux user and registry entry.

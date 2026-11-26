@@ -3,6 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-connection'
 import { isLoopbackHost } from '@deepseek-ai/dsh-host-webserver'
 import { randomBytes, randomUUID } from 'node:crypto'
+import { readFileSync, unwatchFile, watchFile } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { Readable, type Duplex } from 'node:stream'
 import { WebSocket, WebSocketServer, type RawData } from 'ws'
@@ -33,6 +34,8 @@ declare module '@deepseek-ai/cordis' {
 }
 
 const NATIVE_API = '/orchestrator/native/api'
+/** How often the controller checks `gateway.json` for a sign-in or sign-out. */
+const GATEWAY_SESSION_POLL_MS = 1_000
 const NATIVE_MUX = '/orchestrator/native/remote.mux'
 const PEER_NATIVE_MUX = 'orchestrator/native/remote.mux'
 export const INTERNAL_REQUEST_HEADER = 'x-orchestrator-request'
@@ -340,6 +343,8 @@ export class NativePeerRpcError extends Error {
 interface NativeControllerState {
   /** Controller event-stream client ids mapped to each peer's local generation. */
   readonly eventClients: Map<string, Map<string, string>>
+  /** Open Desktop carriers, whose merged streams fix their deployment list when they open. */
+  readonly carriers: Set<WebSocket>
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1485,7 +1490,9 @@ function controllerUpgrade(ctx: Context, stateDir: string, server: WebSocketServ
         }
         routes.set(message.streamId, route)
       })
+      state.carriers.add(client)
       client.on('close', () => {
+        state.carriers.delete(client)
         for (const route of [...routes.values()]) route.stream.close()
         routes.clear()
       })
@@ -1713,6 +1720,42 @@ function controlHttp(ctx: Context, stateDir: string, state: NativeControllerStat
   }
 }
 
+function gatewaySessionText(path: string): string | undefined {
+  try {
+    return readFileSync(path, 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw error
+  }
+}
+
+/**
+ * Close every Desktop carrier with 1012 when `gateway.json` changes, so Desktop reopens merged streams against the new
+ * gateway sign-in instead of the deployment list captured when they opened.
+ * @param stateDir - Controller state directory holding `gateway.json`.
+ * @param carriers - Open Desktop carriers.
+ * @returns Disposer stopping the watch.
+ */
+function reconnectOnGatewaySignIn(stateDir: string, carriers: ReadonlySet<WebSocket>): () => void {
+  const path = new Fleet(stateDir).gatewaySessionPath
+  let current = gatewaySessionText(path)
+  // Sign-in and sign-out replace the file by rename; polling the path sees the new file where event watches may not.
+  const check = (): void => {
+    let next: string | undefined
+    try {
+      next = gatewaySessionText(path)
+    } catch {
+      // An unreadable file reports its error through `Fleet`; carriers reconnect once it reads differently.
+      return
+    }
+    if (next === current) return
+    current = next
+    for (const client of carriers) client.close(1012, 'Gateway sign-in changed')
+  }
+  watchFile(path, { interval: GATEWAY_SESSION_POLL_MS }, check)
+  return () => unwatchFile(path, check)
+}
+
 /**
  * Register the controller or repository half of native DSH Session routing.
  * @param ctx - Host context with Connection and Web server services.
@@ -1728,7 +1771,8 @@ export function registerNativeTransport(ctx: Context, stateDir: string, role: Na
   const disposers: (() => void)[] = []
   const eventCookies: EventCookies = new Map()
   if (role === 'control') {
-    const state: NativeControllerState = { eventClients: new Map() }
+    const state: NativeControllerState = { eventClients: new Map(), carriers: new Set() }
+    disposers.push(reconnectOnGatewaySignIn(stateDir, state.carriers))
     const auth = repositoryAuth(ctx)
     const localNonce = randomBytes(32).toString('base64url')
     const control = controllerUpgrade(ctx, stateDir, server, state)
