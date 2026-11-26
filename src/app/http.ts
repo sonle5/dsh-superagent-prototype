@@ -317,8 +317,11 @@ function controllerRoutes(fleet: Fleet): ControllerRoutes {
       return status
     }),
     'DELETE gateway/model-proxy/claude/session': () => gateway(() => fleet.cancelClaudeLogin()),
-    'DELETE gateway/model-proxy/claude/accounts/:id': ({ params }) =>
-      gateway(() => fleet.removeAnthropicAccount(params.id)),
+    'DELETE gateway/model-proxy/claude/accounts/:id': ({ params }) => gateway(async () => {
+      const removed = await fleet.removeAnthropicAccount(params.id)
+      await sync()
+      return removed
+    }),
     'PUT gateway/model-proxy/provider/:provider': async ({ params, body }) => gateway(async () => {
       const provider = z.enum(['one-nexus', 'openai']).parse(params.provider)
       const request = z.object({ apiKey: z.string().min(1).max(16_384) }).parse(await body())

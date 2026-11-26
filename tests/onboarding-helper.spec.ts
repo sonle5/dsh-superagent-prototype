@@ -290,7 +290,7 @@ it('reports expired Claude authorization as auth-expired', () => {
     '    print(json.dumps(value))',
   ].join('\n')], { encoding: 'utf8' })) as {
     providers: { id: string; state: string; expiresAt?: string }[]
-    anthropicAccounts: { id: string; name: string; state: string; sharedPool: boolean }[]
+    anthropicAccounts: { id: string; name: string; state: string; sharedPool: boolean; prefix: string }[]
   }
 
   expect(result.providers).toMatchObject([
@@ -299,9 +299,63 @@ it('reports expired Claude authorization as auth-expired', () => {
     expect.objectContaining({ id: 'claude', label: 'Anthropic', state: 'auth-expired', expiresAt: '2025-06-01T00:00:00Z' }),
   ])
   expect(result.anthropicAccounts).toEqual([
-    { id: 'claude.json', name: 'claude', state: 'auth-expired', sharedPool: true },
-    { id: 'nexus13.json', name: 'nexus13', state: 'connected', sharedPool: false },
-    { id: 'second.json', name: 'bob@example.com', state: 'auth-expired', sharedPool: true },
+    { id: 'claude.json', name: 'claude', state: 'auth-expired', sharedPool: true, prefix: '' },
+    { id: 'nexus13.json', name: 'nexus13', state: 'connected', sharedPool: false, prefix: 'nexus13' },
+    { id: 'second.json', name: 'bob@example.com', state: 'auth-expired', sharedPool: true, prefix: '' },
+  ])
+})
+
+it('gives each unprefixed Anthropic account its own stable model prefix while the proxy serves bare ids too', () => {
+  const result = JSON.parse(execFileSync('python3', ['-c', [
+    'import json, runpy, tempfile',
+    'from pathlib import Path',
+    `module = runpy.run_path(${JSON.stringify(script)})`,
+    'overrides = module["model_proxy_status"].__globals__',
+    'overrides["config"] = lambda _request: ('
+      + '"gateway", "gateway", "/opt/dsh-superagent", _request["baseDir"])',
+    'overrides["model_proxy_config"] = lambda _request: ("/opt/cliproxyapi/cli-proxy-api", 8317, 8416)',
+    'def model_proxy_plan(_login, _base):',
+    '    return ("model-user", Path(_base) / "model-proxies" / "alice", None, {"unit": "unit.service"})',
+    'overrides["model_proxy_plan"] = model_proxy_plan',
+    'overrides["allocate_model_proxy_port"] = lambda _login, _state, _start, _end: 8317',
+    'overrides["systemctl_state"] = lambda _unit: "active"',
+    'patches = []',
+    'def management_request(_state, method, suffix, body=None):',
+    '    if suffix == "/config/access/api-keys": return []',
+    '    if suffix == "/config/api-keys/openai-compatibility": return []',
+    '    if method == "PATCH" and suffix == "/credentials/fields":',
+    '        patches.append(body)',
+    '        if body["name"] == "refused.json": raise module["ManagementHTTPError"](404)',
+    '        return {"status": "ok"}',
+    '    raise AssertionError(suffix)',
+    'overrides["management_request"] = management_request',
+    'with tempfile.TemporaryDirectory() as base:',
+    '    state = Path(base) / "model-proxies" / "alice"',
+    '    auth = state / "auth"',
+    '    auth.mkdir(parents=True)',
+    '    (state / "config.yaml").write_text("routing:\\n  force-model-prefix: false\\n")',
+    '    for name, email in [("a.json", "bob@example.com"), ("b.json", "Bob@other.example"), ("refused.json", "")]:',
+    '        (auth / name).write_text(json.dumps({"type": "claude", "email": email, "access_token": "opaque"}))',
+    '    (auth / "c.json").write_text(json.dumps({"type": "claude", "prefix": "team", "access_token": "opaque"}))',
+    '    value = module["model_proxy_status"]({',
+    '        "login": "alice", "gatewayUser": "gateway", "gatewayGroup": "gateway",',
+    '        "checkout": "/opt/dsh-superagent", "baseDir": base, "deploymentIds": []',
+    '    }, False)',
+    '    print(json.dumps({"accounts": value["anthropicAccounts"], "patches": patches}))',
+  ].join('\n')], { encoding: 'utf8' })) as {
+    accounts: { id: string; prefix: string; sharedPool: boolean }[]
+    patches: { name: string; prefix: string }[]
+  }
+
+  const second = result.patches[1]!.prefix
+  expect(second).toMatch(/^bob-[0-9a-f]{6}$/)
+  expect(result.patches).toEqual([{ name: 'a.json', prefix: 'bob' }, { name: 'b.json', prefix: second },
+    { name: 'refused.json', prefix: 'refused' }])
+  expect(result.accounts.map(({ id, prefix, sharedPool }) => ({ id, prefix, sharedPool }))).toEqual([
+    { id: 'a.json', prefix: 'bob', sharedPool: true },
+    { id: 'b.json', prefix: second, sharedPool: true },
+    { id: 'c.json', prefix: 'team', sharedPool: true },
+    { id: 'refused.json', prefix: '', sharedPool: true },
   ])
 })
 

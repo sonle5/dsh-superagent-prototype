@@ -35,6 +35,7 @@ const modelProxyStatus = vi.fn(async () => ({
     { id: 'one-nexus', label: 'OneNexus', state: 'missing' },
   ],
   deployments: [{ id: 'inference-support-loop', keyConfigured: true }],
+  anthropicAccounts: [] as { id: string; name: string; state: string; sharedPool: boolean; prefix: string }[],
 }))
 const createModelProxyKey = vi.fn(async () => ({
   id: 'inference-support-loop',
@@ -265,6 +266,33 @@ it('adds each ready proxy upstream to every fleet deployment that lacks it and l
   expect(native.nativePeerRpc).not.toHaveBeenCalledWith(target, 'settings/mutate', expect.anything())
 })
 
+it('adds one provider per connected Anthropic account behind the pooled profile and removes it once the account is gone', async () => {
+  const proxied = { ...structuredClone(profile), baseURL: 'http://127.0.0.1:8317/v1', apiKeyEnv: 'DSH_MODEL_PROXY_EXISTING' }
+  described = { writable: true, namespaces: [{ ns: 'llm-pi-ai', value: { providers: { claude: proxied } },
+    user: { providers: { claude: proxied } }, revision: 4 }] }
+  const status = await modelProxyStatus()
+  const accounts = [
+    { id: 'claude-bob@example.com.json', name: 'bob@example.com', state: 'connected', sharedPool: true, prefix: 'bob' },
+    { id: 'claude-carol@example.com.json', name: 'carol@example.com', state: 'auth-expired', sharedPool: true, prefix: 'carol' },
+    { id: 'claude-dave.json', name: 'dave', state: 'connected', sharedPool: true, prefix: '' },
+  ]
+  modelProxyStatus.mockResolvedValueOnce({ ...status, anthropicAccounts: accounts })
+  expect(await syncProxyProviders(fleet)).toEqual([{ id: 'inference-support-loop', added: ['claude-bob'] }])
+  const providers = (described.namespaces as Array<{ value: { providers: Record<string, Record<string, unknown>> } }>)[0]!.value.providers
+  expect(providers['claude-bob']).toMatchObject({ displayName: 'Claude · bob@example.com', baseURL: 'http://127.0.0.1:8317/v1',
+    apiKeyEnv: 'DSH_MODEL_PROXY_EXISTING', models: [expect.objectContaining({ id: 'bob/claude-opus-5-5(auto)' })] })
+  expect(Object.keys(providers).sort()).toEqual(['claude', 'claude-bob'])
+
+  native.nativePeerRpc.mockClear()
+  modelProxyStatus.mockResolvedValueOnce({ ...status, anthropicAccounts: accounts })
+  expect(await syncProxyProviders(fleet)).toEqual([{ id: 'inference-support-loop', added: [] }])
+  expect(native.nativePeerRpc).not.toHaveBeenCalledWith(target, 'settings/mutate', expect.anything())
+
+  modelProxyStatus.mockResolvedValueOnce({ ...status, anthropicAccounts: [] })
+  expect(await syncProxyProviders(fleet)).toEqual([{ id: 'inference-support-loop', added: [] }])
+  expect(Object.keys(providers)).toEqual(['claude'])
+})
+
 it('reports one deployment\'s failure without stopping the others, and adds nothing without a ready proxy', async () => {
   emptyDeployment()
   managementTarget.mockRejectedValueOnce(new Error('Deployment not found: gone'))
@@ -276,7 +304,7 @@ it('reports one deployment\'s failure without stopping the others, and adds noth
   native.nativePeerRpc.mockClear()
   modelProxyStatus.mockRejectedValueOnce(new Error('Gateway sign-in required'))
   expect(await syncProxyProviders(fleet)).toEqual([])
-  modelProxyStatus.mockResolvedValueOnce({ status: 'unavailable', baseURL: '', providers: [], deployments: [] })
+  modelProxyStatus.mockResolvedValueOnce({ status: 'unavailable', baseURL: '', providers: [], deployments: [], anthropicAccounts: [] })
   expect(await syncProxyProviders(fleet)).toEqual([])
   expect(native.nativePeerRpc).not.toHaveBeenCalled()
 })

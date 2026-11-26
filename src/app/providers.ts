@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto'
 import { z } from 'zod'
 import type { ModelCatalog } from '@deepseek-ai/dsh-api-session-controller/types'
 import { redactSensitive, type Fleet, type FleetNativeTarget } from './fleet.ts'
+import type { ModelProxyView } from './api.ts'
 import { NativePeerRpcError, nativePeerRpc } from './native-transport.ts'
 
 const Namespace = z.object({
@@ -436,14 +437,60 @@ export async function addProxyProvider(fleet: Fleet, deployment: string, provide
 /** The outcome of adding the person's ready model-proxy upstreams to one deployment. */
 export interface ProxySyncResult {
   id: string
-  added: ProxyPreset[]
+  /** Provider ids added: ready presets, then `claude-<prefix>` profiles for single Anthropic accounts. */
+  added: string[]
   error?: string
+}
+
+/** Provider id of the profile that routes to one Anthropic account through its model-proxy prefix. */
+const accountProviderId = (prefix: string) => `claude-${prefix}`
+
+/**
+ * Set one `claude-<prefix>` profile per connected, prefixed Anthropic account and unset account profiles whose account
+ * is gone, so Eval and Executor can pick a specific account. Account profiles share the pooled `claude` profile's proxy
+ * credential and are left alone until that profile is behind the proxy.
+ * @returns The account provider ids added.
+ */
+async function syncAccountProviders(target: FleetNativeTarget, proxy: ModelProxyView): Promise<string[]> {
+  const namespace = (await settings(target)).namespaces.find(item => item.ns === 'llm-pi-ai')
+  if (!namespace) return []
+  const profiles = providerProfiles(namespace.value)
+  const pool = profiles.claude
+  if (pool?.baseURL !== proxy.baseURL || typeof pool.apiKeyEnv !== 'string' || pool.apiKeyEnv === '') return []
+  const wanted = new Map(proxy.anthropicAccounts
+    .filter(account => account.state === 'connected' && account.prefix !== '')
+    .map(account => {
+      const base = PRESET_PROFILES.claude
+      const [model] = base.models as JsonRecord[]
+      return [accountProviderId(account.prefix), {
+        ...structuredClone(base),
+        displayName: `Claude · ${account.name}`,
+        models: [{ ...structuredClone(model), id: `${account.prefix}/${String(model!.id)}` }],
+        api: 'openai-completions', baseURL: proxy.baseURL, apiKeyEnv: pool.apiKeyEnv,
+      } satisfies JsonRecord] as const
+    }))
+  // An account profile is a claude-* profile behind this proxy whose models all carry an account prefix.
+  const stale = Object.entries(profiles).filter(([id, profile]) => id.startsWith('claude-') && !wanted.has(id)
+    && profile.baseURL === proxy.baseURL && Array.isArray(profile.models) && profile.models.length > 0
+    && profile.models.every(model => isRecord(model) && typeof model.id === 'string' && model.id.includes('/')))
+  const added = [...wanted.keys()].filter(id => profiles[id] === undefined)
+  const changed = [...wanted].filter(([id, profile]) => JSON.stringify(profiles[id]) !== JSON.stringify(profile))
+  if (changed.length === 0 && stale.length === 0) return []
+  await rpc(target, 'settings/mutate', {
+    ns: 'llm-pi-ai',
+    ops: [
+      ...changed.map(([id, profile]) => ({ op: 'set', path: ['providers', id], value: profile })),
+      ...stale.map(([id]) => ({ op: 'unset', path: ['providers', id] })),
+    ],
+    expectedRevision: namespace.revision,
+  })
+  return added
 }
 
 /**
  * Add every upstream that is connected or configured in the person's model proxy to each listed deployment, or to every
- * deployment in the fleet when none are listed. A deployment that already has a preset profile behind the proxy is left
- * unchanged. One deployment's failure is reported in its result and does not stop the others; an unavailable proxy
+ * deployment in the fleet when none are listed, then sync its per-account Anthropic profiles. A deployment that already
+ * has a preset profile behind the proxy keeps it. One deployment's failure is reported in its result and does not stop the others; an unavailable proxy
  * adds nothing.
  */
 export async function syncProxyProviders(fleet: Fleet, deployments?: readonly string[]): Promise<ProxySyncResult[]> {
@@ -454,19 +501,20 @@ export async function syncProxyProviders(fleet: Fleet, deployments?: readonly st
     const state = proxy.providers.find(item => item.id === preset)?.state
     return state === 'connected' || state === 'configured'
   })
-  if (ready.length === 0) return []
   const ids = deployments ?? (await fleet.view()).deployments.map(item => item.id)
   const results: ProxySyncResult[] = []
   for (const id of ids) {
-    const added: ProxyPreset[] = []
+    const added: string[] = []
     try {
-      const namespace = (await settings(await targetOf(fleet, id))).namespaces.find(item => item.ns === 'llm-pi-ai')
+      const target = await targetOf(fleet, id)
+      const namespace = (await settings(target)).namespaces.find(item => item.ns === 'llm-pi-ai')
       const profiles = namespace ? providerProfiles(namespace.value) : {}
       for (const preset of ready) {
         if (profiles[preset]?.baseURL === proxy.baseURL) continue
         await addProxyProvider(fleet, id, preset)
         added.push(preset)
       }
+      added.push(...await syncAccountProviders(target, proxy))
       results.push({ id, added })
     } catch (error) {
       results.push({ id, added, error: redactSensitive(error instanceof Error ? error.message : String(error)) })

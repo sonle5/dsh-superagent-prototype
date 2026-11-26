@@ -40,6 +40,8 @@ export interface ModelProxyView {
     name: string
     state: 'connected' | 'sign-in-required' | 'auth-expired'
     sharedPool: boolean
+    /** Model-name prefix that routes to this account alone; empty when the account has none. */
+    prefix: string
   }[]
 }
 

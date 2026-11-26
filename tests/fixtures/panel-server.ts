@@ -333,8 +333,8 @@ function initial(): PanelServer {
         { id: 'sglang', keyConfigured: true },
       ],
       anthropicAccounts: [
-        { id: 'claude-alice@example.com.json', name: 'alice@example.com', state: 'connected', sharedPool: true },
-        { id: 'nexus13-legacy.json', name: 'nexus13-legacy', state: 'connected', sharedPool: false },
+        { id: 'claude-alice@example.com.json', name: 'alice@example.com', state: 'connected', sharedPool: true, prefix: 'alice' },
+        { id: 'nexus13-legacy.json', name: 'nexus13-legacy', state: 'connected', sharedPool: false, prefix: 'nexus13' },
       ],
     },
     claudeLogin: { state: 'idle' },

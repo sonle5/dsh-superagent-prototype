@@ -153,6 +153,7 @@ const ModelProxy = z.object({
     name: z.string().min(1),
     state: z.enum(['connected', 'sign-in-required', 'auth-expired']),
     sharedPool: z.boolean(),
+    prefix: z.string().max(64).default(''),
   })).default([]),
 })
 const ClaudeConnect = z.object({
