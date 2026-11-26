@@ -30,7 +30,7 @@ import { executorLoad, ticketDetail, ticketList } from './views/tickets.ts'
 import { Fleet, FleetControlError, managementApi, redactSensitive, type FleetAction, type FleetNativeTarget } from './fleet.ts'
 import { INTERNAL_HEADER } from './native-transport.ts'
 import { matchesNativeToken } from './native-auth.ts'
-import { ProviderControlError, configureDeploymentModelProxy, providerControl, resetProvider, saveProvider,
+import { ProviderControlError, addProxyProvider, configureDeploymentModelProxy, providerControl, resetProvider, saveProvider,
   setProviderCredential } from './providers.ts'
 import { LIMITS } from '../limits.ts'
 
@@ -152,7 +152,7 @@ type GatewayRouteKey = 'GET gateway/status' | 'POST gateway/device' | 'POST gate
   | 'DELETE gateway/model-proxy/claude/session' | 'PUT gateway/model-proxy/provider/:provider'
   | 'POST gateway/person' | 'POST gateway/deployment' | 'POST gateway/deployment/:id/credentials'
 type FleetRouteKey = 'GET fleet' | 'POST deployments/:id/select' | 'POST fleet/:id/start' | 'POST fleet/:id/stop'
-  | 'POST fleet/:id/restart' | 'POST fleet/:id/model-proxy'
+  | 'POST fleet/:id/restart' | 'POST fleet/:id/model-proxy' | 'POST fleet/:id/model-proxy/providers/:provider'
 type ControllerRouteKey = GatewayRouteKey | FleetRouteKey
 type ProviderRouteKey = 'GET fleet/:id/providers' | 'PUT fleet/:id/providers/:provider'
   | 'POST fleet/:id/providers/:provider/credential' | 'DELETE fleet/:id/providers/:provider'
@@ -198,6 +198,7 @@ function routes(runtime: HttpHost, fleet: Fleet): Routes {
     'POST fleet/:id/stop': ({ params }) => control(params.id, 'stop'),
     'POST fleet/:id/restart': ({ params }) => control(params.id, 'restart'),
     'POST fleet/:id/model-proxy': ({ params }) => configureDeploymentModelProxy(fleet, params.id),
+    'POST fleet/:id/model-proxy/providers/:provider': ({ params }) => addProxyProvider(fleet, params.id, params.provider),
     'GET state': () => stateView(runtime),
     'GET overview': () => overview(views(runtime), runtime.health, policyVersion(store.settings()),
       executorLoad(store, runtime.executor.activeCount()), runtime.setupProblem ?? runtime.feishuProblem),
@@ -315,6 +316,7 @@ function controllerRoutes(fleet: Fleet): ControllerRoutes {
     'POST fleet/:id/stop': ({ params }) => control(params.id, 'stop'),
     'POST fleet/:id/restart': ({ params }) => control(params.id, 'restart'),
     'POST fleet/:id/model-proxy': ({ params }) => configureDeploymentModelProxy(fleet, params.id),
+    'POST fleet/:id/model-proxy/providers/:provider': ({ params }) => addProxyProvider(fleet, params.id, params.provider),
     'GET fleet/:id/providers': ({ params }) => providerControl(fleet, params.id),
     'PUT fleet/:id/providers/:provider': async ({ params, body }) =>
       saveProvider(fleet, params.id, params.provider, await body()),

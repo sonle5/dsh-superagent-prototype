@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 // Deployment-scoped provider, credential, and model management.
-import { expect, it } from 'vitest'
+import { expect, it, onTestFinished, vi } from 'vitest'
 import { zh } from '../src/client/locales.ts'
 import { all, at, click, field, find, mount, settle, text, type, usePanel } from './fixtures/panel.tsx'
 import { server } from './fixtures/panel-server.ts'
@@ -104,4 +104,42 @@ it('keeps provider edits isolated when Desktop switches deployments', async () =
   await type(field<HTMLSelectElement>(zh.deploymentContext), 'inference-support-loop')
   await settle()
   expect(text()).toContain('Inference only')
+})
+
+it('adds Claude in one step by signing in, without filling in the provider form', async () => {
+  server.modelProxy.providers = server.modelProxy.providers.map(item => item.id === 'claude' ? { ...item, state: 'sign-in-required' } : item)
+  const opened = { opener: {}, location: { replace: vi.fn() }, close: vi.fn() }
+  vi.stubGlobal('open', vi.fn(() => opened))
+  onTestFinished(() => { vi.unstubAllGlobals() })
+  providersPage()
+  await mount()
+  await click(zh.providerAdd)
+  await click(zh.accessClaudeConnect)
+  expect(opened.location.replace).toHaveBeenCalledWith('https://claude.example/authorize')
+  expect(text()).toContain(zh.accessClaudeWaiting)
+  server.claudeLogin = { state: 'connected' }
+  server.modelProxy.providers = server.modelProxy.providers.map(item => item.id === 'claude' ? { ...item, state: 'connected' } : item)
+  await vi.waitFor(() => expect(server.requests.some(request =>
+    request.method === 'POST' && request.path === 'fleet/inference-support-loop/model-proxy/providers/claude')).toBe(true),
+  { timeout: 3_500 })
+  await vi.waitFor(() => expect(document.querySelector('.dt-provider-modal')).toBeNull())
+  const added = server.providerControls['inference-support-loop']!.providers.find(item => item.id === 'claude')!
+  expect(added.baseURL).toBe(server.modelProxy.baseURL)
+})
+
+it('adds OneNexus in one step from only its API key, which reaches the model proxy and not the deployment', async () => {
+  server.modelProxy.providers = server.modelProxy.providers.map(item => item.id === 'one-nexus' ? { ...item, state: 'missing' } : item)
+  providersPage()
+  await mount()
+  await click(zh.providerAdd)
+  await type(modalField(zh.providerQuickNexusKey), 'sk-onenexus-private')
+  await click(zh.providerQuickAddNexus)
+  expect(server.requests.find(request => request.path === 'gateway/model-proxy/provider/one-nexus')).toMatchObject({
+    method: 'PUT', body: { apiKey: 'sk-onenexus-private' },
+  })
+  expect(server.requests.some(request =>
+    request.method === 'POST' && request.path === 'fleet/inference-support-loop/model-proxy/providers/one-nexus')).toBe(true)
+  expect(JSON.stringify(server.providerControls['inference-support-loop'])).not.toContain('sk-onenexus-private')
+  expect(document.querySelector('.dt-provider-modal')).toBeNull()
+  expect(text()).toContain(zh.providerQuickAdded.replace('{provider}', 'OneNexus'))
 })

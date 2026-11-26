@@ -60,6 +60,12 @@ class OnboardingError(Exception):
     pass
 
 
+class ManagementHTTPError(OnboardingError):
+    def __init__(self, code):
+        super().__init__(f"model proxy management request failed with HTTP {code}")
+        self.code = code
+
+
 def require(value, pattern, name):
     if not isinstance(value, str) or pattern.fullmatch(value) is None:
         raise OnboardingError(f"invalid {name}")
@@ -622,7 +628,7 @@ def management_request(state, method, suffix, body=None, secret=None):
         with urllib.request.urlopen(request, timeout=15) as response:
             payload = response.read()
     except urllib.error.HTTPError as error:
-        raise OnboardingError(f"model proxy management request failed with HTTP {error.code}") from error
+        raise ManagementHTTPError(error.code) from error
     except (urllib.error.URLError, TimeoutError) as error:
         raise OnboardingError("model proxy management API is unavailable") from error
     if not payload:
@@ -631,6 +637,16 @@ def management_request(state, method, suffix, body=None, secret=None):
         return json.loads(payload)
     except json.JSONDecodeError as error:
         raise OnboardingError("model proxy management API returned invalid JSON") from error
+
+
+def openai_compatibility_providers(state):
+    # CLIProxyAPI answers 404 instead of [] while the list has no entries.
+    try:
+        return management_request(state, "GET", "/config/api-keys/openai-compatibility") or []
+    except ManagementHTTPError as error:
+        if error.code == 404:
+            return []
+        raise
 
 
 def parse_auth_time(value):
@@ -668,7 +684,7 @@ def model_proxy_status(request, dry):
         return {**plan, "status": active, "baseURL": f"http://127.0.0.1:{port}/v1",
                 "providers": [], "deployments": []}
     keys = management_request(state, "GET", "/config/access/api-keys")
-    providers = management_request(state, "GET", "/config/api-keys/openai-compatibility") or []
+    providers = openai_compatibility_providers(state)
     provider_names = {
         item.get("name"): bool(item.get("keys"))
         for item in providers
@@ -878,7 +894,7 @@ def provider_key_set(request, dry):
     _user, state, _legacy, _plan = model_proxy_plan(login, base)
     if dry:
         return {"provider": provider, "configured": True}
-    providers = management_request(state, "GET", "/config/api-keys/openai-compatibility") or []
+    providers = openai_compatibility_providers(state)
     if not isinstance(providers, list) or any(not isinstance(item, dict) for item in providers):
         raise OnboardingError("model proxy returned an invalid provider list")
     updated = []

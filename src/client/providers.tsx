@@ -3,7 +3,7 @@ import { useEffect, useState, type FormEvent } from 'react'
 import type { ApiResponse } from '../app/api.ts'
 import { usePoll } from './api.ts'
 import { Button, Icon, Input, Modal, Tag } from './controls.tsx'
-import { usePanel } from './provider.tsx'
+import { useAction, usePanel } from './provider.tsx'
 import { Field, Fields } from './settings-kit.tsx'
 import { errorText } from './text.ts'
 import { ConfirmButton, Hint, LoadState } from './widgets.tsx'
@@ -12,6 +12,8 @@ type ProviderControl = ApiResponse<'GET fleet/:id/providers'>
 type Provider = ProviderControl['providers'][number]
 type ProviderModel = Provider['models'][number]
 type ProviderApi = 'openai-completions' | 'anthropic-messages' | 'openai-responses'
+type ProxyProvider = ApiResponse<'GET gateway/model-proxy'>['providers'][number]
+type ProxyState = ProxyProvider['state']
 
 interface ModelDraft {
   id: string
@@ -57,6 +59,82 @@ const providerDraft = (provider?: Provider): ProviderDraft => provider ? {
   credentialRef: '',
   apiKey: '',
   models: [blankModel()],
+}
+
+const ready = (state: ProxyState | undefined) => state === 'connected' || state === 'configured'
+
+/** One-step setup for upstreams the protected model proxy holds: sign in or paste a key, and the provider is added. */
+function QuickSetup({ onAdded }: { onAdded: () => Promise<void> }) {
+  const { t, call, deployment, notify } = usePanel()
+  const proxy = usePoll(() => call('GET gateway/model-proxy'), [call], 15_000)
+  const [claudeWaiting, setClaudeWaiting] = useState(false)
+  const [nexusKey, setNexusKey] = useState('')
+  const claude = usePoll(
+    () => claudeWaiting ? call('GET gateway/model-proxy/claude/status') : Promise.resolve(undefined),
+    [claudeWaiting, call],
+    2_000,
+  )
+  const state = (id: ProxyProvider['id']) => proxy.data?.providers.find(item => item.id === id)?.state
+  const add = useAction(async (preset: 'claude' | 'one-nexus') => {
+    if (!deployment) return
+    await call('POST fleet/:id/model-proxy/providers/:provider', { id: deployment.id, provider: preset })
+    notify(t('providerQuickAdded', { provider: preset === 'claude' ? 'Claude' : 'OneNexus' }))
+    await onAdded()
+  })
+  const addNexus = useAction(async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (nexusKey) {
+      await call('PUT gateway/model-proxy/provider/:provider', { provider: 'one-nexus', body: { apiKey: nexusKey } })
+      setNexusKey('')
+    }
+    await add.run('one-nexus')
+  })
+  useEffect(() => {
+    if (claude.data?.state === 'connected') {
+      setClaudeWaiting(false)
+      void add.run('claude')
+    } else if (claude.data?.state === 'error') {
+      setClaudeWaiting(false)
+      if (claude.data.error) notify(claude.data.error)
+    }
+    // Only a status change starts the add; `add` is recreated on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [claude.data, notify])
+  const connectClaude = async () => {
+    if (ready(state('claude'))) return void add.run('claude')
+    const opened = window.open('about:blank', 'dsh-claude-login')
+    if (opened) opened.opener = null
+    try {
+      const started = await call('POST gateway/model-proxy/claude/connect')
+      setClaudeWaiting(true)
+      if (opened) opened.location.replace(started.url)
+    } catch (failure) {
+      opened?.close()
+      notify(errorText(failure))
+    }
+  }
+  if (!proxy.data) {
+    return proxy.error ? <Hint>{t('providerQuickUnavailable')}</Hint> : <LoadState loading />
+  }
+  const busy = add.busy || addNexus.busy || !deployment
+  return <div className="dt-provider-quick">
+    <article className="dt-provider-quick-item">
+      <div><strong>Claude</strong><p className="dt-hint">{t('providerQuickClaudeHint')}</p></div>
+      <Button variant="primary" size="sm" disabled={busy || claudeWaiting} onClick={() => { void connectClaude() }}>
+        {claudeWaiting ? t('accessClaudeWaiting') : ready(state('claude')) ? t('providerQuickAddClaude') : t('accessClaudeConnect')}
+      </Button>
+    </article>
+    <form className="dt-provider-quick-item" onSubmit={event => { void addNexus.run(event) }}>
+      <div><strong>OneNexus</strong><p className="dt-hint">{t('providerQuickNexusHint')}</p></div>
+      <div className="dt-provider-quick-key">
+        <Input type="password" autoComplete="new-password" aria-label={t('providerQuickNexusKey')} value={nexusKey}
+          placeholder={ready(state('one-nexus')) ? t('providerKeyConfiguredPlaceholder') : t('providerQuickNexusKey')}
+          disabled={busy} onChange={event => setNexusKey(event.target.value)} />
+        <Button type="submit" variant="primary" size="sm" disabled={busy || (!nexusKey && !ready(state('one-nexus')))}>
+          {t('providerQuickAddNexus')}</Button>
+      </div>
+    </form>
+  </div>
 }
 
 function ProviderEditor({ provider, revision, onClose, onSaved }: {
@@ -124,29 +202,12 @@ function ProviderEditor({ provider, revision, onClose, onSaved }: {
       <Button variant="ghost" onClick={onClose}>{t('cancel')}</Button>
       <Button variant="primary" type="submit" form={form} disabled={busy}>{t('save')}</Button>
     </>}>
+    {!provider && <>
+      <QuickSetup onAdded={async () => { await onSaved(); onClose() }} />
+      <strong className="dt-provider-custom-title">{t('providerCustomTitle')}</strong>
+    </>}
     <form id={form} className="dt-form" onSubmit={event => { void submit(event) }}>
       <Fields disabled={busy}>
-        {!provider && <div className="dt-provider-presets">
-          <span>{t('providerPreset')}</span>
-          <Button variant="outline" size="sm" onClick={() => setDraft({
-            ...providerDraft(),
-            id: 'one-nexus',
-            displayName: 'One Nexus',
-            baseURL: 'https://onenexus-ws.onenexus.cloud/v1',
-            credentialRef: 'ONENEXUS_API_KEY',
-            models: [{ id: 'glm-5.3-sontinh', name: 'GLM 5.3', contextWindow: '330000', maxTokens: '65000',
-              reasoning: true, image: false }, { id: 'dsv41f-thuytinh', name: 'DeepSeek V4.1 Flash', contextWindow: '',
-              maxTokens: '', reasoning: true, image: false }],
-          })}>OneNexus</Button>
-          <Button variant="outline" size="sm" onClick={() => setDraft({
-            ...providerDraft(),
-            id: 'claude-cpa',
-            displayName: 'Claude via CPA',
-            baseURL: 'https://your-cpa.example/v1',
-            credentialRef: 'CLAUDE_API_KEY',
-            models: [{ ...blankModel(), id: 'claude-opus-5-5(auto)', name: 'Claude Opus 5.5', reasoning: true, image: true }],
-          })}>Claude / CPA</Button>
-        </div>}
         <div className="dt-provider-form-grid">
           <Field label={t('providerId')}><Input value={draft.id} disabled={!!provider} spellCheck={false}
             onChange={event => edit({ id: event.target.value })} /></Field>

@@ -384,6 +384,96 @@ export async function configureDeploymentModelProxy(fleet: Fleet, deployment: st
   }
 }
 
+/** Model-proxy upstreams a deployment can add in one step, without filling in a provider form. */
+export const PROXY_PRESETS = ['claude', 'one-nexus'] as const
+export type ProxyPreset = typeof PROXY_PRESETS[number]
+
+/** Model ids are the names the model proxy serves for each upstream. */
+const PRESET_PROFILES: Record<ProxyPreset, JsonRecord> = {
+  claude: {
+    displayName: 'Claude',
+    models: [{ id: 'claude-opus-5-5(auto)', name: 'Claude / Opus 5.5 (auto)', contextWindow: 321000, maxTokens: 65000,
+      input: ['text', 'image'], reasoningEfforts: false }],
+    compat: { maxTokensField: 'max_tokens', supportsReasoningEffort: false, thinkingFormat: 'openai' },
+  },
+  'one-nexus': {
+    displayName: 'One Nexus',
+    models: [
+      { id: 'glm-5.3-sontinh', name: 'GLM 5.3', contextWindow: 330000, maxTokens: 65000, input: ['text'],
+        reasoningEfforts: reasoningEfforts() },
+      { id: 'dsv41f-thuytinh', name: 'DeepSeek V4.1 Flash', input: ['text'], reasoningEfforts: reasoningEfforts() },
+    ],
+    compat: { maxTokensField: 'max_tokens', supportsReasoningEffort: true, thinkingFormat: 'qwen' },
+  },
+}
+
+function presetProfile(preset: ProxyPreset, baseURL: string, credentialRef: string): JsonRecord {
+  return { ...structuredClone(PRESET_PROFILES[preset]), api: 'openai-completions', baseURL, apiKeyEnv: credentialRef }
+}
+
+/**
+ * Add one proxy-backed provider profile for an upstream the person already connected to their model proxy.
+ * A deployment already behind the proxy reuses its proxy credential; otherwise a new deployment key is created,
+ * and the key, credential, and profile are rolled back together on failure.
+ */
+export async function addProxyProvider(fleet: Fleet, deployment: string, provider: string): Promise<ProviderControlView> {
+  const parsed = z.enum(PROXY_PRESETS).safeParse(provider)
+  if (!parsed.success) throw new ProviderControlError(404, `No one-step setup for provider: ${provider}`)
+  const preset = parsed.data
+  const target = await targetOf(fleet, deployment)
+  const proxy = await fleet.modelProxyStatus()
+  if (proxy.status !== 'ready') {
+    throw new ProviderControlError(409, `The protected model proxy is ${proxy.status}`)
+  }
+  const upstream = proxy.providers.find(item => item.id === preset)
+  if (upstream?.state !== 'connected' && upstream?.state !== 'configured') {
+    throw new ProviderControlError(409, `${upstream?.label ?? preset} is not connected to the model proxy`)
+  }
+  const described = await settings(target)
+  const namespace = described.namespaces.find(item => item.ns === 'llm-pi-ai')
+  if (!namespace) throw new ProviderControlError(502, 'This deployment has no llm-pi-ai settings namespace')
+  const previous = providerProfiles(namespace.value)[preset]
+  const set = (value: JsonRecord, expectedRevision: number) => rpc(target, 'settings/mutate', {
+    ns: 'llm-pi-ai', ops: [{ op: 'set', path: ['providers', preset], value }], expectedRevision,
+  })
+
+  const proxiedRefs = [...new Set(Object.values(providerProfiles(namespace.value)).flatMap(profile =>
+    profile.baseURL === proxy.baseURL && typeof profile.apiKeyEnv === 'string' && profile.apiKeyEnv !== ''
+      ? [profile.apiKeyEnv] : []))]
+  if (proxiedRefs.length > 0) {
+    const credentials = z.record(z.string(), CredentialInfo).parse(await rpc(target, 'credentials/describe', { refs: proxiedRefs }))
+    const reusable = proxiedRefs.find(ref => credentials[ref]?.configured)
+    if (reusable !== undefined) {
+      await set(presetProfile(preset, proxy.baseURL, reusable), namespace.revision)
+      return readView(target)
+    }
+  }
+
+  const created = await fleet.createModelProxyKey(deployment)
+  const credentialRef = proxyCredentialRef(deployment)
+  let credentialWritten = false
+  let settingsRevision: number | undefined
+  try {
+    await rpc(target, 'credentials/set', { ref: credentialRef, value: created.value })
+    credentialWritten = true
+    const mutated = z.object({ revision: z.number().int().nonnegative() })
+      .parse(await set(presetProfile(preset, proxy.baseURL, credentialRef), namespace.revision))
+    settingsRevision = mutated.revision
+    await fleet.finalizeModelProxyKey(deployment, created.value)
+    return await readView(target)
+  } catch (error) {
+    if (settingsRevision !== undefined) {
+      await (previous === undefined
+        ? rpc(target, 'settings/mutate', { ns: 'llm-pi-ai', ops: [{ op: 'unset', path: ['providers', preset] }],
+          expectedRevision: settingsRevision })
+        : set(previous, settingsRevision)).catch(() => undefined)
+    }
+    if (credentialWritten) await rpc(target, 'credentials/unset', { ref: credentialRef }).catch(() => undefined)
+    await fleet.revokeModelProxyKey(deployment, created.value).catch(() => undefined)
+    throw error
+  }
+}
+
 /** Remove this deployment's user-layer provider override; a composition base profile remains effective. */
 export async function resetProvider(fleet: Fleet, deployment: string, provider: string, raw: unknown): Promise<ProviderControlView> {
   const input = ResetInput.parse(raw)

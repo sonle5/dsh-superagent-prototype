@@ -385,6 +385,39 @@ it('reports a controlled error when protected proxy management has no port', () 
   })
 })
 
+it('treats a missing provider list as empty when setting a provider key', async () => {
+  const baseDir = mkdtempSync(join(tmpdir(), 'dsh-model-proxy-providers-'))
+  const state = join(baseDir, 'model-proxies', 'alice')
+  execFileSync('mkdir', ['-p', state])
+  execFileSync('python3', ['-c', [
+    'import yaml',
+    'from pathlib import Path',
+    `state = Path(${JSON.stringify(state)})`,
+    '(state / "config.yaml").write_text(yaml.safe_dump({"server": {"port": 8401}}))',
+    '(state / "management-secret").write_text("management-secret")',
+  ].join('\n')])
+
+  const result = execFileSync('python3', ['-c', [
+    'import json, runpy',
+    `module = runpy.run_path(${JSON.stringify(script)})`,
+    'requests = []',
+    'def request(_state, method, suffix, body=None, secret=None):',
+    '    if method == "GET":',
+    '        raise module["ManagementHTTPError"](404)',
+    '    requests.append(body)',
+    '    return None',
+    "module['provider_key_set'].__globals__['management_request'] = request",
+    'value = module["provider_key_set"]({',
+    '    "login": "alice", "provider": "one-nexus", "apiKey": "replacement-key",',
+    `    "gatewayUser": "gateway", "gatewayGroup": "gateway", "checkout": "/opt/dsh-superagent", "baseDir": ${JSON.stringify(baseDir)},`,
+    '    "modelProxy": {"binary": "/opt/cliproxyapi/cli-proxy-api", "portRange": {"start": 8317, "end": 9316}},',
+    '}, False)',
+    'print(json.dumps({"result": value, "names": [item["name"] for item in requests[0]]}))',
+  ].join('\n')], { encoding: 'utf8' })
+
+  expect(JSON.parse(result)).toEqual({ result: { provider: 'one-nexus', configured: true }, names: ['one-nexus'] })
+})
+
 it('adds supported OpenAI replay models without dropping existing provider models', async () => {
   const baseDir = mkdtempSync(join(tmpdir(), 'dsh-model-proxy-providers-'))
   const state = join(baseDir, 'model-proxies', 'alice')

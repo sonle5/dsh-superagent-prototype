@@ -12,7 +12,7 @@ const native = vi.hoisted(() => {
 vi.mock('../src/app/native-transport.ts', () => native)
 
 import {
-  configureDeploymentModelProxy, providerControl, resetProvider, saveProvider, setProviderCredential,
+  addProxyProvider, configureDeploymentModelProxy, providerControl, resetProvider, saveProvider, setProviderCredential,
 } from '../src/app/providers.ts'
 
 const target = {
@@ -30,7 +30,10 @@ const managementTarget = vi.fn(async () => target)
 const modelProxyStatus = vi.fn(async () => ({
   status: 'ready',
   baseURL: 'http://127.0.0.1:8317/v1',
-  providers: [],
+  providers: [
+    { id: 'claude', label: 'Claude', state: 'connected' },
+    { id: 'one-nexus', label: 'OneNexus', state: 'missing' },
+  ],
   deployments: [{ id: 'inference-support-loop', keyConfigured: true }],
 }))
 const createModelProxyKey = vi.fn(async () => ({
@@ -217,4 +220,58 @@ it('rolls provider configuration and the new credential back when migration cann
   expect(native.nativePeerRpc).toHaveBeenCalledWith(target, 'credentials/unset', { ref })
   expect(revokeModelProxyKey).toHaveBeenCalledWith('inference-support-loop', 'dsh-inference-support-loop-a-new-private-proxy-key')
   expect(native.nativePeerRpc).not.toHaveBeenCalledWith(target, 'credentials/unset', { ref: 'ONENEXUS_API_KEY' })
+})
+
+const emptyDeployment = () => {
+  described = { writable: true, namespaces: [{ ns: 'llm-pi-ai', value: { providers: {} }, user: { providers: {} }, revision: 4 }] }
+}
+
+it('adds a connected proxy provider to an empty deployment with a new protected proxy key', async () => {
+  emptyDeployment()
+  const view = await addProxyProvider(fleet, 'inference-support-loop', 'claude')
+  const set = native.nativePeerRpc.mock.calls.find(([, method]) => method === 'credentials/set')
+  const ref = (set?.[2] as { ref: string }).ref
+  expect(ref).toMatch(/^DSH_MODEL_PROXY_INFERENCE_SUPPORT_LOOP_[A-F0-9]{8}$/)
+  expect(native.nativePeerRpc).toHaveBeenCalledWith(target, 'settings/mutate', {
+    ns: 'llm-pi-ai', expectedRevision: 4,
+    ops: [{ op: 'set', path: ['providers', 'claude'], value: expect.objectContaining({
+      displayName: 'Claude', api: 'openai-completions', baseURL: 'http://127.0.0.1:8317/v1', apiKeyEnv: ref,
+    }) }],
+  })
+  expect(finalizeModelProxyKey).toHaveBeenCalledWith('inference-support-loop', 'dsh-inference-support-loop-a-new-private-proxy-key')
+  expect(view.providers).toEqual([expect.objectContaining({ id: 'claude', credentialRef: ref })])
+  expect(JSON.stringify(view)).not.toContain('dsh-inference-support-loop-a-new-private-proxy-key')
+})
+
+it('reuses the deployment\'s configured proxy credential instead of issuing another proxy key', async () => {
+  const proxied = { ...structuredClone(profile), baseURL: 'http://127.0.0.1:8317/v1', apiKeyEnv: 'DSH_MODEL_PROXY_EXISTING' }
+  described = { writable: true, namespaces: [{ ns: 'llm-pi-ai', value: { providers: { 'one-nexus': proxied } },
+    user: { providers: { 'one-nexus': proxied } }, revision: 4 }] }
+  await addProxyProvider(fleet, 'inference-support-loop', 'claude')
+  expect(createModelProxyKey).not.toHaveBeenCalled()
+  expect(native.nativePeerRpc).not.toHaveBeenCalledWith(target, 'credentials/set', expect.anything())
+  expect(native.nativePeerRpc).toHaveBeenCalledWith(target, 'settings/mutate', expect.objectContaining({
+    ops: [{ op: 'set', path: ['providers', 'claude'], value: expect.objectContaining({ apiKeyEnv: 'DSH_MODEL_PROXY_EXISTING' }) }],
+  }))
+})
+
+it('refuses one-step setup until the provider is connected to the model proxy', async () => {
+  emptyDeployment()
+  await expect(addProxyProvider(fleet, 'inference-support-loop', 'one-nexus'))
+    .rejects.toMatchObject({ status: 409, message: 'OneNexus is not connected to the model proxy' })
+  await expect(addProxyProvider(fleet, 'inference-support-loop', 'openai')).rejects.toMatchObject({ status: 404 })
+  expect(createModelProxyKey).not.toHaveBeenCalled()
+  expect(native.nativePeerRpc).not.toHaveBeenCalledWith(target, 'settings/mutate', expect.anything())
+})
+
+it('removes the new provider, credential, and proxy key when one-step setup cannot be finalized', async () => {
+  emptyDeployment()
+  finalizeModelProxyKey.mockRejectedValueOnce(new Error('proxy key finalization failed'))
+  await expect(addProxyProvider(fleet, 'inference-support-loop', 'claude')).rejects.toThrow('proxy key finalization failed')
+  const ref = (native.nativePeerRpc.mock.calls.find(([, method]) => method === 'credentials/set')?.[2] as { ref: string }).ref
+  expect(native.nativePeerRpc).toHaveBeenCalledWith(target, 'settings/mutate', {
+    ns: 'llm-pi-ai', ops: [{ op: 'unset', path: ['providers', 'claude'] }], expectedRevision: 5,
+  })
+  expect(native.nativePeerRpc).toHaveBeenCalledWith(target, 'credentials/unset', { ref })
+  expect(revokeModelProxyKey).toHaveBeenCalledWith('inference-support-loop', 'dsh-inference-support-loop-a-new-private-proxy-key')
 })

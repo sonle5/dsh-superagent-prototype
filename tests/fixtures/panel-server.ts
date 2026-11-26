@@ -468,6 +468,23 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
     ]
     return providerControl(params.id)!
   } },
+  'POST fleet/:id/model-proxy/providers/:provider': { answer: ({ params }) => {
+    const control = controlOf(params.id)
+    if (!control) return refuse(404, `Deployment not found: ${params.id}`)
+    const upstream = server.modelProxy.providers.find(item => item.id === params.provider)
+    if (upstream?.state !== 'connected' && upstream?.state !== 'configured') {
+      return refuse(409, `${upstream?.label ?? params.provider} is not connected to the model proxy`)
+    }
+    control.providers = [...control.providers.filter(item => item.id !== params.provider), {
+      id: params.provider, displayName: upstream.label, api: 'openai-completions', baseURL: server.modelProxy.baseURL,
+      credentialRef: `DSH_MODEL_PROXY_${params.id.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_FIXTURE`,
+      credential: { configured: true, source: 'user', writable: true },
+      models: [{ id: `${params.provider}-model`, name: `${upstream.label} model`, reasoning: false, image: false }],
+      active: true, configured: true, removable: true,
+    }]
+    control.revision++
+    return providerControl(params.id)!
+  } },
   'GET fleet/:id/providers': { answer: ({ params }) => providerControl(params.id)
     ?? refuse(404, `Deployment not found: ${params.id}`) },
   'PUT fleet/:id/providers/:provider': { body: true, answer: ({ params, body }) => {

@@ -88,6 +88,7 @@ export interface Api {
     configured: true
   } }
   'POST fleet/:id/model-proxy': { response: ProviderControlView }
+  'POST fleet/:id/model-proxy/providers/:provider': { response: ProviderControlView }
   'POST deployments/:id/select': { response: { selected: string } }
   'POST fleet/:id/start': { response: { id: string; action: 'start'; code: number; output: string } }
   'POST fleet/:id/stop': { response: { id: string; action: 'stop'; code: number; output: string } }
@@ -152,6 +153,7 @@ export const FLEET_ROUTES = [
   'DELETE gateway/model-proxy/claude/session',
   'PUT gateway/model-proxy/provider/:provider',
   'POST fleet/:id/model-proxy',
+  'POST fleet/:id/model-proxy/providers/:provider',
   'POST deployments/:id/select',
   'POST fleet/:id/start',
   'POST fleet/:id/stop',
