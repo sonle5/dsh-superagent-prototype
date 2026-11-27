@@ -220,7 +220,7 @@ Create one hourly check per deployment in the DeepSeek Harness profile you norma
 Check dsh-superagent: run `scripts/dsh-superagent --profile <profile> --url <url> status` in <checkout>. Exit 0: do nothing and say nothing. Exit 2: do not restart; tell me each part under `errors` with its detail, unless you already told me about the same ones. Exit 3: do not restart; tell me what `setup` says setup needs, unless you already told me. If it reports manually_stopped: true, leave it stopped. Otherwise (exit 1) run `scripts/dsh-superagent --profile <profile> --url <url> --respect-stop restart`, which exits the same way: 0 means it recovered, so say nothing; 2 and 3 are reported as above; if it exits 1 or fails otherwise, read the newest .artifacts/dsh-superagent-<profile>-*.log and the Troubleshooting section of docs/006-deployment.md, fix what you can, and tell me what was wrong and what you did.
 ```
 
-`--respect-stop` preserves an intentional stop. Only `stop` writes the marker; `start` clears it. `restart` writes no marker, so the check can recover a restart whose shutdown timed out.
+`--respect-stop` preserves an intentional stop. Only `stop` writes the marker, and not when systemd stops a failed unit (`SERVICE_RESULT` other than `success`); `start` clears it. `restart` writes no marker, so the check can recover a restart whose shutdown timed out.
 
 ## Settings
 

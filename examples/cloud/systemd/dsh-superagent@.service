@@ -12,6 +12,7 @@ WorkingDirectory=/opt/dsh-superagent
 ExecStart=/opt/dsh-superagent/scripts/dsh-superagent start --profile ${DSH_SUPERAGENT_PROFILE} --url ${DSH_SUPERAGENT_URL} --state-dir ${DSH_SUPERAGENT_STATE_DIR}
 ExecStop=/opt/dsh-superagent/scripts/dsh-superagent stop --profile ${DSH_SUPERAGENT_PROFILE} --url ${DSH_SUPERAGENT_URL} --state-dir ${DSH_SUPERAGENT_STATE_DIR} --stop-timeout 300
 RemainAfterExit=yes
+OOMPolicy=continue
 
 [Install]
 WantedBy=multi-user.target

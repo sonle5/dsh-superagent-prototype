@@ -48,6 +48,7 @@ it('keeps deployment shutdown inside ordered service, helper, and gateway timeou
 
   expect(unit).toContain(`--stop-timeout ${timeouts.GRACEFUL_STOP_SECONDS}`)
   expect(unit).toContain(`TimeoutStopSec=${timeouts.SYSTEMD_STOP_TIMEOUT_SECONDS}`)
+  expect(unit).toContain('OOMPolicy=continue')
   expect(timeouts.SYSTEMD_STOP_TIMEOUT_SECONDS).toBeGreaterThan(timeouts.GRACEFUL_STOP_SECONDS)
   expect(timeouts.SYSTEMCTL_STOP_TIMEOUT_SECONDS).toBeGreaterThan(timeouts.SYSTEMD_STOP_TIMEOUT_SECONDS)
   expect(LIFECYCLE_HELPER_TIMEOUT_MS).toBeGreaterThan(timeouts.SYSTEMCTL_STOP_TIMEOUT_SECONDS * 1000)

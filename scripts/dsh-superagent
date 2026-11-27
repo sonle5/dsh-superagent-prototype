@@ -292,7 +292,9 @@ def main():
             return status(args)
         if args.action in ('stop', 'restart'):
             # Only a stop keeps automatic recovery off; a restart whose stop timed out leaves it on.
-            stop(args, intentional=args.action == 'stop')
+            # systemd runs ExecStop with SERVICE_RESULT set; a value other than `success` (such as `oom-kill`) means the
+            # unit is stopping because it failed, which must leave automatic recovery on.
+            stop(args, intentional=args.action == 'stop' and os.environ.get('SERVICE_RESULT', 'success') == 'success')
         if args.action in ('start', 'restart'):
             return start(args)
     return 0

@@ -350,6 +350,8 @@ ExecStop={checkout}/scripts/dsh-superagent stop --profile {profile} --url {url} 
 TimeoutStopSec={SYSTEMD_STOP_TIMEOUT_SECONDS}
 SuccessExitStatus=2 3
 RemainAfterExit=yes
+# A worker killed for memory fails only its own Ticket; the default `stop` would take the whole deployment down.
+OOMPolicy=continue
 
 [Install]
 WantedBy=multi-user.target

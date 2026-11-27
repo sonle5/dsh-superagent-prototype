@@ -83,6 +83,15 @@ it('keeps a stop per profile', async () => {
   const skipped = await run('--respect-stop', 'start', '--profile', 'one')
   expect(skipped).toMatchObject({ code: 0, stdout: expect.stringContaining('Intentional stop is active') })
 })
+it('keeps automatic recovery on when systemd stops a failed unit', async () => {
+  const failed = await new Promise<{ code: number; stdout: string }>(resolve => execFile('python3',
+    [join(root, 'scripts', 'dsh-superagent'), 'stop', '--profile', 'one'],
+    { env: { ...process.env, PATH: `${join(root, 'bin')}:${process.env.PATH}`, DSH_HOME: join(root, 'dsh-home'),
+      DSH_SUPERAGENT_PROFILE: '', DSH_SUPERAGENT_URL: '', SERVICE_RESULT: 'oom-kill' } },
+    (error, stdout) => resolve({ code: error ? Number(error.code) : 0, stdout })))
+  expect(failed).toMatchObject({ code: 0, stdout: expect.not.stringContaining('Automatic recovery is paused') })
+  expect(await status('one')).toMatchObject({ manually_stopped: false })
+})
 it('takes no `dsh plugin` command of the profile for its service', async () => {
   const service = sleeper()
   processes(`${sleeper()} node node /opt/my tools/dsh plugin --profile superagent add link:/x`,
