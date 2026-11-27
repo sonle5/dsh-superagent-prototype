@@ -266,8 +266,8 @@ export class Evals extends EnginePart {
   private candidateOf(thread: Thread): Candidate {
     const evaluation = thread.evaluating!
     const triggers = evaluation.triggerIds.flatMap(id => { const trigger = this.repo.triggers.get(id); return trigger ? [trigger] : [] })
-    const { id: evalId, strength, policyVersion } = evaluation
-    return { evalId, thread, triggers, strength, policyVersion, tickets: this.ticketsOnThread(thread) }
+    const { id: evalId, strength, basis, policyVersion } = evaluation
+    return { evalId, thread, triggers, strength, basis, policyVersion, tickets: this.ticketsOnThread(thread) }
   }
   /**
    * Record that the queued Triggers `ids` of a Thread start no Eval, for `reason`, and take them out of its queue. Its id
