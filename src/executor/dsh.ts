@@ -26,6 +26,9 @@ export const workerSessionId = (ticketId: string): string => `worker-${ticketId}
 export const ticketOfSession = (sessionId: string): string | undefined => sessionId.startsWith('worker-') ? sessionId.slice('worker-'.length) : undefined
 /** Maximum runtime for a workspace prepare command. */
 const PREPARE_TIMEOUT_MS = 10 * 60_000
+/** Removes the workspace `$1` and, when it is a linked git worktree, prunes its record from the repository it belongs to. */
+const REMOVE_WORKSPACE = 'common=$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || common=; rm -rf -- "$1" && '
+  + 'if [ -n "$common" ] && [ -d "$common" ]; then git --git-dir="$common" worktree prune; fi'
 /** Maximum transient retry attempts for a launch or worker turn, and the initial backoff before resuming a turn. */
 const TRANSIENT_TRIES = 3, TRANSIENT_BACKOFF_MS = 15_000
 /** How long a worker's background work may run on after its turn ended before it is stopped and the worker reported waiting. */
@@ -412,7 +415,23 @@ export class DshExecutor implements Executor {
       // Its shell jobs and subagents stop with it, also those of a worker that ends its own turn.
       this.stopWork(ticket.id, reason)
       this.left.get(ticket.id)?.collect.abort(); this.left.delete(ticket.id); this.personal.delete(ticket.id)
+      // An ended ticket's workspace goes once its background work stopped; a resumed ticket's launch prepares a new one.
+      if (!liveTicket(ticket) && latestAssignment(ticket)?.id === assignment.id) {
+        this.track(ticket.id, (this.stopping.get(ticket.id) ?? Promise.resolve()).then(() => this.removeWorkspace(ticket.id)))
+      }
     })
+  }
+  /**
+   * Removes an ended ticket's workspace directory as the worker and prunes the git worktree record it leaves in its repository.
+   * Keeps a directory outside the execution root, such as one from before it existed, and the workspace of a ticket that resumed meanwhile.
+   * @throws CliError with the command's output when the removal fails.
+   */
+  private async removeWorkspace(ticketId: string): Promise<void> {
+    const ticket = this.host.store.tickets.get(ticketId)
+    const directory = ticket?.execution?.directory
+    const root = executionRoot(this.host.store.settings(), this.host.machine.stateDir)
+    if (!ticket || liveTicket(ticket) || !directory || dirname(directory) !== root) return
+    await runAsWorker(this.host.context.subprocess, ['sh', '-c', REMOVE_WORKSPACE, 'sh', directory], root, this.host.lifetime)
   }
   /** Stop what a ticket's worker runs in the background (see `stopBackground`). */
   private stopWork(ticketId: string, reason: string, keepInbox = false): void {
@@ -488,6 +507,9 @@ export class DshExecutor implements Executor {
     }
     const source = sourceTrigger(this.host, ticket)
     const workspace = ticket.execution?.directory ?? ''
+    if (!current()) return
+    // A removal of the workspace that the ticket's end started finishes before the workspace is checked.
+    await this.stopped(ticket.id)
     if (!current()) return
     // Prepare the workspace directory once; an existing directory counts as already prepared, including worktrees created before `prepare` commands existed.
     if (!await stat(workspace).then(() => true, () => false)) {

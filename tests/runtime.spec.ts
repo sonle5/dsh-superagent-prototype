@@ -137,6 +137,7 @@ async function acceptedTicket(trigger = feishu('1', '@bot 修一下回归')) {
 }
 beforeEach(async () => {
   directory = mkdtempSync(join(tmpdir(), 'orchestrator-runtime-'))
+  subprocess.spawn.mockClear()
   vi.spyOn(Commands.prototype, 'gh').mockImplementation(async args => args[1] === 'user' ? { login: 'agent-bot' } : args[1]?.includes('/pulls/') ? { state: 'open', user: { login: 'agent-bot' }, html_url: 'https://github.com/acme/widgets/pull/' + args[1].split('/').at(-1), head: { ref: `agent/${String(runtime.store.tickets.list()[0]?.execution?.name)}`, sha: 'head-1', repo: { full_name: 'acme/widgets' } } } : { default_branch: 'master', permissions: { push: true } })
   vi.spyOn(Commands.prototype, 'lark').mockResolvedValue({ users: [{ member_id: MEMBER, name: 'Alice' }], has_more: false })
   vi.spyOn(Commands.prototype, 'git').mockResolvedValue('')
@@ -1180,6 +1181,26 @@ it('runs the prepare command once for a new ticket, under the execution root wit
   await runtime.idle()
   expect(runtime.store.tickets.get(failed.ticket.id)!.assignments.at(-1)).toMatchObject({ report: expect.objectContaining({ state: 'failed', summary: expect.stringContaining('The prepare command failed: fatal: no such clone') }) })
   expect(waitsForPerson(runtime.store.tickets.get(failed.ticket.id)!)).toBe(true)
+})
+
+it('removes an ended ticket\'s workspace under the execution root as the worker and prunes its worktree record, but not a retried one\'s', async () => {
+  const removals = () => subprocess.spawn.mock.calls.map(([spec]) => spec as { argv: string[]; cwd: string }).filter(spec => spec.argv[0] === 'sh' && spec.argv[2]!.includes('rm -rf'))
+  const { ticket, sessionId } = await acceptedTicket()
+  await runTool(sessionId, 'orchestrator_report', { state: 'failed', summary: 'offline' })
+  await runtime.engine.retryTicket(ticket.id)
+  await runtime.idle()
+  expect(removals()).toEqual([])
+  runtime.engine.stopTicket(ticket.id)
+  await vi.waitFor(() => expect(removals()).toEqual([expect.objectContaining({ argv: expect.arrayContaining([ticket.execution!.directory]), cwd: join(directory, 'work') })]))
+  expect(removals()[0]!.argv[2]).toContain('worktree prune')
+  // A workspace outside the execution root, such as one from before it existed, stays.
+  const other = await acceptedTicket(feishu('9', '@bot 修一下标题'))
+  const stored = runtime.store.tickets.get(other.ticket.id)!
+  runtime.store.tickets.save({ ...stored, execution: { ...stored.execution!, directory } })
+  runtime.engine.stopTicket(other.ticket.id)
+  await runtime.idle()
+  await new Promise(resolve => setTimeout(resolve, 10))
+  expect(removals()).toHaveLength(1)
 })
 
 it('counts a ticket whose directory the host prepared before prepare commands existed as prepared', async () => {
