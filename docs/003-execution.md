@@ -115,6 +115,8 @@ Threads followed only for context still deliver messages, but do not give the Ti
 
 Sources poll subscribed Threads while a live Ticket subscribes, and for two weeks after the later of the last Trigger and the subscribing Tickets' end. The GitHub Source reads a Thread without a live Ticket at most once per `idlePollSeconds` (default 600), starting from its read cursor. Afterwards, messages arrive only through ordinary intake: GitHub notifications or Feishu live events.
 
+The GitHub Source also sweeps each open pull request the agent opened for a live Ticket, at most once per `sweepSeconds` (default 3600). A conflict with the base branch is a Trigger asking the worker to merge or rebase the base and resolve it, once per head commit. A draft whose Ticket last reported `ready`, `waiting` or `dropped` at least `staleDraftSeconds` (default 3600) ago is a Trigger asking the worker to finish it or close it with a reason, once per report. A pull request approved at least `approvedSeconds` (default 3600) ago that is not merging, because auto-merge is off, the branch rules block it, or CI failed or is running without auto-merge, gets one notice naming why per head commit and approval; the sweep reports CI and does not retry it. The Source marks a draft pull request's Thread with `draft`, and a Ticket's result posts no completion notice on it.
+
 ## Failure and recovery
 
 ### Executor blocked or failed

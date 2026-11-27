@@ -10,6 +10,8 @@ const PullSchema = z.looseObject({
   title: z.string().optional(), state: z.string(), html_url: z.string(), user: UserSchema,
   body: z.string().nullish(), created_at: z.string().optional(),
   merged: z.boolean().optional(), merged_at: z.string().nullish(), closed_at: z.string().nullish(), auto_merge: z.unknown().optional(),
+  draft: z.boolean().nullish(), mergeable: z.boolean().nullish(), mergeable_state: z.string().nullish(),
+  base: z.looseObject({ ref: z.string() }).nullish(),
   head: z.looseObject({ sha: z.string(), ref: z.string(), repo: z.looseObject({ full_name: z.string() }).nullish() }),
 })
 export type Pull = z.infer<typeof PullSchema> & { number: number }
@@ -27,6 +29,10 @@ export const agentPull = (pr: { user: { login: string }; head?: { repo?: { full_
 export const ticketBranch = (ticket: Pick<Ticket, 'execution'>, ref: string): boolean =>
   !!ticket.execution?.name && ref.split('/').at(-1) === ticket.execution.name
 const AUTO_MERGE_ON: ThreadFact = { label: { zh: '自动合并', en: 'Auto-merge' }, value: { zh: '已开启', en: 'on' } }
+const DRAFT: ThreadFact = { value: { zh: '草稿', en: 'Draft' } }
+const CONFLICT: ThreadFact = { value: { zh: '与目标分支冲突', en: 'Conflicts with base' }, problem: true }
+/** True when GitHub reports that the pull request cannot merge into its base without resolving conflicts. */
+export const conflicted = (pr: Pick<Pull, 'mergeable' | 'mergeable_state'>): boolean => pr.mergeable === false || pr.mergeable_state === 'dirty'
 
 /**
  * Validates and binds an open PR to a ticket when the PR is either the ticket's origin PR or an agent-authored PR on the ticket's branch, enforcing that one PR binds to at most one open ticket.
@@ -64,7 +70,10 @@ export async function observePull(ctx: SourceContext, pr: Pull): Promise<boolean
     const reopened = ticket?.follows?.some(item => item.thread === `${SOURCE}:${pr.number}` && item.closed)
     if (ticket && (reopened || pullsOf(ticket, true).every(number => number === pr.number))) claimPull(ctx, ticket.id, pr)
   }
-  ctx.threads.describe(`github:${pr.number}`, { facts: { autoMerge: !ended && pr.auto_merge != null ? AUTO_MERGE_ON : null } })
+  // Replies reads `draft` so a ticket's result does not call a draft pull request completed.
+  ctx.threads.patch(`github:${pr.number}`, { draft: !ended && pr.draft ? true : undefined })
+  ctx.threads.describe(`github:${pr.number}`, { facts: { autoMerge: !ended && pr.auto_merge != null ? AUTO_MERGE_ON : null,
+    draft: !ended && pr.draft ? DRAFT : null, conflict: !ended && conflicted(pr) ? CONFLICT : null } })
   return ended
 }
 function bind(ctx: SourceContext, ticketId: string, pr: Pull, own: boolean): void {

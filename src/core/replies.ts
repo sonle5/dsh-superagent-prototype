@@ -102,7 +102,7 @@ export class Replies extends EnginePart {
   }
   /** The conversation a ticket started in: its origin Trigger's Channel, else its first Channel. */
   private sourceChannel(ticket: Ticket): ChannelRef | undefined { return this.source(ticket)?.channel ?? ticket.channels[0] }
-  /** Point the latest active Thread a ticket follows, other than its source, at the canonical result. */
+  /** Point the latest active Thread a ticket follows, other than its source, at the canonical result, unless that Thread is a draft. */
   private noticeResult(ticket: Ticket, resultId: string): void {
     const source = this.sourceChannel(ticket), url = source?.address.url
     if (!source || !url) return
@@ -110,7 +110,8 @@ export class Replies extends EnginePart {
     const latest = this.repo.threads.list()
       .filter(thread => open.has(thread.key) && thread.subscriptions.includes(ticket.id) && !thread.context?.includes(ticket.id))
       .sort((left, right) => (right.lastAt ?? '').localeCompare(left.lastAt ?? ''))[0]
-    if (!latest) return
+    // A Source marks a draft pull request with `draft`; a result is not called completed there.
+    if (!latest || latest.meta.draft === true) return
     const channel = ticket.inputs.flatMap(input => input.kind === 'trigger' ? [this.repo.triggers.get(input.triggerId)] : [])
       .filter((trigger): trigger is Trigger => !!trigger?.channel && trigger.threads.some(ref => threadKey(ref) === latest.key))
       .sort((left, right) => right.at.localeCompare(left.at))[0]?.channel

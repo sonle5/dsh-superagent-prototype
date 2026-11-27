@@ -1136,6 +1136,21 @@ describe('replies', () => {
     h.engine.reply({ purpose: 'result', ticketId, text: 'Done' })
     expect(h.outbox.filter(message => message.kind === 'notice')).toHaveLength(1)
   })
+  it('posts no completion notice on a pull request its Source marks as a draft', () => {
+    const h = harness()
+    h.engine.receive(trigger('1', { source: 'github', actor: { source: 'github', id: 'alice' }, threads: [{ source: 'github', id: '23' }],
+      channel: { source: 'github', thread: 'github:23', address: { number: '23', url: 'https://github.com/acme/widgets/issues/23' } } }))
+    h.pump()
+    const ticketId = h.decide(h.requests.at(-1)!, { kind: 'accept', title: 'Sync', scope: 'main', reason: 'requested' }).ticketId!
+    h.engine.bindThread(ticketId, { source: 'github', id: '25' }, true)
+    h.engine.receive(trigger('2', { source: 'github', actor: { source: 'github', id: 'alice' }, threads: [{ source: 'github', id: '25' }],
+      channel: { source: 'github', thread: 'github:25', address: { number: '25', url: 'https://github.com/acme/widgets/pull/25' } } }))
+    const thread = h.repo.threads.get('github:25')!
+    h.repo.threads.save({ ...thread, meta: { ...thread.meta, draft: true } })
+    h.engine.report(ticketId, { state: 'ready', summary: 'Done' })
+    h.engine.reply({ purpose: 'result', ticketId, text: 'Done' })
+    expect(h.outbox.filter(message => message.kind === 'notice')).toEqual([])
+  })
 })
 describe('ticket commands', () => {
   it('ends a ticket by the same rule on a close and on a ready report: once no PR it opened is open, as the latest of them ended', () => {
