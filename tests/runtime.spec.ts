@@ -1182,7 +1182,7 @@ it('lets the agent approve as a requested reviewer, but never its own PR or for 
 })
 
 it('runs the prepare command once for a new ticket, under the execution root with the ticket\'s environment, and fails the ticket with its output', async () => {
-  const prepare = (command: string) => runtime.store.saveSettings({ ...runtime.store.settings(), executor: { ...runtime.store.settings().executor, prepare: command } })
+  const prepare = (command: string) => runtime.store.saveSettings({ ...runtime.store.settings(), executor: { ...runtime.store.settings().executor, prepare: command, prepareRetries: 0 } })
   const runs = () => subprocess.spawn.mock.calls.map(([spec]) => spec as { argv: string[]; cwd: string; env?: Record<string, string> }).filter(spec => spec.argv[0] === 'sh')
   prepare('git -C /srv/widgets worktree add "$DSH_SUPERAGENT_DIR" -b "agent/$DSH_SUPERAGENT_NAME"')
   const { ticket } = await acceptedTicket()
@@ -1697,7 +1697,7 @@ it('gives an explicit ticket\'s worker a prompt without the limits of an inferre
   expect(sections.get(sessionId)!.text({})).not.toContain(mandateInstructions({ strength: 'inferred' }))
 })
 
-it('runs a launch that fails for a passing reason again on the launch backoff three times, then fails its ticket; a failed prepare fails at once', async () => {
+it('runs a launch that fails for a passing reason again on the launch backoff three times, then fails its ticket; a failed prepare runs again until it succeeds', async () => {
   const original = controller.resolveAgent.getMockImplementation()! as (id: string) => Promise<unknown>
   const later = async (now: number) => {
     vi.useFakeTimers({ toFake: ['Date'], now })
@@ -1721,28 +1721,80 @@ it('runs a launch that fails for a passing reason again on the launch backoff th
     expect(runtime.store.tickets.get(ticket.id)!.assignments.at(-1)!.report).toMatchObject({ state: 'failed' })
     controller.resolveAgent.mockImplementation(original)
   }
-  // A prepare command whose output names a passing failure is not run again on its own.
-  const runs = () => subprocess.spawn.mock.calls.filter(([spec]) => (spec as { argv: string[] }).argv[0] === 'sh').length
-  runtime.store.saveSettings({ ...runtime.store.settings(), executor: { ...runtime.store.settings().executor, prepare: 'exit 3' } })
-  answers['sh -c exit 3'] = new Error('fatal: unable to access: The requested URL returned error: 503')
-  const before = runs()
-  const prepared = await acceptedTicket(feishu('40', '@bot 修 prepare', { root_id: undefined }))
+  // A prepare command that ran out of disk space runs again on the launch backoff, after its partial worktree is removed,
+  // until it succeeds, with no person's message (sonle5/deepseek-harness#28); one that keeps failing fails its ticket.
+  const runs = () => subprocess.spawn.mock.calls.map(([spec]) => (spec as { argv: string[] }).argv).filter(argv => argv[0] === 'sh')
+  runtime.store.saveSettings({ ...runtime.store.settings(), executor: { ...runtime.store.settings().executor, prepare: 'exit 3', prepareRetries: 2 } })
+  answers['sh -c exit 3'] = new Error('Preparing worktree (detached HEAD 4b399c39a6)\nUpdating files:  38% (8832/22949)\rUpdating files:  39% (9000/22949)\r'
+    + 'fatal: cannot create directory at \'scripts/snapshots\': No space left on device')
+  const before = runs().length
+  const full = await acceptedTicket(feishu('40', '@bot 修 prepare', { root_id: undefined }))
   await runtime.idle()
-  expect(runtime.store.tickets.get(prepared.ticket.id)!.assignments.at(-1)!.report).toMatchObject({ state: 'failed', summary: expect.stringContaining('503') })
-  expect(runs()).toBe(before + 1)
-  // A retry runs the prepare command again, for the directory it left empty was removed; resuming relaunches no failed launch.
+  expect(runtime.store.tickets.get(full.ticket.id)!.assignments.at(-1)).toMatchObject({ state: 'pending' })
+  expect(runtime.store.tickets.get(full.ticket.id)!.assignments.at(-1)!.report).toBeUndefined()
+  expect(runs().slice(before).map(argv => argv[2])).toEqual(['exit 3', expect.stringContaining('rm -rf')])
+  expect(relays(runtime.masterId).some(item => item.kind === 'worker_report' && (item.ticket as { ticket_id: string }).ticket_id === full.ticket.id)).toBe(false)
+  // The disk has space again: the next launch prepares the workspace and the worker runs.
   delete answers['sh -c exit 3']
+  let now = Date.now() + 6000
+  await later(now)
+  expect(runtime.store.tickets.get(full.ticket.id)!.assignments.at(-1)).toMatchObject({ state: 'running' })
+  expect(runs().slice(before).filter(argv => argv[2] === 'exit 3')).toHaveLength(2)
+  expect(runtime.store.tickets.get(full.ticket.id)!.inputs.filter(input => input.kind === 'trigger')).toHaveLength(0)
+  // A prepare command that fails each time fails its ticket after `prepareRetries` more runs, with a few lines of its output.
+  answers['sh -c exit 3'] = new Error('fatal: unable to access: The requested URL returned error: 503')
+  const failing = await acceptedTicket(feishu('41', '@bot 修 prepare again', { root_id: undefined }))
+  await runtime.idle()
+  for (let attempt = 0; attempt < 2; attempt++) {
+    expect(runtime.store.tickets.get(failing.ticket.id)!.assignments.at(-1)!.report).toBeUndefined()
+    now += 5000 * 2 ** attempt + 1000
+    await later(now)
+  }
+  expect(runtime.store.tickets.get(failing.ticket.id)!.assignments.at(-1)!.report).toMatchObject({ state: 'failed', summary: expect.stringContaining('503') })
+  // A retry runs the prepare command again, for the directory it left was removed; resuming relaunches no failed launch.
+  delete answers['sh -c exit 3']
+  const failed = runs().filter(argv => argv[2] === 'exit 3').length
   runtime.executor.resume()
   await runtime.idle()
-  expect(runs()).toBe(before + 1)
-  runtime.engine.retryTicket(prepared.ticket.id)
+  expect(runs().filter(argv => argv[2] === 'exit 3')).toHaveLength(failed)
+  runtime.engine.retryTicket(failing.ticket.id)
   await runtime.idle()
-  expect(runs()).toBe(before + 2)
-  expect(runtime.store.tickets.get(prepared.ticket.id)!.assignments.at(-1)).toMatchObject({ state: 'running' })
+  expect(runs().filter(argv => argv[2] === 'exit 3')).toHaveLength(failed + 1)
+  expect(runtime.store.tickets.get(failing.ticket.id)!.assignments.at(-1)).toMatchObject({ state: 'running' })
+})
+
+it('fails a running ticket whose worker stopped without a report once executor.silenceMinutes passed, and tells its people', async () => {
+  runtime.store.saveSettings({ ...runtime.store.settings(), executor: { ...runtime.store.settings().executor, silenceMinutes: 30 } })
+  const looks: (() => void)[] = []
+  vi.spyOn(runtime.executor as unknown as { after: (ms: number, then: () => void) => void }, 'after')
+    .mockImplementation((ms, then) => { if (ms === 30 * 60_000) looks.push(then) })
+  const { ticket, sessionId } = await acceptedTicket()
+  const look = async () => { const next = looks.splice(0); for (const then of next) then(); await runtime.idle() }
+  // A worker that still works is looked at again later.
+  expect(looks).toHaveLength(1)
+  await look()
+  expect(runtime.store.tickets.get(ticket.id)!.assignments.at(-1)!.report).toBeUndefined()
+  expect(looks).toHaveLength(1)
+  // A worker that handed off with its result or a question is not silent.
+  await runTool(sessionId, 'orchestrator_report', { state: 'blocked', summary: 'PR opened, waiting for review' })
+  ;(agents.get(sessionId)! as { status: string }).status = 'idle'
+  await look()
+  expect(runtime.store.tickets.get(ticket.id)!.assignments.at(-1)!.report).toMatchObject({ state: 'blocked' })
+  expect(looks).toHaveLength(1)
+  // A worker whose Session died after it took up new work, with no report since, fails its ticket, which relays the failure.
+  await runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: 'running the tests' })
+  agents.delete(sessionId)
+  deliveries.mockClear()
+  await look()
+  expect(runtime.store.tickets.get(ticket.id)!.assignments.at(-1)!.report).toMatchObject({ state: 'failed',
+    summary: expect.stringContaining('The worker stopped without reporting for 30 minutes') })
+  expect(relays(runtime.masterId)).toEqual([expect.objectContaining({ kind: 'worker_report', state: 'failed' })])
+  expect(runtime.effects.pending('result-fallback')).toBe(true)
+  expect(looks).toHaveLength(0)
 })
 
 it('launches a queued Assignment once when the host resumes, and gives a failed launch\'s slot back', async () => {
-  runtime.store.saveSettings({ ...runtime.store.settings(), executor: { ...runtime.store.settings().executor, maxWorkers: 1, prepare: 'exit 3' } })
+  runtime.store.saveSettings({ ...runtime.store.settings(), executor: { ...runtime.store.settings().executor, maxWorkers: 1, prepare: 'exit 3', prepareRetries: 0 } })
   answers['sh -c exit 3'] = new Error('fatal: no such clone')
   const failed = await acceptedTicket(feishu('50', '@bot 修 一', { root_id: undefined }))
   await runtime.idle()
