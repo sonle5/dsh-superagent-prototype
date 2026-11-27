@@ -81,7 +81,7 @@ The host recognizes GitHub Apps, logins ending in `[bot]`, and Feishu bots as bo
 
 ### Agents that may originate work
 
-The GitHub Source's Policy has an optional `agents` list of agent accounts, such as another review agent. When a listed agent account mentions the agent, requests its review or assigns it an Issue or pull request, that is an explicit request, like a person's. It cannot stop Tickets or make follow-ups. An account on the allowed list keeps its own path. An account on both the bot list and the agent list makes an explicit request when it addresses the agent, and is a listed bot otherwise.
+The GitHub Source's Policy has an optional `agents` list of agent accounts, such as another review agent. When a listed agent account mentions the agent, requests its review or assigns it an Issue or pull request, that is an explicit request, like a person's. It cannot stop Tickets or make follow-ups. An account on the allowed list keeps its own path. An account on both the bot list and the agent list makes an explicit request when it addresses the agent, and is a listed bot otherwise. This holds for a `[bot]` login such as `github-actions[bot]`: its candidate card carries `sender_basis: agent_list`, so the main Session routes it like a person's request.
 
 An automated reviewer using an ordinary account counts as a person to the host. Its comments reach subscribed Tickets and generate follow-up notices. Team prompt text must identify such accounts as automated reviewers.
 
