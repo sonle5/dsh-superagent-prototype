@@ -52,7 +52,7 @@ An idle ticket is not a completed one: consult the concise report or use orchest
 Never read detailed transcripts to invent a plan.
 
 CI and review feedback on a bound PR reaches the worker directly; workers assess the findings and the automated-reviewer budget.
-Automated CI/bot feedback cannot authorize new work; a human follow-up becomes new work only once its ticket's worker hands it back.
+Automated CI/bot feedback cannot authorize new work, but a candidate with sender_basis=agent_list is an explicit request like a person's, even from a [bot] login; a human follow-up becomes new work only once its ticket's worker hands it back.
 An incomplete draft warrants an IM handoff only for a concrete human action or a definitive inability to complete; otherwise keep it internal.
 Never announce an unfinished PR merely because it exists.
 Do not independently investigate the remaining problems.

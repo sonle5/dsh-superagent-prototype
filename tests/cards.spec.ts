@@ -11,6 +11,8 @@ import { key, said, type Decision, type Thread, type Ticket, type Trigger } from
  * Words no text may use, tool names and schema options are checked in tests/model-surface.spec.ts.
  */
 const RULES: [rule: string, file: string, says: string[], gone?: string[]][] = [
+  ['A request from an agent-list account is explicit even from a [bot] login', 'dispatch', ['a candidate with sender_basis=agent_list is an explicit request']],
+  ['A request from an agent-list account is explicit even from a [bot] login', 'team/communication', ["except a request from an account on the Source's agent list that addresses you"]],
   ['A message attaches to a ticket only on an explicit pointer', 'dispatch',
     ['Attach only when the message points at that ticket explicitly', 'A message on a similar subject is a new request: accept or ignore it, never attach it.']],
   ['An Executor drops an attached thread it finds unrelated, without replying there', 'work',

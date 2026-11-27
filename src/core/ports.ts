@@ -32,6 +32,8 @@ export interface Candidate {
   thread: Thread
   triggers: Trigger[]
   strength: Strength
+  /** How the gate admitted the Eval's strongest Trigger. */
+  basis: MandateBasis
   policyVersion: string
   /** Every ticket on the thread, including ended ones, for duplicate judgement. */
   tickets: Ticket[]

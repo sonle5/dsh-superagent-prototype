@@ -534,6 +534,15 @@ it('acknowledges a follow-up from the worker once and rejects events outside the
   expect(runtime.store.tickets.get(ticket.id)!.inputs.map(input => input.kind)).toEqual(['trigger'])
 })
 
+it('marks a request from an agent-list account as explicit on the card, even from a [bot] login', async () => {
+  const settings = runtime.store.settings()
+  runtime.store.saveSettings({ ...settings, policy: { ...settings.policy, sources: { ...settings.policy.sources, github: { ...settings.policy.sources.github!, agents: [{ id: 'github-actions[bot]' }] } } } })
+  const request = commentTrigger({ id: 3, body: '@agent-bot please review', user: { login: 'github-actions[bot]' }, html_url: 'https://github.com/acme/widgets/pull/8#issuecomment-3', created_at: '2026-09-09T00:00:00Z' }, { number: 8, isPr: true }, 'conversation', 'agent-bot')
+  await receive(request)
+  expect(relays(runtime.masterId).at(-1)).toMatchObject({ kind: 'candidate', strength: 'explicit', trigger_id: request.id, sender_basis: 'agent_list',
+    next_action: expect.stringContaining('explicit like a person\'s even from a [bot] login') })
+})
+
 it('treats GitHub comments through the same gate: mentions by members are explicit, others need an existing task', async () => {
   const stranger = commentTrigger({ id: 1, body: 'looks wrong', user: { login: 'someone' }, html_url: 'https://github.com/acme/widgets/pull/7#issuecomment-1', created_at: '2026-09-09T00:00:00Z' }, { number: 7, isPr: true }, 'conversation', 'agent-bot')
   await receive(stranger)
