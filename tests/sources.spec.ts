@@ -593,6 +593,89 @@ describe('github source', () => {
     expect(h.store.tickets.get('t9')).toMatchObject({ ended: { outcome: 'merged' } })
     h.store.close()
   })
+  describe('sweep of the agent\'s own pull requests', () => {
+    const LONG_AGO = '2026-01-01T00:00:00.000Z'
+    /** A live ticket that opened agent PR #9 on its branch and last reported `report`, with the sweep switched on. */
+    function swept(report?: 'progress' | 'ready' | 'waiting', pr: Record<string, unknown> = {}, extra: Record<string, unknown> = {}) {
+      const h = host()
+      h.store.saveSettings({ ...h.store.settings(), sources: { ...h.store.settings().sources, github: { enabled: true, config: { notifications: false } } } })
+      h.store.tickets.save({ ...openTicket('t9'), ...pulled(9), execution: execution('nine'),
+        assignments: [{ id: 'a', state: 'running', createdAt: LONG_AGO, ...report ? { report: { state: report, summary: 's', at: LONG_AGO } } : {} }] })
+      h.store.threads.save({ key: 'github:9', ref: { source: 'github', id: '9' }, createdAt: '', lastAt: new Date().toISOString(),
+        subscriptions: ['t9'], correlated: [], pending: [], meta: { number: 9, isPr: true, title: 'Fix' } })
+      const routes: Record<string, unknown> = { 'pulls/9': { ...agentsPull(9, 'agent/nine'), base: { ref: 'develop' }, mergeable: true,
+        mergeable_state: 'clean', ...pr }, ...extra }
+      const reads = github(h, routes)
+      const sweeps = () => h.receive.mock.calls.map(([trigger]) => trigger).filter(trigger => trigger.meta.sweep)
+      const notices = () => h.store.receipts.waiting().filter(message => message.kind === 'notice')
+      return { h, routes, reads, sweeps, notices }
+    }
+    it('asks the worker to merge or rebase the base and resolve a conflict, once per head', async () => {
+      const { h, routes, sweeps } = swept('progress', { mergeable: false, mergeable_state: 'dirty' })
+      await pollRound(h)
+      expect(sweeps()).toEqual([expect.objectContaining({ human: false, meta: expect.objectContaining({ sweep: 'conflict' }),
+        text: expect.stringContaining('conflicts with develop') })])
+      expect(h.store.tickets.get('t9')!.inputs.map(input => input.kind === 'trigger' && input.triggerId)).toEqual([sweeps()[0]!.id])
+      expect(h.store.threads.get('github:9')!.meta.facts).toMatchObject({ conflict: { problem: true } })
+      // Within `sweepSeconds` nothing is swept again; after it, the same head repeats the same Trigger ID, a duplicate.
+      await pollRound(h)
+      h.store.set(KV.github.sweep(9), LONG_AGO)
+      await pollRound(h)
+      expect(new Set(sweeps().map(trigger => trigger.id)).size).toBe(1)
+      expect(h.store.tickets.get('t9')!.inputs).toHaveLength(1)
+      // A new head that still conflicts asks again.
+      routes['pulls/9'] = { ...routes['pulls/9'] as object, head: { sha: 'def', ref: 'agent/nine', repo: { full_name: 'acme/widgets' } } }
+      h.store.set(KV.github.sweep(9), LONG_AGO)
+      await pollRound(h)
+      expect(new Set(sweeps().map(trigger => trigger.id)).size).toBe(2)
+      h.store.close()
+    })
+    it('asks the worker to finish or close a draft its ticket stopped working on, and posts no completion on it', async () => {
+      const working = swept('progress', { draft: true })
+      await pollRound(working.h)
+      expect(working.sweeps()).toEqual([])
+      expect(working.h.store.threads.get('github:9')!.meta).toMatchObject({ draft: true, facts: { draft: { value: { en: 'Draft' } } } })
+      working.h.store.close()
+      const { h, sweeps } = swept('ready', { draft: true })
+      await pollRound(h)
+      expect(sweeps()).toEqual([expect.objectContaining({ meta: expect.objectContaining({ sweep: 'draft' }),
+        text: expect.stringMatching(/still a draft.*mark it ready for review.*or close it.*Do not say the work is completed/s) })])
+      expect(h.store.tickets.get('t9')!.inputs).toHaveLength(1)
+      h.store.close()
+    })
+    it('names once on an approved PR why it does not merge, and reports CI without acting on it', async () => {
+      const approval = { id: 4, state: 'APPROVED', commit_id: 'abc', user: { login: 'carol', type: 'User' }, submitted_at: LONG_AGO }
+      const { h, routes, notices } = swept('waiting', { auto_merge: null, mergeable_state: 'blocked' }, { 'pulls/9/reviews': [approval],
+        'commits/abc/check-runs': { check_runs: [{ name: 'test', status: 'completed', conclusion: 'failure' }] } })
+      await pollRound(h)
+      expect(notices()).toEqual([expect.objectContaining({ channel: expect.objectContaining({ thread: 'github:9' }), ticketId: 't9',
+        text: 'Approved, but not merging: auto-merge is off; GitHub reports the merge as blocked by the branch rules; 1 CI checks failed. '
+          + 'Merging needs a person with merge rights; this is reported once per commit.' })])
+      // The same head and approval repeat the notice's ID, which the outbox records once.
+      h.store.set(KV.github.sweep(9), LONG_AGO)
+      await pollRound(h)
+      expect(notices()).toHaveLength(1)
+      expect(h.receive.mock.calls.filter(([trigger]) => trigger.meta.sweep)).toEqual([])
+      // Auto-merge on with only running checks is merging.
+      routes['pulls/9'] = { ...routes['pulls/9'] as object, auto_merge: { merge_method: 'merge' }, mergeable_state: 'clean',
+        head: { sha: 'def', ref: 'agent/nine', repo: { full_name: 'acme/widgets' } } }
+      routes['commits/def/check-runs'] = { check_runs: [{ name: 'test', status: 'in_progress', conclusion: null }] }
+      h.store.set(KV.github.sweep(9), LONG_AGO)
+      await pollRound(h)
+      expect(notices()).toHaveLength(1)
+      h.store.close()
+    })
+    it('leaves alone a PR that is not approved, or whose approval a request for changes outweighs', async () => {
+      const { h, routes, notices } = swept('waiting', { auto_merge: null })
+      await pollRound(h)
+      routes['pulls/9/reviews'] = [{ id: 4, state: 'APPROVED', user: { login: 'carol' }, submitted_at: LONG_AGO },
+        { id: 5, state: 'CHANGES_REQUESTED', user: { login: 'dave' }, submitted_at: LONG_AGO }]
+      h.store.set(KV.github.sweep(9), LONG_AGO)
+      await pollRound(h)
+      expect(notices()).toEqual([])
+      h.store.close()
+    })
+  })
   it('reads each notified Issue alone and reads a failed one again next round, from where it was', async () => {
     const h = host()
     h.store.set('github-since', '2026-09-08T00:00:00.000Z')
@@ -1245,7 +1328,7 @@ it('reports GitHub as failing only after the configured number of consecutive fa
   expect(pollFailure(2, 3, eof)).toBeUndefined()
   expect(pollFailure(3, 3, eof)).toEqual({ state: 'error', detail: '3 consecutive failed polls; last: Error: Get "https://api.github.com/x": EOF', code: 'pollFailures', values: { count: '3', error: 'Error: Get "https://api.github.com/x": EOF' } })
   expect(githubKind.schema.parse({})).toEqual({ repository: '', cli: '', pollSeconds: 60, idlePollSeconds: 600, failuresBeforeError: 3, notifications: true, reviewRequests: false, assignments: false, observeIssues: false,
-    observePulls: false, observeComments: false, observeCi: false })
+    observePulls: false, observeComments: false, observeCi: false, sweepSeconds: 3600, staleDraftSeconds: 3600, approvedSeconds: 3600 })
 })
 describe('feishu event consumer', () => {
   let dir: string

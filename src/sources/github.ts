@@ -4,13 +4,14 @@ import { key, liveTicket, type Thread } from '../core/index.ts'
 import { sameName } from '../infra/text.ts'
 import { GithubAccountsSchema } from '../deployment.ts'
 import { CliError, validItems, type Tally } from '../infra/commands.ts'
-import { ciCounts, ciFact, ciFailures, ciSummary, githubThreadContext, pullChecks } from './github-read.ts'
+import { ciCounts, ciFact, ciFailures, ciSummary, githubThreadContext, pullChecks, type CiSnapshot } from './github-read.ts'
 import { branchCiTrigger, ciTrigger, commentTrigger, CommentSchema, githubAddress, IssueEventSchema, issueTrigger, IssueSchema, mentions, pullTrigger,
   assignmentTrigger, eventSender, reviewRequestTrigger, SOURCE }
   from './github-trigger.ts'
 import { githubLink, sendGithub } from './github-channel.ts'
 import type { GithubComment, Opened, PullRef } from './github-trigger.ts'
-import { observePull, pullsOf, readPull, type Pull } from './github-pull.ts'
+import { agentPull, observePull, pullsOf, readPull, type Pull } from './github-pull.ts'
+import { sweepOwnPull } from './github-sweep.ts'
 import { health, sourceContext, type Health, type SourceContext } from './host.ts'
 import { KV } from '../kv.ts'
 import { cursorAt, pause, POLL_HORIZON_MS, pollThreads as pollEach } from './poll.ts'
@@ -28,7 +29,8 @@ const GithubConfigSchema = GithubAccountsSchema.extend({ pollSeconds: z.number()
   idlePollSeconds: z.number().int().min(60).max(86400).default(600), failuresBeforeError: z.number().int().min(1).max(20).default(3),
   notifications: z.boolean().default(true), reviewRequests: z.boolean().default(false), assignments: z.boolean().default(false),
   observeIssues: z.boolean().default(false), observePulls: z.boolean().default(false), observeComments: z.boolean().default(false),
-  observeCi: z.boolean().default(false) }).strict()
+  observeCi: z.boolean().default(false), sweepSeconds: z.number().int().min(60).max(86400).default(3600),
+  staleDraftSeconds: z.number().int().min(0).max(604800).default(3600), approvedSeconds: z.number().int().min(0).max(604800).default(3600) }).strict()
 export type GithubConfig = z.infer<typeof GithubConfigSchema>
 const OBSERVED = { issues: 'observeIssues', pulls: 'observePulls', comments: 'observeComments', ci: 'observeCi' } as const
 type Scope = keyof typeof OBSERVED
@@ -51,6 +53,12 @@ export const githubKind: SourceKind<GithubConfig> = {
     { key: 'pollSeconds', type: 'number', advanced: true, min: 60, max: 3600, label: { zh: '轮询间隔 / 秒', en: 'Polling interval / seconds' }, hint: { zh: 'GitHub 要求更长间隔时以 GitHub 为准。', en: 'A longer interval requested by GitHub wins.' } },
     { key: 'idlePollSeconds', type: 'number', advanced: true, min: 60, max: 86400, label: { zh: '空闲讨论的轮询间隔 / 秒', en: 'Idle Thread polling interval / seconds' },
       hint: { zh: '没有进行中工单的已订阅 Issue 和 PR 最多每隔这么久读一次；点名智能体的消息仍随通知每轮到达。', en: 'A subscribed Issue or PR with no live Ticket is read at most this often; messages that address the agent still arrive with notifications every round.' } },
+    { key: 'sweepSeconds', type: 'number', advanced: true, min: 60, max: 86400, label: { zh: '自己 PR 的巡检间隔 / 秒', en: 'Own pull request sweep interval / seconds' },
+      hint: { zh: '智能体为进行中工单开的 PR 最多每隔这么久检查一次：与目标分支冲突、工作停下后仍是草稿、已批准却没有合并。', en: 'A pull request the agent opened for a live Ticket is checked at most this often for a conflict with its base, a draft left after its work stopped, and an approval that does not merge.' } },
+    { key: 'staleDraftSeconds', type: 'number', advanced: true, min: 0, max: 604800, label: { zh: '草稿 PR 停滞多久后提醒 / 秒', en: 'Draft pull request grace / seconds' },
+      hint: { zh: '工单最后报告就绪、等待或放弃这么久后，它的 PR 仍是草稿时，提醒智能体完成或说明原因后关闭。', en: 'When a Ticket last reported ready, waiting or dropped this long ago and its pull request is still a draft, the agent is asked to finish it or close it with a reason.' } },
+    { key: 'approvedSeconds', type: 'number', advanced: true, min: 0, max: 604800, label: { zh: '已批准未合并多久后说明 / 秒', en: 'Approved but not merging grace / seconds' },
+      hint: { zh: '批准这么久后 PR 仍未在合并时，在 PR 上说明一次原因；每个提交最多一次。', en: 'When a pull request was approved this long ago and is not merging, the reason is posted on it once per commit.' } },
     { key: 'failuresBeforeError', type: 'number', advanced: true, min: 1, max: 20, label: { zh: '连续失败几次后报告异常', en: 'Failed polls before reporting an error' }, hint: { zh: '单次网络中断会在下一次轮询时自动重试，不必报告。', en: 'A single network interruption is retried on the next poll and need not be reported.' } },
     { key: 'notifications', type: 'switch', advanced: true, label: { zh: '读取账号通知', en: 'Read the account notification inbox' },
       hint: { zh: '回流账号的通知会带来较早的提及和订阅事件。细粒度令牌不支持此接口；关闭时请同时打开仓库级 Issue、PR 和评论轮询。', en: 'The account notification inbox supplies earlier mention and subscription events. Fine-grained tokens do not support this endpoint; when it is off, enable repository Issue, pull request and comment polling.' } },
@@ -493,26 +501,34 @@ async function intakeComments(ctx: SourceContext, ref: PullRef, since: string, r
     }
   }
 }
+/** Polls the PRs of open tickets with their CI, and sweeps those the agent opened (see `sweepOwnPull`). */
 export async function pollTicketPulls(ctx: SourceContext, signal?: AbortSignal, round = newRound(signal)): Promise<void> {
   const numbers = [...new Set(ctx.tickets.open().flatMap(ticket => pullsOf(ticket, true)))]
   for (const number of numbers) {
     if (stopped(ctx, round)) return
     try {
       const pr = await pull(ctx, round, number)
-      if (pr.state !== 'closed' && !pr.merged) await pollChecks(ctx, round, number, pr)
+      if (pr.state === 'closed' || pr.merged) continue
+      const ci = await pollChecks(ctx, round, number, pr)
+      const owner = ctx.tickets.open().find(ticket => ticket.follows?.some(item => item.own && !item.closed && item.thread === `${SOURCE}:${number}`))
+      const config = ctx.config<GithubConfig>(SOURCE)
+      if (owner && config && agentPull(pr, ctx.deployment)) {
+        await sweepOwnPull(ctx, ctx.commands.withSignal(round.signal), owner, pr, ci, config, Date.parse(round.started), round.tally)
+      }
     } catch (error) { if (!stopped(ctx, round)) failed(ctx, round, number, error) }
   }
 }
-/** Polls a PR's CI checks; only changes after the first baseline observation become Triggers. */
-async function pollChecks(ctx: SourceContext, round: Round, number: number, pr: Pull): Promise<void> {
+/** Polls a PR's CI checks; only changes after the first baseline observation become Triggers. @returns the checks read. */
+async function pollChecks(ctx: SourceContext, round: Round, number: number, pr: Pull): Promise<CiSnapshot> {
   const snapshot = await pullChecks(ctx.commands.withSignal(round.signal), pr.head.sha, round.tally)
   const fingerprint = key(JSON.stringify(snapshot))
   const previous = ctx.state.get(KV.github.ci(number))
-  if (previous?.fingerprint === fingerprint) return
+  if (previous?.fingerprint === fingerprint) return snapshot
   const revision = previous ? previous.revision + 1 : 0
   if (previous) await ctx.receive(ciTrigger(pr, revision, ciSummary(snapshot, `PR #${number}`, `github/pulls/${number}/checks`)))
   ctx.state.set(KV.github.ci(number), { fingerprint, revision })
   ctx.threads.describe(`github:${number}`, { facts: { ci: ciFact(ciCounts(snapshot)) } })
+  return snapshot
 }
 function nameThread(ctx: SourceContext, number: number, title: string): void {
   ctx.threads.patch(`github:${number}`, { title })
