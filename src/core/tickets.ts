@@ -255,8 +255,10 @@ export class Tickets extends EnginePart {
     const policy = this.policy()
     if (policy.paused) return
     if (!policy.revalidate(ticket.mandate)) { this.refuse(ticket); return }
-    // Only a human's message resumes an ended ticket; bot/CI triggers wait alongside inputs from before the ticket ended.
-    const first = ticket.undelivered.map(id => ticket.inputs.find(input => input.id === id)).find(input => input?.kind === 'trigger' && input.human)
+    // Only a human's message or a listed agent's request, such as a repeated review request, resumes an ended ticket; other
+    // bot/CI triggers wait alongside inputs from before the ticket ended.
+    const first = ticket.undelivered.map(id => ticket.inputs.find(input => input.id === id))
+      .find(input => input?.kind === 'trigger' && (input.human || this.agentRequest(input.triggerId)))
     if (first?.kind !== 'trigger') return
     const at = this.now()
     delete ticket.ended; ticket.updatedAt = at
@@ -267,6 +269,14 @@ export class Tickets extends EnginePart {
     this.repo.tickets.save(ticket)
     this.options.executor.start(ticket, assignment)
     this.emit('ticket.resumed', { ticketId, triggerId: first.triggerId })
+  }
+  /** Whether the current Policy admits a Trigger as an explicit request from an account on its Source's agent list. */
+  private agentRequest(triggerId: string): boolean {
+    const trigger = this.repo.triggers.get(triggerId)
+    if (!trigger) return false
+    const thread = this.thread(trigger.threads[0]!)
+    const gate = this.policy().gate(trigger, thread, this.ticketsOnThread(thread))
+    return gate.admissible && gate.strength === 'explicit' && gate.basis.via === 'agent'
   }
   /** The Triggers of a ticket's trigger Inputs, or of those of them whose Input ids are `ids`. */
   private triggersOf(ticket: Ticket, ids?: readonly string[]): Trigger[] {
