@@ -89,6 +89,8 @@ export class Engine {
 
   /** The candidate of the Eval that holds a Trigger, as its assessor sees it; undefined while no Eval holds it. */
   candidate(triggerId: string): Candidate | undefined { return this.evals.candidate(triggerId) }
+  /** The candidates that reached the assessor's Session and still wait for its Decision. */
+  undecided(): Candidate[] { return this.evals.undecided() }
   /**
    * Decide a Trigger: the Eval that holds it, or a direct Eval of it alone when none does, such as a person's explicit
    * request the main Session routes. A proactive candidate is accepted only in `auto` mode with enabled rules its assessment
@@ -261,7 +263,7 @@ export class Engine {
 /** What Sources ask and tell the Engine. */
 export type EngineForSources = Pick<Engine, 'receive' | 'bindThread' | 'threadClosed'>
 /** What the main Session asks of the Engine. */
-export type EngineForMainSession = Pick<Engine, 'candidate' | 'candidateDelivered' | 'decide' | 'attach' | 'reply' | 'requestStatus' | 'note'>
+export type EngineForMainSession = Pick<Engine, 'candidate' | 'undecided' | 'candidateDelivered' | 'decide' | 'attach' | 'reply' | 'requestStatus' | 'note'>
 /** What people ask of the Engine, through the panel or the main Session. */
 export type EngineForPeople = Pick<Engine, 'stopTicket' | 'retryTicket' | 'reevaluate' | 'unsubscribe' | 'dismiss'>
 /** What Settings tells the Engine. */
