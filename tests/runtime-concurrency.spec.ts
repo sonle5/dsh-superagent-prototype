@@ -552,9 +552,10 @@ describe('a worker whose work runs in the background', () => {
       await minutes(20)
     } finally { vi.useRealTimers() }
     await vi.waitFor(() => expect(h.jobs.service.kill).toHaveBeenCalledWith(second, one.sessionId, expect.any(String)))
-    expect(latestAssignment(ticket())?.report?.state).toBe('waiting')
+    await vi.waitFor(() => expect(h.deliveries).toHaveBeenCalledWith(expect.objectContaining({ sessionId: one.sessionId, mode: 'queue',
+      text: expect.stringContaining(`were killed: ${second}`) })))
   })
-  it('kills the jobs that run 30 minutes after the turn ended, leaving its subagents, and reports waiting after the worker\'s words', async () => {
+  it('kills the jobs that run 30 minutes after the turn ended, leaving its subagents, and wakes the worker once with the killed jobs', async () => {
     const one = await h.acceptedTicket(feishu('1', '@bot 修一'))
     const ticket = () => h.runtime.store.tickets.get(one.ticket.id)!
     said(one.sessionId, 'The tests run in the background.')
@@ -566,14 +567,45 @@ describe('a worker whose work runs in the background', () => {
       expect(latestAssignment(ticket())?.report).toBeUndefined()
       await minutes(1)
     } finally { vi.useRealTimers() }
-    await vi.waitFor(() => expect(latestAssignment(ticket())?.report).toMatchObject({ state: 'waiting', summary: 'The tests run in the background.\n\n'
-      + `Background jobs ran 30 minutes after the worker's turn ended and were killed: ${job} (pnpm test).` }))
+    const wake = expect.objectContaining({ sessionId: one.sessionId, mode: 'queue', text: `Your background jobs ran 30 minutes after your turn `
+      + `ended and were killed: ${job} (pnpm test). Check what they were doing and continue the assignment.` })
+    await vi.waitFor(() => expect(h.deliveries).toHaveBeenCalledWith(wake))
     expect(h.jobs.service.kill).toHaveBeenCalledWith(job, one.sessionId, expect.any(String))
-    // The kill was collected, so the worker reads of it at its next turn.
-    expect(h.agents.get(one.sessionId)!.inject).toHaveBeenCalledWith(expect.objectContaining({ content: [expect.objectContaining({
-      text: `Your background jobs ran 30 minutes after your turn ended and were killed: ${job} (pnpm test).` })] }))
-    // Stopping its subagent would wake it with the end, in the Assignment it was just reported waiting in.
+    // The woken turn reports; the ticket is not reported waiting meanwhile.
+    expect(latestAssignment(ticket())?.report).toBeUndefined()
+    expect(h.relays(h.runtime.masterId).some(relay => relay.kind === 'worker_report')).toBe(false)
     expect(h.subagents.live(child)).toBe(true)
+    // Once the woken turn ends with nothing in the background, the ticket is reported waiting after the worker's words.
+    said(one.sessionId, 'CI passed; the PR is up to date.')
+    h.subagents.settle(child)
+    idle(one.sessionId)
+    await vi.waitFor(() => expect(latestAssignment(ticket())?.report).toMatchObject({ state: 'waiting', summary: 'CI passed; the PR is up to date.' }))
+    expect(h.deliveries.mock.calls.filter(([call]) => call.text.includes('were killed'))).toHaveLength(1)
+  })
+  it('reports waiting instead of waking the worker again when the jobs of the turn a kill woke run past the limit too', async () => {
+    const one = await h.acceptedTicket(feishu('1', '@bot 修一'))
+    const ticket = () => h.runtime.store.tickets.get(one.ticket.id)!
+    said(one.sessionId, 'Watching CI.')
+    const first = h.jobs.run(one.sessionId, 'gh run watch 1')
+    let second = ''
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      idle(one.sessionId)
+      await minutes(30)
+      await vi.waitFor(() => expect(h.deliveries).toHaveBeenCalledWith(expect.objectContaining({ mode: 'queue',
+        text: expect.stringContaining(`were killed: ${first}`) })))
+      // The woken worker starts another watcher and ends its turn; that watcher also runs past the limit.
+      second = h.jobs.run(one.sessionId, 'gh run watch 2')
+      idle(one.sessionId)
+      await minutes(30)
+    } finally { vi.useRealTimers() }
+    await vi.waitFor(() => expect(latestAssignment(ticket())?.report).toMatchObject({ state: 'waiting', summary: 'Watching CI.\n\n'
+      + `Background jobs ran 30 minutes after the worker's turn ended and were killed: ${second} (gh run watch 2).` }))
+    expect(h.jobs.service.kill).toHaveBeenCalledWith(second, one.sessionId, expect.any(String))
+    // The second kill is told at the worker's next turn, without waking it.
+    expect(h.deliveries.mock.calls.filter(([call]) => call.mode === 'queue' && call.text.includes('were killed'))).toHaveLength(1)
+    expect(h.agents.get(one.sessionId)!.inject).toHaveBeenCalledWith(expect.objectContaining({ content: [expect.objectContaining({
+      text: `Your background jobs ran 30 minutes after your turn ended and were killed: ${second} (gh run watch 2).` })] }))
     expect(h.relays(h.runtime.masterId).at(-1)).toMatchObject({ kind: 'worker_report', state: 'waiting' })
   })
   it('says a worker\'s subagents still run when only they ran 30 minutes after the turn ended', async () => {

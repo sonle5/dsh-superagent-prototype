@@ -32,7 +32,7 @@ The main Session uses `dsh-superagent-router`, with the same 5-second shell and 
 
 When a turn ends with shell jobs or subagents still running, the Ticket keeps its worker slot and stays working. It is not reported as waiting, and the main Session receives no waiting report. A completed job or subagent wakes the Executor with its result in the same slot. Once a turn ends with no background work, the Executor reports waiting normally.
 
-After each turn, background work has at most 30 minutes to finish. At that limit, shell jobs are killed and the Ticket is reported waiting. The report includes the Executor's last words and which jobs were killed or subagents remain active. Subagents are allowed to continue. The Executor reads killed-job results on its next turn.
+After each turn, background work has at most 30 minutes to finish. At that limit, shell jobs are killed and subagents are allowed to continue. The first time jobs are killed, the Executor is woken once with the list of killed jobs, so it can check what they were doing, such as a CI run its watcher was following, and continue. If jobs are killed again before one of its turns ends with no background work, or only subagents remain at the limit, the Ticket is reported waiting instead. The report includes the Executor's last words and which jobs were killed or subagents remain active, and the Executor reads killed-job results on its next turn.
 
 A handoff to a person frees the slot immediately and leaves the Report in effect. This applies after a `ready` Report or a question, unless another Input arrived since, and after any `blocked` or `failed` Report.
 
