@@ -534,6 +534,24 @@ describe('github source', () => {
     expect(bare(reads)).toEqual(['issues/7/comments', 'issues/7/comments'])
     h.store.close()
   })
+  it('reads a subscribed Thread without a live Ticket at most once per idle polling interval', async () => {
+    const h = host()
+    h.store.threads.save({ key: 'github:7', ref: { source: 'github', id: '7' }, createdAt: '2026-09-01T00:00:00Z',
+      lastAt: new Date().toISOString(), subscriptions: ['t'], correlated: [], pending: [], meta: { number: 7, isPr: false, title: 'Login fails' } })
+    const reads = github(h, {})
+    await pollGithubThreads(h)
+    await pollGithubThreads(h)
+    expect(bare(reads)).toEqual(['issues/7/comments'])
+    // Once the last read is older than the interval, the next round reads again from the cursor.
+    h.store.set('github-cursor:7', new Date(Date.now() - 601_000).toISOString())
+    await pollGithubThreads(h)
+    expect(bare(reads)).toEqual(['issues/7/comments', 'issues/7/comments'])
+    // A live Ticket keeps the Thread read every round.
+    h.store.tickets.save(openTicket('t'))
+    await pollGithubThreads(h)
+    expect(bare(reads)).toEqual(['issues/7/comments', 'issues/7/comments', 'issues/7/comments'])
+    h.store.close()
+  })
   it('takes in a review decision without a body and skips a plain review comment without one', async () => {
     const h = host()
     h.store.threads.save({ key: 'github:7', ref: { source: 'github', id: '7' }, createdAt: '2026-09-01T00:00:00Z',
@@ -1226,7 +1244,7 @@ it('reports GitHub as failing only after the configured number of consecutive fa
   expect(pollFailure(1, 3, eof)).toBeUndefined()
   expect(pollFailure(2, 3, eof)).toBeUndefined()
   expect(pollFailure(3, 3, eof)).toEqual({ state: 'error', detail: '3 consecutive failed polls; last: Error: Get "https://api.github.com/x": EOF', code: 'pollFailures', values: { count: '3', error: 'Error: Get "https://api.github.com/x": EOF' } })
-  expect(githubKind.schema.parse({})).toEqual({ repository: '', cli: '', pollSeconds: 60, failuresBeforeError: 3, notifications: true, reviewRequests: false, assignments: false, observeIssues: false,
+  expect(githubKind.schema.parse({})).toEqual({ repository: '', cli: '', pollSeconds: 60, idlePollSeconds: 600, failuresBeforeError: 3, notifications: true, reviewRequests: false, assignments: false, observeIssues: false,
     observePulls: false, observeComments: false, observeCi: false })
 })
 describe('feishu event consumer', () => {

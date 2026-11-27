@@ -1,6 +1,6 @@
 /** GitHub source kind definition, notification and repository polling loops, and Cordis plugin entry. */
 import type { Context } from '@deepseek-ai/cordis'
-import { key, type Thread } from '../core/index.ts'
+import { key, liveTicket, type Thread } from '../core/index.ts'
 import { sameName } from '../infra/text.ts'
 import { GithubAccountsSchema } from '../deployment.ts'
 import { CliError, validItems, type Tally } from '../infra/commands.ts'
@@ -25,7 +25,7 @@ const NotificationSchema = z.looseObject({
 })
 
 const GithubConfigSchema = GithubAccountsSchema.extend({ pollSeconds: z.number().int().min(60).max(3600).default(60),
-  failuresBeforeError: z.number().int().min(1).max(20).default(3),
+  idlePollSeconds: z.number().int().min(60).max(86400).default(600), failuresBeforeError: z.number().int().min(1).max(20).default(3),
   notifications: z.boolean().default(true), reviewRequests: z.boolean().default(false), assignments: z.boolean().default(false),
   observeIssues: z.boolean().default(false), observePulls: z.boolean().default(false), observeComments: z.boolean().default(false),
   observeCi: z.boolean().default(false) }).strict()
@@ -49,6 +49,8 @@ export const githubKind: SourceKind<GithubConfig> = {
     { key: 'cli', type: 'text', label: { zh: '智能体的 GitHub CLI', en: 'Agent GitHub CLI' },
       hint: { zh: '命令名或绝对路径，通常是用 GH_CONFIG_DIR 登录智能体账号的 gh 包装脚本。智能体以它登录的账号行事，执行器以 gh 调用它。保存时检查它登录的账号能否推送到仓库，然后重启 dsh-superagent。', en: 'A command name or absolute path, usually a gh wrapper signed in to the agent account through GH_CONFIG_DIR. The agent acts as the account it is signed in to, and the Executor calls it as gh. Saving checks that this account can push to the repository, then restarts dsh-superagent.' } },
     { key: 'pollSeconds', type: 'number', advanced: true, min: 60, max: 3600, label: { zh: '轮询间隔 / 秒', en: 'Polling interval / seconds' }, hint: { zh: 'GitHub 要求更长间隔时以 GitHub 为准。', en: 'A longer interval requested by GitHub wins.' } },
+    { key: 'idlePollSeconds', type: 'number', advanced: true, min: 60, max: 86400, label: { zh: '空闲讨论的轮询间隔 / 秒', en: 'Idle Thread polling interval / seconds' },
+      hint: { zh: '没有进行中工单的已订阅 Issue 和 PR 最多每隔这么久读一次；点名智能体的消息仍随通知每轮到达。', en: 'A subscribed Issue or PR with no live Ticket is read at most this often; messages that address the agent still arrive with notifications every round.' } },
     { key: 'failuresBeforeError', type: 'number', advanced: true, min: 1, max: 20, label: { zh: '连续失败几次后报告异常', en: 'Failed polls before reporting an error' }, hint: { zh: '单次网络中断会在下一次轮询时自动重试，不必报告。', en: 'A single network interruption is retried on the next poll and need not be reported.' } },
     { key: 'notifications', type: 'switch', advanced: true, label: { zh: '读取账号通知', en: 'Read the account notification inbox' },
       hint: { zh: '回流账号的通知会带来较早的提及和订阅事件。细粒度令牌不支持此接口；关闭时请同时打开仓库级 Issue、PR 和评论轮询。', en: 'The account notification inbox supplies earlier mention and subscription events. Fine-grained tokens do not support this endpoint; when it is off, enable repository Issue, pull request and comment polling.' } },
@@ -516,8 +518,21 @@ function nameThread(ctx: SourceContext, number: number, title: string): void {
   ctx.threads.patch(`github:${number}`, { title })
   ctx.threads.describe(`github:${number}`, { label: `#${number} ${title}`, facts: { number: { value: `#${number}` } } })
 }
-/** Polls subscribed Issue and PR Threads not already read in this round; a deleted (410) Issue is still polled within the horizon (costing one read) and does not fail the round. */
+/**
+ * True when no live Ticket subscribes `thread` and its last read is under `idlePollSeconds` old. The read cursor makes a
+ * skipped round lose nothing: the next read starts from it. Notifications still deliver mentions on every round.
+ */
+function restingIdle(ctx: SourceContext, thread: Thread, now: number): boolean {
+  if (thread.subscriptions.some(id => { const ticket = ctx.tickets.get(id); return !!ticket && liveTicket(ticket) })) return false
+  const read = Date.parse(ctx.state.get(KV.github.cursor(Number(thread.ref.id))) ?? '')
+  return now - read < (ctx.config<GithubConfig>(SOURCE)?.idlePollSeconds ?? 600) * 1000
+}
+/**
+ * Polls subscribed Issue and PR Threads not already read in this round, reading a Thread without a live Ticket at most once
+ * per `idlePollSeconds`; a deleted (410) Issue is still polled within the horizon (costing one read) and does not fail the round.
+ */
 export async function pollThreads(ctx: SourceContext, signal?: AbortSignal, round = newRound(signal)): Promise<void> {
+  const now = Date.parse(round.started)
   await pollEach(ctx, SOURCE, () => stopped(ctx, round), async thread => {
     try { await pollThread(ctx, round, thread) }
     catch (error) {
@@ -525,7 +540,7 @@ export async function pollThreads(ctx: SourceContext, signal?: AbortSignal, roun
       if (deleted(error)) round.dropped.push(Number(thread.ref.id)); else round.failures.push(`${thread.key}: ${String(error)}`)
       throw error
     }
-  }, thread => round.read.has(Number(thread.ref.id)))
+  }, thread => round.read.has(Number(thread.ref.id)) || restingIdle(ctx, thread, now))
 }
 async function pollThread(ctx: SourceContext, round: Round, thread: Thread): Promise<void> {
   // The default branch's CI Thread has no Issue or PR to read; its CI arrives as Triggers.
