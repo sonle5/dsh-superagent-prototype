@@ -113,7 +113,7 @@ An Input counts as read after the Session takes it into a step and subsequently 
 
 Threads followed only for context still deliver messages, but do not give the Ticket ownership of human follow-ups or resume ended Tickets. Those messages can be assessed independently.
 
-Sources poll subscribed Threads while a live Ticket subscribes, and for two weeks after the later of the last Trigger and the subscribing Tickets' end. Afterwards, messages arrive only through ordinary intake: GitHub notifications or Feishu live events.
+Sources poll subscribed Threads while a live Ticket subscribes, and for two weeks after the later of the last Trigger and the subscribing Tickets' end. The GitHub Source reads a Thread without a live Ticket at most once per `idlePollSeconds` (default 600), starting from its read cursor. Afterwards, messages arrive only through ordinary intake: GitHub notifications or Feishu live events.
 
 ## Failure and recovery
 
