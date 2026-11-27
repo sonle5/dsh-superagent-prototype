@@ -219,7 +219,9 @@ def start(args):
         prune_logs(args.profile)
         overlay = private_state_overlay(args.profile)
         # `exec` replaces the shell so the pane PID printed by tmux is the DSH service process itself.
-        command = ('umask 077; exec ' + shlex.join([dsh, '--profile', args.profile, '--patch', str(overlay), '--no-open'])
+        # Workers inherit this umask. pnpm copies, instead of hardlinking, store files that are not world-readable, so
+        # 022 keeps a workspace install from duplicating the store; the 0700 DSH home and person directory keep files private.
+        command = ('umask 022; exec ' + shlex.join([dsh, '--profile', args.profile, '--patch', str(overlay), '--no-open'])
                    + ' >> ' + shlex.quote(str(log)) + ' 2>&1')
         # Reuse an existing tmux session without disturbing other windows.
         target = ['new-window', '-t', '=' + session + ':'] if exists else ['new-session', '-s', session]

@@ -163,6 +163,7 @@ it('starts a profile with private Session and workspace storage', async () => {
   const tmux = readFileSync(join(root, 'tmux.log'), 'utf8').split('---\n').find(call => call.startsWith('new-session'))!.split('\n')
   const launchedOverlay = join(realpathSync(root), '.artifacts', 'control', 'profiles', 'superagent-sglang', 'dsh-home.yml')
   expect(tmux[tmux.indexOf('/bin/sh') + 2]).toContain(`--patch '${launchedOverlay}'`)
+  expect(tmux[tmux.indexOf('/bin/sh') + 2]).toMatch(/^umask 022; exec /)
 }, 20_000)
 
 it('authenticates health checks with the deployment native capability', async () => {
