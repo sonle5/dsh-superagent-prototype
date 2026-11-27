@@ -67,7 +67,8 @@ export class Engine {
   // The clock
 
   /**
-   * Requeues overdue Evals up to `REQUEUES` times before recording `unavailable` (undelivered Evals never expire), starts the
+   * Requeues overdue Evals up to `REQUEUES` times before recording `unavailable` (undelivered Evals never expire) and queuing
+   * their Triggers again behind a growing wait (see `Thread.retryAt`), starts the
    * Evals of Threads whose queued Triggers wait, and resumes ended tickets a person's message reached while processing was
    * paused. While processing is paused, nothing expires: each Eval in progress notes when the pause began, and its deadline
    * moves forward by the pause's length once processing resumes. Each Eval and each ticket update takes one transaction.

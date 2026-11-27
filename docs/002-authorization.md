@@ -154,8 +154,8 @@ If revalidation fails, the Ticket stays ended and takes none of its waiting mess
 
 The time limit starts when the candidate reaches the main Session. Time spent waiting for delivery does not count, and an undelivered candidate never expires.
 
-An expired Eval queues its Triggers for another attempt. After two consecutive retries, the third expiry records `unavailable`. An assessment failure also records `unavailable`; a later Trigger can start a new Eval. A Policy change or a decision made against an outdated Policy records `unavailable` and immediately queues the batch under the current version.
+An expired Eval queues its Triggers for another attempt. After two consecutive retries, the third expiry records `unavailable` and queues the Triggers again behind a wait that starts at 5 minutes and doubles with each such expiry, up to 30 minutes; a judgement, **Evaluate again**, or a dismissal ends the retries. An assessment failure also records `unavailable`; a later Trigger can start a new Eval. A Policy change or a decision made against an outdated Policy records `unavailable` and immediately queues the batch under the current version.
 
 The `evals` health entry reports unresolved unavailable Decisions from the last hour. `scripts/dsh-superagent status` includes that error.
 
-The panel asks for human attention only when the unavailable Decision is less than 24 hours old, is still the latest Decision on its Thread, has not been dismissed, and the Thread is neither queued nor evaluating. A person can evaluate the Trigger again or dismiss the problem.
+The panel asks for human attention only when the unavailable Decision is less than 24 hours old, is still the latest Decision on its Thread, has not been dismissed, and the Thread is neither queued nor evaluating, or retries it after timed-out Evals. A person can evaluate the Trigger again or dismiss the problem.

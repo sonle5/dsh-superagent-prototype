@@ -158,7 +158,7 @@ describe('eval', () => {
     h.engine.evaluateDue()
     expect(h.requests.map(candidate => candidate.thread.key)).toEqual(['chat:A', 'chat:B'])
   })
-  it('counts an Eval\'s deadline from its delivery, queues its Triggers again twice when it expires, then records it unavailable', async () => {
+  it('counts an Eval\'s deadline from its delivery, queues its Triggers again twice when it expires, then records it unavailable and retries later', async () => {
     const h = harness()
     h.engine.receive(trigger('1')); h.pump()
     // A candidate the assessor's Session has not taken does not expire.
@@ -175,12 +175,48 @@ describe('eval', () => {
     expect(h.requests.map(item => item.triggers.map(each => each.id))).toEqual([['1'], ['1']])
     deliver(); h.tick(61); h.pump()
     expect(h.requests).toHaveLength(3)
-    // The third expiry is recorded unavailable.
+    // The third expiry is recorded unavailable, and the Trigger waits five minutes for its next Eval.
     deliver(); h.tick(61); h.pump()
     expect(h.repo.decisions.byThread('chat:t1')).toEqual([expect.objectContaining({ kind: 'unavailable', reason: [{ code: 'timeout' }] })])
-    expect(h.repo.threads.get('chat:t1')).toMatchObject({ pending: [] })
+    expect(h.repo.threads.get('chat:t1')).toMatchObject({ pending: ['1'], retries: 1 })
     expect(h.repo.threads.get('chat:t1')).not.toHaveProperty('evaluating')
     expect(h.repo.threads.get('chat:t1')).not.toHaveProperty('expired')
+    h.tick(299); h.pump()
+    expect(h.requests).toHaveLength(3)
+    h.tick(1); h.pump()
+    expect(h.requests).toHaveLength(4)
+    // Three more expiries end in a second unavailable Decision and a ten-minute wait.
+    for (let i = 0; i < 3; i++) { deliver(); h.tick(61); h.pump() }
+    expect(h.repo.decisions.byThread('chat:t1')).toHaveLength(2)
+    expect(h.repo.threads.get('chat:t1')).toMatchObject({ pending: ['1'], retries: 2 })
+    h.tick(599); h.pump()
+    expect(h.requests).toHaveLength(6)
+    h.tick(1); h.pump()
+    expect(h.requests).toHaveLength(7)
+    // A judgement ends the retries.
+    h.decide(h.requests.at(-1)!, { kind: 'ignore', reason: 'fine' })
+    expect(h.repo.threads.get('chat:t1')).toMatchObject({ pending: [] })
+    expect(h.repo.threads.get('chat:t1')).not.toHaveProperty('retries')
+    expect(h.repo.threads.get('chat:t1')).not.toHaveProperty('retryAt')
+  })
+  it('takes the Triggers of a retrying Thread off its queue when a person dismisses its latest unavailable Decision', async () => {
+    const h = harness()
+    h.engine.receive(trigger('1')); h.pump()
+    for (let i = 0; i < 3; i++) { h.engine.candidateDelivered(h.requests.at(-1)!.evalId); h.tick(61); h.pump() }
+    const [decision] = h.repo.decisions.byThread('chat:t1')
+    h.engine.dismiss(decision!.id)
+    expect(h.repo.threads.get('chat:t1')).toMatchObject({ pending: [] })
+    expect(h.repo.threads.get('chat:t1')).not.toHaveProperty('retryAt')
+    h.tick(3600); h.pump()
+    expect(h.requests).toHaveLength(3)
+  })
+  it('evaluates a retrying Thread at the next pass when a person sends its Trigger to Eval again', async () => {
+    const h = harness()
+    h.engine.receive(trigger('1')); h.pump()
+    for (let i = 0; i < 3; i++) { h.engine.candidateDelivered(h.requests.at(-1)!.evalId); h.tick(61); h.pump() }
+    expect(h.engine.reevaluate('1')).toBe(true)
+    h.pump()
+    expect(h.requests).toHaveLength(4)
   })
 })
 describe('subscription fan-out', () => {

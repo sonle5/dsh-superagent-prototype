@@ -9,7 +9,10 @@ import { sourceHealth, type HealthMap } from './sources.ts'
 import { ticketRow, type ExecutorLoad } from './tickets.ts'
 import { preview } from './text.ts'
 
-/** Threads whose latest decision since `since` is an undismissed `unavailable` eval and that are neither evaluating nor queued. */
+/**
+ * Threads whose latest decision since `since` is an undismissed `unavailable` eval and that are neither evaluating nor queued,
+ * unless they retry it: then they stay listed while their retried Eval runs or waits.
+ */
 function unjudged(store: Store, since: string): { thread: Thread; decision: Decision }[] {
   const seen = new Set<string>()
   const queue = { store, owners: ownersOf(store) }
@@ -17,19 +20,21 @@ function unjudged(store: Store, since: string): { thread: Thread; decision: Deci
     if (seen.has(decision.threadKey)) return []
     seen.add(decision.threadKey)
     const thread = store.threads.get(decision.threadKey)
-    if (!thread || thread.evaluating || awaitingEval(queue, thread).length || decision.dismissed) return []
+    if (!thread || decision.dismissed || (!thread.retries && (thread.evaluating || awaitingEval(queue, thread).length))) return []
     if (store.decisions.byThread(thread.key).at(-1)?.id !== decision.id) return []
     return [{ thread, decision }]
   })
 }
-/** Reports error health when any thread has an undismissed `unavailable` eval from the last hour without a newer decision or active eval. */
+/** Reports error health when any thread has an undismissed `unavailable` eval from the last hour without a newer judgement. */
 export function evalsHealth(store: Store, now = Date.now()): Health {
   const since = new Date(now - 3_600_000).toISOString()
   const open = unjudged(store, since)
   if (!open.length) return { state: 'ready', detail: 'No unavailable Eval in the last hour' }
-  const latest = open[0]!.decision
-  return { state: 'error', at: latest.at, detail: `${open.length} Eval(s) unavailable in the last hour without a later judgement; `
-    + `the latest on ${latest.threadKey}: ${reasonText(latest.reason)}` }
+  const latest = open[0]!
+  const retrying = open.filter(item => item.thread.retries).length
+  return { state: 'error', at: latest.decision.at, detail: `${open.length} Eval(s) unavailable in the last hour without a later judgement`
+    + (retrying ? `, ${retrying} retrying` : '') + `; the latest on ${latest.decision.threadKey}: ${reasonText(latest.decision.reason)}`
+    + (latest.thread.retryAt ? `, retrying after ${latest.thread.retryAt}` : '') }
 }
 /**
  * Builds the operator overview: active system problems, tickets awaiting human action, executor load, and 24-hour trigger flow.

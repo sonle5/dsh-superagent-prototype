@@ -520,10 +520,13 @@ it('treats a missing provider list as empty when setting a provider key', async 
     `    "gatewayUser": "gateway", "gatewayGroup": "gateway", "checkout": "/opt/dsh-superagent", "baseDir": ${JSON.stringify(baseDir)},`,
     '    "modelProxy": {"binary": "/opt/cliproxyapi/cli-proxy-api", "portRange": {"start": 8317, "end": 9316}},',
     '}, False)',
-    'print(json.dumps({"result": value, "names": [item["name"] for item in requests[0]]}))',
+    'print(json.dumps({"result": value, "names": [item["name"] for item in requests[0]], '
+      + '"cooling": [item.get("disable-cooling") for item in requests[0]]}))',
   ].join('\n')], { encoding: 'utf8' })
 
-  expect(JSON.parse(result)).toEqual({ result: { provider: 'one-nexus', configured: true }, names: ['one-nexus'] })
+  expect(JSON.parse(result)).toEqual({
+    result: { provider: 'one-nexus', configured: true }, names: ['one-nexus'], cooling: [true],
+  })
 })
 
 it('adds supported OpenAI replay models without dropping existing provider models', async () => {
@@ -554,11 +557,13 @@ it('adds supported OpenAI replay models without dropping existing provider model
     `    "gatewayUser": "gateway", "gatewayGroup": "gateway", "checkout": "/opt/dsh-superagent", "baseDir": ${JSON.stringify(baseDir)},`,
     '    "modelProxy": {"binary": "/opt/cliproxyapi/cli-proxy-api", "portRange": {"start": 8317, "end": 9316}},',
     '}, False)',
-    'print(json.dumps({"result": value, "models": [item["name"] for item in requests[0][0]["models"]]}))',
+    'print(json.dumps({"result": value, "models": [item["name"] for item in requests[0][0]["models"]], '
+      + '"cooling": requests[0][0].get("disable-cooling")}))',
   ].join('\n')], { encoding: 'utf8' })
 
   expect(JSON.parse(result)).toEqual({
     result: { provider: 'openai', configured: true },
     models: ['custom-model', 'gpt-6.1-terra', 'gpt-6.1-sol', 'gpt-5.6-sol'],
+    cooling: true,
   })
 })

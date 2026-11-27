@@ -789,6 +789,15 @@ it('retries only a failed, blocked or undelivered ticket with a new assignment, 
   expect(runtime.store.decisions.get('unavailable-1')).toMatchObject({ dismissed: true })
   runtime.store.decisions.save({ ...runtime.store.decisions.get('unavailable-1')!, dismissed: undefined })
   expect(unjudged()).toHaveLength(1)
+  // A Thread whose Triggers wait to retry the Eval stays listed, and health says when it retries.
+  const waiting = runtime.store.threads.get(accepted.threadKey)!
+  runtime.store.threads.save({ ...waiting, pending: ['queued-again'], retries: 1, retryAt: '2999-01-01T00:00:00.000Z' })
+  expect(unjudged()).toHaveLength(1)
+  expect(evalsHealth(runtime.store)).toMatchObject({ state: 'error', detail: expect.stringContaining('1 retrying') })
+  expect(evalsHealth(runtime.store).detail).toContain('retrying after 2999-01-01T00:00:00.000Z')
+  runtime.store.threads.save({ ...waiting, pending: ['queued-again'] })
+  expect(unjudged()).toEqual([])
+  runtime.store.threads.save(waiting)
   // A later judgement on the same Thread resolves it.
   runtime.store.decisions.save({ ...accepted, id: 'ignore-2', kind: 'ignore', reason: [said('context only')], at: new Date().toISOString() })
   expect(unjudged()).toEqual([])
