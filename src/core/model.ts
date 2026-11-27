@@ -178,6 +178,13 @@ export interface Thread {
   /** How many Evals of its queued Triggers expired in a row, each of which queued them again; a Decision clears it. */
   expired?: number
   /**
+   * How many Evals of its queued Triggers were recorded unavailable for a timeout in a row, each of which queued them again;
+   * any other Decision of the Thread's Eval, or a person dismissing the latest, clears it.
+   */
+  retries?: number
+  /** Time before which no Eval of the queued Triggers starts, set with `retries`; a person sending a Trigger to Eval clears it. */
+  retryAt?: string
+  /**
    * Source-native attributes needed by channels or readers (for example a Feishu thread id). Its Source may also describe
    * the thread for people: `label`, a display name, and `facts`, a {@link ThreadFacts} map.
    */

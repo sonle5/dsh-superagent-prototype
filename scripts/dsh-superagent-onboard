@@ -966,6 +966,8 @@ def provider_key_set(request, dry):
     providers = openai_compatibility_providers(state)
     if not isinstance(providers, list) or any(not isinstance(item, dict) for item in providers):
         raise OnboardingError("model proxy returned an invalid provider list")
+    # Each provider holds one key, so a cooldown blocks the provider for the whole upstream retry-after (days for a
+    # spend-limit 429) until the proxy restarts; without cooling, every request asks the provider again.
     updated = []
     found = False
     for item in providers:
@@ -980,6 +982,7 @@ def provider_key_set(request, dry):
                 **item,
                 "base-url": MODEL_PROXY_PROVIDER_BASE_URLS[provider],
                 "keys": [{"api-key": api_key}],
+                "disable-cooling": True,
                 "models": [
                     *models,
                     *(model for model in MODEL_PROXY_PROVIDER_MODELS[provider]
@@ -993,6 +996,7 @@ def provider_key_set(request, dry):
             "name": provider,
             "base-url": MODEL_PROXY_PROVIDER_BASE_URLS[provider],
             "keys": [{"api-key": api_key}],
+            "disable-cooling": True,
             "models": MODEL_PROXY_PROVIDER_MODELS[provider],
         })
     management_request(state, "PATCH", "/config/api-keys/openai-compatibility", updated)

@@ -17,6 +17,12 @@ const reasonOf = (reason: string | Reason): Reason[] => [typeof reason === 'stri
 const stronger = (a: Strength, b: Strength): Strength => a === 'explicit' || b === 'explicit' ? 'explicit' : 'inferred'
 /** How many times in a row an expired Eval queues its Triggers again before it is recorded unavailable. */
 const REQUEUES = 2
+/**
+ * The wait before the Triggers of an Eval recorded unavailable for a timeout are evaluated again: it doubles with each such
+ * Decision in a row up to the cap, so with the default Eval timeout the next Decision lands inside the one-hour window the
+ * `evals` health entry reports.
+ */
+const RETRY_FIRST_MS = 5 * 60_000, RETRY_MAX_MS = 30 * 60_000
 
 /**
  * Evals runs the Evals of Threads: it batches a Thread's queued Triggers into one Eval, takes its strength, actor, and basis
@@ -55,22 +61,35 @@ export class Evals extends EnginePart {
   }
   /**
    * An Eval past its deadline queues its Triggers again for a fresh Eval, up to `REQUEUES` times in a row, so a busy
-   * assessor does not drop requests; after that it is recorded unavailable.
+   * assessor does not drop requests; after that it is recorded unavailable, and its Triggers wait on the Thread's queue until
+   * `retryAt`, so an assessor that is down for longer still judges them once it is back.
    */
   private expire(thread: Thread): void {
     const expired = (thread.expired ?? 0) + 1
-    if (expired > REQUEUES) { this.finish(thread, thread.evaluating!, { kind: 'unavailable', reason: [{ code: 'timeout' }] }); return }
     const { id, triggerIds } = thread.evaluating!
+    if (expired > REQUEUES) {
+      const retries = (thread.retries ?? 0) + 1
+      const at = this.finish(thread, thread.evaluating!, { kind: 'unavailable', reason: [{ code: 'timeout' }] }).at
+      thread.retries = retries
+      thread.retryAt = new Date(Date.parse(at) + Math.min(RETRY_FIRST_MS * 2 ** (retries - 1), RETRY_MAX_MS)).toISOString()
+      this.queueAgain(thread, triggerIds)
+      return
+    }
     delete thread.evaluating
     thread.expired = expired
+    this.queueAgain(thread, triggerIds)
+    this.options.assessor.release?.(id)
+  }
+  /** Put an ended Eval's Triggers back at the front of its Thread's queue. */
+  private queueAgain(thread: Thread, triggerIds: string[]): void {
     thread.pending = [...triggerIds, ...thread.pending.filter(item => !triggerIds.includes(item))]
     this.repo.threads.save(thread)
-    this.options.assessor.release?.(id)
   }
   /** Start one Eval of the Triggers queued on a Thread, judged by the gate, and ask the assessor for it. */
   start(threadKeyValue: string, policy: Policy): void {
     const thread = this.repo.threads.get(threadKeyValue)!
     const at = this.now()
+    if (thread.retryAt && thread.retryAt > at) return
     // A person's follow-up a ticket still decides is that ticket's: one an older version queued leaves the queue without a Decision.
     const delivered = (id: string) => {
       const trigger = this.repo.triggers.get(id)
@@ -155,11 +174,14 @@ export class Evals extends EnginePart {
     return this.decideEval(thread, evaluation, outcome)
   }
   /**
-   * Queue a stored Trigger for a fresh Eval on its primary Thread and emit `trigger.requeued`; returns false while an Eval holds it.
+   * Queue a stored Trigger for a fresh Eval on its primary Thread, at the next pass even while the Thread waits to retry
+   * unavailable Evals, and emit `trigger.requeued`; returns false while an Eval holds it.
    * @throws UserError when the Trigger is unknown.
    */
   reevaluate(triggerId: string): boolean {
     if (!this.requeue(triggerId)) return false
+    const thread = this.repo.threads.get(threadKey(this.repo.triggers.get(triggerId)!.threads[0]!))!
+    if (thread.retryAt) { delete thread.retryAt; this.repo.threads.save(thread) }
     this.emit('trigger.requeued', { triggerId })
     return true
   }
@@ -187,7 +209,8 @@ export class Evals extends EnginePart {
     return this.handBack(ticketId, this.repo.triggers.get(triggerId)!, reason)
   }
   /**
-   * Marks an `unavailable` Decision dismissed so the overview lists it no more.
+   * Marks an `unavailable` Decision dismissed so the overview lists it no more; dismissing the latest Decision of a Thread
+   * that waits to retry its Triggers also takes them off the queue and ends the retries.
    * @throws UserError when the Decision is unknown or not `unavailable`.
    */
   dismiss(decisionId: string): Decision {
@@ -195,6 +218,12 @@ export class Evals extends EnginePart {
     if (decision?.kind !== 'unavailable') throw new UserError('unknownProblem')
     decision.dismissed = true
     this.repo.decisions.save(decision)
+    const thread = this.repo.threads.get(decision.threadKey)
+    if (thread?.retries && !thread.evaluating && this.repo.decisions.byThread(thread.key).at(-1)?.id === decision.id) {
+      thread.pending = thread.pending.filter(id => !decision.triggerIds.includes(id))
+      delete thread.retries; delete thread.retryAt
+      this.repo.threads.save(thread)
+    }
     return decision
   }
   /** Take a Trigger out of its Thread's queue because it was routed by hand. */
@@ -320,7 +349,7 @@ export class Evals extends EnginePart {
     const decision = this.record(thread, evaluation, outcome)
     // Direct (gate-only) evaluations do not clear the thread's active evaluation.
     if (thread.evaluating?.id !== evaluation.id) return decision
-    delete thread.evaluating; delete thread.expired
+    delete thread.evaluating; delete thread.expired; delete thread.retries; delete thread.retryAt
     this.repo.threads.save(thread)
     this.options.assessor.release?.(evaluation.id)
     return decision
