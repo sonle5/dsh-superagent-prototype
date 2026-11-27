@@ -37,6 +37,7 @@ export const AssessmentSchema = z.object({
 const TRIGGER_CHARS = 4000, NEAR_CHARS = 1200, WINDOW_CHARS = 400, STUB_CHARS = 50
 const FINISHED = 'This assessment has finished: it was decided, timed out or restarted'
 const EXPLICIT = 'This is an explicit request, which is routed instead of assessed: use orchestrator_route with its trigger_id and kind accept, attach, stop or ignore'
+const UNDECIDED = 'Your turn ended without deciding this candidate. A reply with text only records nothing, and the Eval times out.'
 type AssessmentContext = Awaited<ReturnType<typeof admissionContext>>
 type ReadCache = {
   snapshots: Map<string, string>; images: Map<string, { id: string; text: string }>; messages: Map<string, string>; cursors: Set<string>
@@ -45,10 +46,16 @@ type ReadCache = {
 interface EvalReads { cache: ReadCache; context?: AssessmentContext; error?: string; loading?: Promise<void> }
 /** Message returned when assessing a Trigger whose Source provides no thread context. */
 const NO_CONTEXT = 'This Source gives no Thread context; assess the Trigger\'s own text and the batch.'
+/** The tool calls that decide `candidate`, as its card and an undecided-candidate reminder state them. */
+export function nextAction(candidate: Pick<Candidate, 'basis' | 'strength'>): string {
+  return candidate.basis.via === 'agent' ? 'An account on this Source\'s agent list addressed you, so its request is explicit like a person\'s even from a [bot] login. Route it with orchestrator_route as dispatch says: accept, attach or ignore.'
+    : candidate.strength === 'explicit' ? 'Route it with orchestrator_route as dispatch says: accept, attach, stop or ignore.'
+    : 'Ignore it with orchestrator_route if the card shows it touches no enabled rule; else assess it with orchestrator_eval, orchestrator_eval_read, then orchestrator_eval_decide.'
+}
 /** Host dependencies used by `MasterAssessor`. */
 export interface AssessorHost {
   /** Active evaluations in `Engine` that the assessor reads and decides. */
-  readonly engine: Pick<EngineForMainSession, 'candidate' | 'candidateDelivered' | 'decide'>
+  readonly engine: Pick<EngineForMainSession, 'candidate' | 'undecided' | 'candidateDelivered' | 'decide'>
   readonly commands: Commands
   readonly deployment: Deployment
   /** Durable effect queue through which candidate assessments are delivered. */
@@ -99,6 +106,16 @@ export class MasterAssessor implements Assessor {
       await this.host.deliver(`candidate:${evalId}`, JSON.stringify({ kind: 'candidate', ...await this.host.candidateCard(candidate) }))
       this.host.engine.candidateDelivered(evalId)
     }, { limit: () => host.paused() ? 0 : 4 })
+  }
+  /**
+   * The main Session's turn ended: each delivered candidate still without a Decision gets one reminder per Eval, since a
+   * reply with text only records nothing and the Eval would otherwise wait for its deadline.
+   */
+  async turnEnded(): Promise<void> {
+  for (const candidate of this.host.engine.undecided()) {
+      await this.host.deliver(`candidate-nudge:${candidate.evalId}`, JSON.stringify({ kind: 'candidate_undecided',
+        trigger_id: candidate.triggers.at(-1)!.id, note: UNDECIDED, next_action: nextAction(candidate) }))
+    }
   }
   /** Enqueues an `assessment` effect to deliver `candidate`'s card to the main Session. */
   request(candidate: Candidate): void { this.host.effects.enqueue('assessment', candidate.evalId, { triggerId: candidate.triggers[0]!.id }) }

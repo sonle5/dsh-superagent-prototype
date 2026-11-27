@@ -49,6 +49,27 @@ it('evaluates a message that arrives on a thread while an earlier candidate\'s c
   expect(h.candidates()).toEqual([b1.id, a1.id, b2.id])
 })
 
+it('reminds the main Session once per Eval of a delivered candidate its turn left undecided, and not after a Decision', async () => {
+  const a1 = feishu('1', '@bot 修 A')
+  const undecided = () => h.runtime.engine.undecided().map(candidate => candidate.triggers.at(-1)!.id)
+  h.runtime.receive(a1)
+  await waitUntil(() => undecided().includes(a1.id))
+  const nudges = () => h.relays(h.runtime.masterId).filter(item => item.kind === 'candidate_undecided')
+  idle(h.runtime.masterId)
+  await waitUntil(() => nudges().length === 1)
+  expect(nudges()[0]).toMatchObject({ trigger_id: a1.id, next_action: expect.stringContaining('orchestrator_route') })
+  idle(h.runtime.masterId)
+  await h.runtime.idle()
+  expect(nudges()).toHaveLength(1)
+  await h.route({ kind: 'ignore', trigger_id: a1.id, reason: 'duplicate' })
+  const b1 = feishu('2', '@bot 修 B')
+  h.runtime.receive(b1)
+  await waitUntil(() => undecided().includes(b1.id))
+  idle(h.runtime.masterId)
+  await waitUntil(() => nudges().length === 2)
+  expect(nudges().map(item => item.trigger_id)).toEqual([a1.id, b1.id])
+})
+
 it('delivers nothing to a ticket a person stopped while an earlier ticket\'s delivery waited', async () => {
   const one = await h.acceptedTicket(feishu('1', '@bot 修一'))
   const two = await h.acceptedTicket(feishu('5', '@bot 修二'))

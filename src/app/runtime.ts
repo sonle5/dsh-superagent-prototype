@@ -221,6 +221,11 @@ export class Runtime extends Service implements SourceHost {
     }
     this.sessions.install()
     this.executor.install()
+    // A main Session turn that ends with candidates undecided gets one reminder each; a later wake reruns the turn.
+    this.disposers.push(this.ctx.on('agent/status', ({ agent, status }) => {
+      if (agent.id !== this.masterId || status !== 'idle' || this.closing() || this.paused()) return
+      this.assessor.turnEnded().catch(error => { this.ctx.logger.warn('undecided candidate reminder failed: %s', error) })
+    }))
     await this.sessions.ensure(this.masterId, this.machine.stateDir, 'dsh-superagent orchestrator', 'orchestrator')
     // Repair workers persisted before their Executor model changed. A cold Session is not decorated until its first request,
     // so without this pass the visible route and next request would retain the prior model after a restart.

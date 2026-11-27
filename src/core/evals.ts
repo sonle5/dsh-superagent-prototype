@@ -141,6 +141,10 @@ export class Evals extends EnginePart {
     const thread = this.holding(triggerId)
     return thread && this.candidateOf(thread)
   }
+  /** The candidates of the running Evals whose candidate reached the assessor's Session and which have no Decision yet. */
+  undecided(): Candidate[] {
+    return this.repo.threads.active().filter(thread => thread.evaluating?.delivered).map(thread => this.candidateOf(thread))
+  }
   /**
    * Decide a Trigger: the Eval that holds it, or a direct Eval of it alone when none does.
    * @throws UserError when the Trigger is unknown or not admissible, `outcome.evalId` names an Eval that has finished, a
