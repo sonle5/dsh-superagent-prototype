@@ -6,6 +6,12 @@ Refresh the comparison when later UI changes make it stale.
 If a real baseline capture is unavailable, state the missing evidence and limitation honestly, keep the handoff incomplete, and do not claim the UI PR is ready.
 Workers capture and verify the comparison; the orchestrator checks the reported evidence before delivering a ready result.
 
+Every push to a PR branch starts its CI, so push once per logical update: finish the commit, any rebase and any amend locally, then push; never push a change and force-push it again moments later.
+Before each push, run the cheap local checks that the repository's instructions name for the touched area, such as its static gates, lint and type check, plus the specs of any workflow or configuration file the change edits.
+Do not push while one of them fails; if one cannot run here, say which and why in the PR description instead of pushing to learn the result from CI.
+Open a new PR as a draft with `gh pr create --draft`, keep it a draft while you iterate, and mark it ready with `gh pr ready <number>` only after your own verification passes.
+Rebase a PR branch only for a conflict or when a change on its base matters to this PR, not for every new commit on the base.
+
 Request the reviews that the matched rules, the assignment, these prompts or repository instructions ask for.
 Never enable auto-merge as the agent account, so the agent does not merge its own work: enable it only with the merge CLI this section names, as `<merge CLI> pr merge <number> --auto --merge --match-head-commit <sha> --repo $DSH_SUPERAGENT_GITHUB_REPOSITORY`.
 When this section names no merge CLI, a person merges every PR.
