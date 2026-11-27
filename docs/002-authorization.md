@@ -129,7 +129,7 @@ A condition on what the Executor may do with its own result, such as when it may
 
 ## Resume and stop
 
-An ended Ticket keeps its Mandate. A person's message on one of its own Threads can resume the same work without a new Eval or Decision, regardless of who sent it. Bots and CI do not wake ended Tickets. The Executor decides whether the request fits the scope and ends the round if it does not.
+An ended Ticket keeps its Mandate. A person's message on one of its own Threads can resume the same work without a new Eval or Decision, regardless of who sent it. Bots and CI do not wake ended Tickets; the exception is a listed agent's explicit request that the main Session attaches, such as a repeated review request after new commits. The Executor decides whether the request fits the scope and ends the round if it does not.
 
 Only three operations change a Mandate: accept creates it, a person's stop withdraws it, and failed revalidation revokes it. A Ticket stopped by a person stays ended and receives nothing more. Work requested there needs a new accept.
 

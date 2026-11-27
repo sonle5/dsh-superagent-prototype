@@ -1470,6 +1470,18 @@ describe('model-surface review', () => {
     h.tick(1); h.engine.receive(trigger('3'))
     expect(h.repo.tickets.get(ticketId)!.ended).toBeUndefined()
   })
+  it('resumes an ended ticket on an attached explicit request from a listed agent, such as a repeated review request', () => {
+    const h = harness({ gate: t => t.actor.id === 'parity-bot' ? { admissible: true, strength: 'explicit', basis: { via: 'agent', addressed: 'mention' } }
+      : t.human ? { admissible: true, strength: 'explicit', basis: { via: 'listed' } } : { admissible: false, reason: 'not human' } })
+    const ticketId = accepted(h).ticketId!
+    h.engine.report(ticketId, { state: 'ready', summary: 'Reviewed' })
+    h.tick(1); h.engine.receive(trigger('2', { human: false, actor: { source: 'chat', id: 'parity-bot' }, addressed: 'mention' }))
+    h.engine.attach(ticketId, '2', 'Re-review the updated head.')
+    const ticket = h.repo.tickets.get(ticketId)!
+    expect(ticket.ended).toBeUndefined()
+    expect(ticket.assignments).toHaveLength(2)
+    expect(ticket.inputs.at(-1)).toMatchObject({ kind: 'resumed', triggerId: '2' })
+  })
 })
 describe('follow-up review: turn ends', () => {
   const merge = (h: ReturnType<typeof harness>) => h.engine.threadClosed({ source: 'gh', id: 'pr-9' }, 'merged', '2026-09-23T00:00:01Z')
