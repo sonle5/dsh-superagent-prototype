@@ -261,6 +261,11 @@ export class DshExecutor implements Executor {
   /** Assignment IDs currently waiting on a transient-failure backoff timer before resuming their worker turn. */
   private readonly resuming = new Set<string>()
   /**
+   * Assignment IDs whose worker was woken after its background jobs ran past the limit and were killed, until one of its turns
+   * ends with nothing left in the background; a second kill in a row reports the ticket waiting instead of waking it again.
+   */
+  private readonly wokeAfterKill = new Set<string>()
+  /**
    * The looks at background work of workers that went idle, by ticket, which hold their slots; a look ends when its worker
    * runs again or its Assignment ends.
    */
@@ -686,6 +691,27 @@ export class DshExecutor implements Executor {
     this.timers.add(timer)
   }
   /**
+   * Wakes the worker of the running Assignment `assignmentId` with `text` once `killing` ended its jobs, in a wake slot it
+   * waits for while processing is paused or no slot is free; does nothing once the Assignment no longer runs.
+   */
+  private wakeAfterKill(ticketId: string, assignmentId: string, requestId: string, text: string, killing: Promise<void>): void {
+    const go = () => {
+      if (this.host.closing()) return
+      const ticket = this.host.store.tickets.get(ticketId)
+      if (!ticket || !liveTicket(ticket) || runningAssignment(ticket)?.id !== assignmentId) return
+      if (this.host.paused()) { this.after(SLOT_WAIT_MS, go); return }
+      const waking = !this.running(ticket)
+      try { if (waking) this.slots.reserve(ticketId, 'wake') } catch (failure) {
+        if (!(failure instanceof Later)) throw failure
+        this.after(SLOT_WAIT_MS, go); return
+      }
+      const sent = this.host.sessions.prompt(workerSessionId(ticketId), requestId, text, 'queue')
+      void this.background(sent.finally(() => { if (waking) this.slots.free(ticketId) }))
+    }
+    // The killed jobs' ends are collected first, so none of them wakes the worker as well.
+    void this.background(killing.catch(() => {}).then(go))
+  }
+  /**
    * A worker that handed off to a person frees its slot: its subagents stop, and its shell jobs, such as a server for the
    * person, are left to the person until the Assignment ends. They hold no slot and run past any limit; their ends are
    * collected, so none wakes the worker outside a slot, and the worker reads of each at its next turn.
@@ -744,17 +770,25 @@ export class DshExecutor implements Executor {
     finally { clearTimeout(timer); if (this.settling.get(ticket.id) === look) this.settling.delete(ticket.id) }
     const current = live()
     if (this.host.closing() || look.signal.aborted || (!quiet && !limit.signal.aborted) || !current || this.resuming.has(idle.id)) return
-    if (quiet) this.host.engine.turnEnded(ticket.id, idle.id)
+    if (quiet) { this.host.engine.turnEnded(ticket.id, idle.id); this.wokeAfterKill.delete(idle.id) }
     let stopped = ''
     if (!quiet) {
-      // Its shell jobs that ran past the limit are killed, which it is told at its next turn; its subagents, whose stop would
-      // wake it, go on.
+      // Its shell jobs that ran past the limit are killed; its subagents, whose stop would wake it, go on.
       const sessionId = workerSessionId(ticket.id), minutes = BACKGROUND_LIMIT_MS / 60_000
       const jobs = runningJobs(this.host.context, sessionId, left).map(job => job.name)
       if (jobs.length) {
-        void this.background(killJobs(this.host.context, sessionId, 'The job ran past its limit', left))
+        const killing = killJobs(this.host.context, sessionId, 'The job ran past its limit', left)
+        void this.background(killing)
         const note = `Your background jobs ran ${minutes} minutes after your turn ended and were killed: ${jobs.join(', ')}.`
-        void this.background(this.host.sessions.prompt(sessionId, `killed:${jobs.join(',')}`, note, { inject: 'Background jobs killed' }))
+        const requestId = `killed:${idle.id}:${jobs.join(',')}`
+        // The worker is woken once to act on the killed jobs, such as checking a watched CI run itself; when that turn's jobs
+        // are killed too, it is told at its next turn and reported waiting.
+        if (!this.wokeAfterKill.has(idle.id) && !handedOff(current)) {
+          this.wokeAfterKill.add(idle.id)
+          this.wakeAfterKill(ticket.id, idle.id, requestId, `${note} Check what they were doing and continue the assignment.`, killing)
+          return
+        }
+        void this.background(this.host.sessions.prompt(sessionId, requestId, note, { inject: 'Background jobs killed' }))
       }
       stopped = jobs.length ? `Background jobs ran ${minutes} minutes after the worker's turn ended and were killed: ${jobs.join(', ')}.`
         : `Subagents still ran ${minutes} minutes after the worker's turn ended.`
