@@ -95,6 +95,8 @@ const RULES: [rule: string, file: string, says: string[], gone?: string[]][] = [
       'Review against the issue, not only the diff', 'never "no findings"']],
   ['A reviewer requests changes while a finding is open, and unit tests alone leave a shipped-surface criterion open', 'team/delivery',
     ['`gh pr review --request-changes` while one is', 'only unit-test evidence where the issue names a shipped surface']],
+  ['A reviewer never approves while a check on the head commit fails or is still running', 'team/delivery',
+    ['a head-commit check failing or still running is an open finding', 'link each failing log']],
   ['Human attention is limited', 'team/communication', ['Human attention is limited']],
   ['Each automated reviewer gets at most three rounds per PR', 'team/communication', ['at most three review rounds per PR from each automated reviewer']],
   ['An incomplete draft is blocked, and every change is reviewed and checked', 'work', ['An incomplete draft is blocked', 'Review changes and run relevant checks']],
