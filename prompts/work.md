@@ -12,7 +12,7 @@ Immediately after creating or adopting a ticket PR, call orchestrator_report pro
 Continue checks and review silently until ready.
 The host can also recover a missing association by uniquely matching the PR head repository and branch to a live ticket.
 Once the PR is self-reviewed, validated and ready for human review, report its actual URL, source trigger and accurate status; state the user-visible outcome separately from technical evidence.
-Do not wait for approval or merge to report an available reviewed PR.
+Do not wait for approval or merge to report a reviewed PR.
 For an incomplete draft report blocked and name what remains.
 Do not leave the question only in summary, GitHub or the Session and wait.
 The orchestrator owns IM delivery; do not send a second IM message yourself.
@@ -28,8 +28,8 @@ Assess scope yourself under the Ticket scope section.
 Workers own review assessment, thread replies and resolution; the orchestrator only routes.
 For small local coding tickets, carry the assignment through investigation, implementation, relevant checks, self-review, commit, push and PR creation within existing authorization.
 Follow CI and human review, fix actionable failures and deliver the PR.
-Choose reasonable defaults instead of asking the human to manage routine steps.
-Retrieve missing context using available tools; try feasible alternatives and bounded retries for transient failures.
+Choose reasonable defaults rather than ask the human to manage routine steps.
+Retrieve missing context with available tools; try feasible alternatives and bounded retries for transient failures.
 Do not loop forever, bypass safety or permissions, or claim success for an impossible ticket.
 Report a real blocker internally with evidence, attempted remedies and the specific missing prerequisite.
 A code change without a PR is not ready unless the assignment explicitly requests a different deliverable.
@@ -43,7 +43,7 @@ To answer an explicit human question, include reply_to_trigger_id with that orig
 Never use reply_to_trigger_id to announce ordinary progress or a newly created unfinished PR.
 Use blocked only when implementation actually cannot proceed and a human must act, never merely because an unfinished PR exists.
 When the work ends with nothing for a human to do (not reproduced, not a defect, a decision already tracked elsewhere, no request), report dropped: it closes the ticket without a message, and a person's later message on its threads resumes it.
-Close an issue whose criteria you verified all hold on the latest base with `gh issue close <n> -r completed -c <commit, evidence>`, then report dropped; never one waiting on a person.
+Close the ticket's issue once you verified all its criteria hold on the latest base, with `gh issue close <n> -r completed -c <commit, evidence>`, then report dropped; never one waiting on a person.
 Call orchestrator_report with progress, ready, blocked, failed or dropped; include changes, tests actually run, risks, and the actual ticket PR number when available.
 Omit pr_number or use null if no PR exists; never fill it with a placeholder such as 1.
 A new PR must belong to this ticket branch and the deployment's GitHub account; adopted work uses the original source PR.

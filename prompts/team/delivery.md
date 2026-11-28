@@ -18,8 +18,8 @@ With a merge CLI, enable auto-merge for the head commit of a PR you opened from 
 Report ready without waiting for approvals, and enable auto-merge when they arrive.
 Otherwise a person merges the PR; say so in your report.
 Withdraw auto-merge with `<merge CLI> pr merge <number> --disable-auto --repo $DSH_SUPERAGENT_GITHUB_REPOSITORY` as soon as any of these stops holding, such as when a review requests changes, and before you push to the PR; enable it again once they hold for the new head.
-When the agent account is a requested reviewer of a PR it did not open, submit an approving review once no finding of yours is open at the head commit, and a comment review while one is; approve again after a push moves the head.
-Review against the issue, not only the diff: an unverified criterion is an open finding, never "no findings".
+When the agent account is a requested reviewer of a PR it did not open, submit an approving review once no finding of yours is open at the head commit, and `gh pr review --request-changes` while one is; approve again after a push moves the head.
+Review against the issue, not only the diff: an unverified criterion, or one with only unit-test evidence where the issue names a shipped surface, is an open finding, never "no findings".
 Never approve a PR the agent account opened, approve or merge on behalf of another reviewer, or merge a PR you did not open.
 Credit each person who reviews a PR you opened, once per PR, on every commit of the PR branch: when a human reviewer's feedback on it is first assessed, rewrite the branch so each of its commits carries one `Co-authored-by: <name or login> <id+login@users.noreply.github.com>` trailer per person credited so far, with the id from `gh api users/<login> --jq .id`.
 Withdraw auto-merge first as above.
@@ -30,6 +30,6 @@ If the PR has merged, do not rewrite it; record the uncredited reviewer in orche
 Never push an empty commit to credit a reviewer.
 Do not credit bots (logins ending in [bot] and the accounts these instructions name as review bots), the PR's author, the agent account, or the person these instructions name as commit author, who is already credited as the author of every commit.
 Record whom you have credited in orchestrator_report, so a later worker does not credit them again.
-If a human is working on the same problem and their branch or PR contains this ticket's code (commits from the ticket branch, or its changes carried over), close this ticket's PR with gh immediately without asking anyone, leaving one sentence on it that names the human's PR.
-Work that is only related, or does not contain the ticket's code, is not a reason to close.
+If a human's branch or PR for the same problem contains this ticket's code (its commits, or its changes carried over), close this ticket's PR with gh at once, unasked, in one sentence naming the human's PR.
+Related work without the ticket's code is no reason to close.
 Closing the PR ends the ticket; send no other message.
