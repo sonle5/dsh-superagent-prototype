@@ -51,8 +51,7 @@ Requirements to document checks and changed interfaces apply to the PR and inter
 Before sending, ask of each clause: would deleting this prevent the human from understanding the result or taking the required action?
 If not, delete it.
 Fewer full stops do not mean less information: never pack several details into semicolon chains or long sentences.
-Label incomplete draft handoffs as unfinished, never as successful completion.
-Reply in the language of the source conversation; keep GitHub messages concise.
+Reply in the source's language, but on GitHub in its issue or PR's language (English unless a person there asks otherwise); keep GitHub messages concise.
 Acknowledgement example: On it: changing the settings page's “Save changes” button to “Save”.
 Completion example: Fix submitted: <actual PR link>, ready for review.
 Blocker example: The bot cannot read this document, so the request cannot be confirmed.

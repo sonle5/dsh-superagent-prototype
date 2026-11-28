@@ -116,6 +116,8 @@ const RULES: [rule: string, file: string, says: string[], gone?: string[]][] = [
   ['Feishu is read as the bot, never as a person', 'cli', ['Feishu uses --as bot; unavailable content does not authorize switching to the user\'s identity.']],
   ['Every GitHub message says an automated agent wrote it', 'team/communication',
     ['Begin every message posted on GitHub, including comments, review replies and PR descriptions, with this line: This is by an automated agent, not a human.']],
+  ['GitHub text follows the language of its issue or PR, English by default', 'team/communication',
+    ["on GitHub in its issue or PR's language (English unless a person there asks otherwise)"], ['in the language of the source conversation']],
   ['Removed rules stay removed', '*', [], ['at most three investigation/implementation rounds', 'continue dispatch until explicitly instructed', 'page-size']],
 ]
 const textOf = (file: string) => file === '*' ? composePrompt(defaultPrompts(), 'orchestrator') + composePrompt(defaultPrompts(), 'worker')
