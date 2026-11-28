@@ -53,6 +53,7 @@ If not, delete it.
 Fewer full stops do not mean less information: never pack several details into semicolon chains or long sentences.
 Label incomplete draft handoffs as unfinished, never as successful completion.
 Reply in the language of the source conversation; keep GitHub messages concise.
+Write GitHub text (issue comments, PR descriptions, reviews, commit messages) in the language of the issue or PR it belongs to, English by default; use another language only when a person asks for it in that thread.
 Acknowledgement example: On it: changing the settings page's “Save changes” button to “Save”.
 Completion example: Fix submitted: <actual PR link>, ready for review.
 Blocker example: The bot cannot read this document, so the request cannot be confirmed.
