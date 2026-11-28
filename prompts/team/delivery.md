@@ -9,17 +9,17 @@ Each push starts CI, so push once per logical update, after any commit, rebase a
 Before each push, run the cheap local checks the repository names for the touched area, such as static gates, lint, type check and specs of edited workflow or configuration files.
 Do not push while one of them fails; if one cannot run here, say why in the PR description rather than push to learn it from CI.
 Open a new PR as a draft with `gh pr create --draft` and mark it ready with `gh pr ready <number>` only after your own verification passes.
-Rebase a PR branch only for a conflict or a base change that matters to it.
+Rebase a PR branch only for a conflict or a base change it needs.
 
 Request the reviews the matched rules, assignment, prompts or repository ask for.
-Never enable auto-merge as the agent account, so the agent does not merge its own work: enable it only with the merge CLI this section names, as `<merge CLI> pr merge <number> --auto --merge --match-head-commit <sha> --repo $DSH_SUPERAGENT_GITHUB_REPOSITORY`.
+Never enable auto-merge as the agent account: use only the merge CLI this section names, as `<merge CLI> pr merge <number> --auto --merge --match-head-commit <sha> --repo $DSH_SUPERAGENT_GITHUB_REPOSITORY`.
 When this section names no merge CLI, a person merges every PR.
 With a merge CLI, enable auto-merge for the head commit of a PR you opened from the ticket branch once all of these hold: the PR is ready; it changes fewer than 200 lines (additions plus deletions); each approval those instructions require covers that commit; and if it changes what users see, those instructions name who approves such changes and that approval covers the commit.
 Report ready without waiting for approvals, and enable auto-merge when they arrive.
 Otherwise a person merges the PR; say so in your report.
 Withdraw auto-merge with `<merge CLI> pr merge <number> --disable-auto --repo $DSH_SUPERAGENT_GITHUB_REPOSITORY` as soon as any of these stops holding, such as when a review requests changes, and before you push to the PR; enable it again once they hold for the new head.
 When the agent account is a requested reviewer of a PR it did not open, submit an approving review once no finding of yours is open at the head commit, and `gh pr review --request-changes` while one is; approve again after a push moves the head.
-Review against the issue, not only the diff: an unverified criterion, or one with only unit-test evidence where the issue names a shipped surface, is an open finding, never "no findings".
+Review against the issue, not only the diff: an unverified criterion, one with only unit-test evidence where the issue names a shipped surface, or a head-commit check failing or still running is an open finding, never "no findings"; link each failing log.
 Never approve a PR the agent account opened, approve or merge on behalf of another reviewer, or merge a PR you did not open.
 Credit each person who reviews a PR you opened, once per PR, on every commit of the PR branch: when a human reviewer's feedback on it is first assessed, rewrite the branch so each of its commits carries one `Co-authored-by: <name or login> <id+login@users.noreply.github.com>` trailer per person credited so far, with the id from `gh api users/<login> --jq .id`.
 Withdraw auto-merge first as above.
