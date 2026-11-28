@@ -120,14 +120,35 @@ export function resultRelay(ticket: Ticket, state: string, text: string, replyTo
     : undefined
   return { id: `report:${id}`, text: JSON.stringify(report), ...result ? { result } : {} }
 }
-/** A fallback result derived from the worker report when the orchestrator omits its final reply. */
+/** A progress line a command such as `git checkout` redraws, like `Updating files:  38% (8832/22949)`. */
+const PROGRESS = /^\s*[\w ]+:\s+\d{1,3}% \(\d+\/\d+\)/
+/** Most lines and characters a failure keeps in a person-facing message; the full text stays in `ticket/<id>/result`. */
+const FAILURE_LINES = 4, FAILURE_LINE_CHARS = 200
+/**
+ * Shortens failure output for a person-facing message: keeps the last redraw of each `\r`-overwritten line, drops progress
+ * lines, blank lines and repeated lines, and keeps the first lines and the last line (where commands print their error) of
+ * at most `FAILURE_LINES` lines of at most `FAILURE_LINE_CHARS` characters each.
+ */
+export function briefFailure(text: string): string {
+  const lines: string[] = []
+  for (const raw of text.split('\n')) {
+    const line = raw.split('\r').filter(part => part.trim()).at(-1)?.trimEnd() ?? ''
+    if (!line.trim() || PROGRESS.test(line) || lines.includes(line)) continue
+    lines.push(line.length > FAILURE_LINE_CHARS ? `${line.slice(0, FAILURE_LINE_CHARS)}…` : line)
+  }
+  if (lines.length <= FAILURE_LINES) return lines.join('\n')
+  const head = lines.slice(0, FAILURE_LINES - 2)
+  return [...head, `… (${lines.length - head.length - 1} more lines)`, lines.at(-1)!].join('\n')
+}
+/** A fallback result derived from the worker report when the orchestrator omits its final reply; a failure is shortened by `briefFailure`. */
 export function fallbackResultText(result: Pick<ResultSettlement, 'state' | 'summary'>, source?: string): string {
   const lead = result.state === 'ready' ? 'Completed.'
     : result.state === 'blocked' ? 'Needs attention:'
       : result.state === 'failed' ? 'Could not complete:' : 'Work stopped:'
+  const text = result.state === 'failed' ? briefFailure(result.summary) : result.summary
   const summary = source === 'feishu'
-    ? fitWords(result.summary, Math.max(1, IM_WORDS - wordCount(lead)))
-    : result.summary
+    ? fitWords(text, Math.max(1, IM_WORDS - wordCount(lead)))
+    : text
   return `${lead} ${summary}`
 }
 /**

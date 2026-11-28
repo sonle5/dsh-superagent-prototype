@@ -126,14 +126,18 @@ When an Executor Session reports `blocked` or `failed`, or fails to start or err
 A passing failure of the model provider or the network, an HTTP 408, 429 or 5xx, a refused, reset or timed-out connection, or the normalized
 `TIMEOUT`, `TRANSPORT`, `SERVER`, `RATE_LIMIT` or `EMPTY_RESPONSE` code, is tried again first, three times with a growing backoff: a launch
 runs again, and a worker whose turn failed is told to go on. A turn that exhausts its output-token ceiling follows the same continuation
-policy, up to the same three retries. A failed prepare command is not tried again.
+policy, up to the same three retries. A failed prepare command, such as one that ran out of disk space, clears the Ticket directory and runs again after 5 seconds, doubling up to 5 minutes, up to `executor.prepareRetries` times (20 by default, 0 to 100); a run that could not clear the directory is not tried again.
 
 Once failed, CI and bot messages are recorded on it, but they are not delivered and do not wake the Session.
 
 Its tools stay available, so a person can continue in the Session directly.
 
-A launch that failed is not tried again on its own. A failed Ticket retains the provider and model route, the failed stage, the Executor
+Apart from those retries, a launch that failed is not tried again on its own. A failed Ticket retains the provider and model route, the failed stage, the Executor
 attempt and the provider retry count, so the panel can distinguish a provider outage from work that needs a different decision.
+
+A message to people about a failure keeps at most four lines of it: progress lines that commands such as `git checkout` redraw are dropped, and the full text stays in the Ticket's result.
+
+An Assignment whose Executor Session stopped without handing off, with no Report, only `progress` Reports, or no Report since its last delivered Input, no open question for a person and no waiting Input, fails its Ticket `executor.silenceMinutes` after its launch or the last such look (60 by default, 0 to 1440; 0 turns the check off), and its people hear of the failure. The check runs in the service process, so it waits while the service is down; a restart launches the Assignment again and starts the check over.
 
 A person's message, a later Report that is neither `blocked` nor `failed`, or a retry ends the hold.
 
@@ -162,7 +166,7 @@ A retry or a restart gives the new Assignment again the messages delivered to th
 
 What dsh-superagent does after a decision, such as relaying a candidate, a follow-up or a report to the main Session, launching an Assignment or delivering an Input, is stored first and done afterwards.
 
-A relay or a delivery that fails, such as when its Session cannot be reached, is retried after 2 seconds, then after a delay that doubles up to a minute; a launch that fails fails its Ticket, unless the failure was a passing one, as above.
+A relay or a delivery that fails, such as when its Session cannot be reached, is retried after 2 seconds, then after a delay that doubles up to a minute; a launch that fails fails its Ticket, unless the failure was a passing one or a failed prepare command, as above.
 
 Each kind of work reports an error among the overview's system problems only after one item failed three times in a row; a failed Input delivery shows on its Ticket instead.
 

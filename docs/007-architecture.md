@@ -173,7 +173,7 @@ Failures retry with exponential backoff. Throwing `Later` defers work without co
 | Kind | Handler | Does | At once | Retry |
 | --- | --- | --- | --- | --- |
 | `assessment` | MasterAssessor | Steers an Eval's candidate card into the main Session's turn, then tells the Engine it was delivered, which starts the Eval's deadline | 4, none while paused | 2 s doubling to 60 s |
-| `launch` | DshExecutor | Launches a pending Assignment: prepare command, Executor Session, assignment message | The free worker slots, none while paused | A passing failure of the model provider or the network runs again after 5 s doubling to 300 s, three times; any other failure, and a failed prepare command, fails its Ticket. One held by a pause or by full worker slots tries again after 5 s |
+| `launch` | DshExecutor | Launches a pending Assignment: prepare command, Executor Session, assignment message | The free worker slots, none while paused | A passing failure of the model provider or the network runs again after 5 s doubling to 300 s, three times; a failed prepare command that cleared its directory runs again on the same backoff up to `executor.prepareRetries` times; any other failure fails its Ticket. One held by a pause or by full worker slots tries again after 5 s |
 | `delivery` | DshExecutor | Hands a Ticket's waiting Inputs to its running Assignment, in order | 4, none while paused | 2 s doubling to 60 s; one that waits for a worker slot tries again after 2 s |
 | `relay` | Sessions | Steers a worker's report or question, or a person's follow-up, into the main Session's turn | 1, in queue order | 2 s doubling to 60 s |
 | `notice` | Sessions | Injects a notice into the main Session without waking it | 1, in queue order | 2 s doubling to 60 s |
@@ -202,6 +202,8 @@ That context supplies deployment and commands, setup readiness (`ready`, `config
 `prepare(ticket, outcome)` supplies the Engine's `prepareTicket` hook: short name, directory and `ticketExecution` assignment text. `workerSessionId(ticket.id)` derives the Session id.
 
 `WorkerSlots` reserves capacity before a launch or a delivery that wakes an idle worker. A human message can use one slot beyond `maxWorkers`, and wakes have priority over launches. `activeCount` supplies panel load.
+
+Each launch arms an in-process check that runs every `executor.silenceMinutes`: when the Assignment is still the running one, its Session is not running, and it has no handing-off Report, no open question and no waiting Input, the check records a `failed` Report, which relays the failure and its fallback result. Failure text in relays and fallback results passes through `briefFailure` (`src/app/notices.ts`).
 
 Transient provider and network failures get three retries. Launches use effect backoff; failed turns receive continuation messages after 15, 30 and 60 seconds. Normalized `TIMEOUT`, `TRANSPORT`, `SERVER`, `RATE_LIMIT` and `EMPTY_RESPONSE` failures use the same path, as does a turn that reaches its output-token ceiling. The final failed Report retains the provider route, model, failure stage, Executor attempt and provider retry count for the panel. `inputMessage` renders each Input from current Ticket state, and `mandateInstructions` adds the matched-rule limits for inferred work.
 

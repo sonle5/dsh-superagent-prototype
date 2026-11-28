@@ -77,9 +77,11 @@ export function ExecutionSettings() {
   const { blocks, environment, sources } = useSettings().settings
   // Keep raw user text (such as separators between blocked commands) in the draft and parse only on save.
   const executor = blocks.executor.value
-  const saved = { ...executor, maxWorkers: String(executor.maxWorkers), blockedCommands: executor.blockedCommands.join(' ') }
+  const saved = { ...executor, maxWorkers: String(executor.maxWorkers), prepareRetries: String(executor.prepareRetries),
+    silenceMinutes: String(executor.silenceMinutes), blockedCommands: executor.blockedCommands.join(' ') }
   const draft = useBlockDraft('executor', saved, blocks.executor.revision,
-    value => ({ ...value, maxWorkers: numberOf(value.maxWorkers), blockedCommands: value.blockedCommands.split(/[\s,]+/).filter(Boolean) }))
+    value => ({ ...value, maxWorkers: numberOf(value.maxWorkers), prepareRetries: numberOf(value.prepareRetries),
+      silenceMinutes: numberOf(value.silenceMinutes), blockedCommands: value.blockedCommands.split(/[\s,]+/).filter(Boolean) }))
   const value = draft.value
   const edit = (next: Partial<typeof value>) => draft.edit({ ...value, ...next })
   const prepare = useRef<HTMLTextAreaElement>(null)
@@ -100,6 +102,10 @@ export function ExecutionSettings() {
             <Input type="number" min={LIMITS.maxWorkers.min} max={LIMITS.maxWorkers.max} required value={value.maxWorkers}
               onChange={event => edit({ maxWorkers: event.target.value })} />
           </Field>
+          <Field label={t('silenceMinutes')} hint={t('silenceMinutesHint')}>
+            <Input type="number" min={LIMITS.silenceMinutes.min} max={LIMITS.silenceMinutes.max} required value={value.silenceMinutes}
+              onChange={event => edit({ silenceMinutes: event.target.value })} />
+          </Field>
         </div>
         <div className="dt-form dt-block">
           <h2 className="dt-block-title">{t('term.environment')}<InfoTip text={t('environmentIntro')} /></h2>
@@ -112,6 +118,10 @@ export function ExecutionSettings() {
             <textarea ref={prepare} className="dt-textarea dt-mono" rows={3} maxLength={LIMITS.prepareCommand} spellCheck={false}
               placeholder={t('prepareCommandEmpty')} value={value.prepare}
               onChange={event => edit({ prepare: event.target.value })} />
+          </Field>
+          <Field label={t('prepareRetries')} hint={t('prepareRetriesHint')}>
+            <Input type="number" min={LIMITS.prepareRetries.min} max={LIMITS.prepareRetries.max} required value={value.prepareRetries}
+              onChange={event => edit({ prepareRetries: event.target.value })} />
           </Field>
           <EnvironmentVariables groups={environment.variables} sources={sources} onPick={insert} />
           <Field label={t('blockedCommands')} hint={t('blockedCommandsHint')}>

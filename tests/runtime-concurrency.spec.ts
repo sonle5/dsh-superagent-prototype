@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { latestAssignment, waitsForPerson, type Ticket, type Trigger } from '../src/core/index.ts'
 import { Later } from '../src/app/effects.ts'
-import { fallbackResultText, reportRelay } from '../src/app/notices.ts'
+import { briefFailure, fallbackResultText, reportRelay } from '../src/app/notices.ts'
 import { WorkerSlots, inputMessage, mandateInstructions, ticketExecution, transient, triggerMessage } from '../src/executor/dsh.ts'
 import { SettingsSchema } from '../src/policy.ts'
 import { Commands } from '../src/infra/commands.ts'
@@ -1092,5 +1092,16 @@ describe('the Executor\'s parts', () => {
     expect(wordCount(fallbackResultText({ state: 'failed', summary: longest }, 'feishu'))).toBeLessThanOrEqual(IM_WORDS)
     const markdown = `## Verification\n\n- ${longest}\n\nFINAL_SENTINEL`
     expect(fallbackResultText({ state: 'ready', summary: markdown }, 'github')).toBe(`Completed. ${markdown}`)
+    // A failed prepare command's output, as sonle5/deepseek-harness#31 posted it, becomes a few lines without its progress redraws.
+    const progress = Array.from({ length: 60 }, (_, index) => `Updating files:  ${index + 30}% (${index * 300}/22949)`).join('\r')
+    const errors = Array.from({ length: 40 }, (_, index) => `error: unable to create file scripts/file-${index}.ts: No space left on device`)
+    const output = `Error: The prepare command failed: Preparing worktree (detached HEAD 4b399c39a6)\n${progress}\r${errors.join('\n')}\n`
+      + 'fatal: cannot create directory at \'scripts/snapshots\': No space left on device'
+    const posted = fallbackResultText({ state: 'failed', summary: output }, 'github')
+    expect(posted.split('\n').length).toBeLessThanOrEqual(4)
+    expect(posted).not.toContain('Updating files')
+    expect(posted).toContain('Could not complete: Error: The prepare command failed: Preparing worktree')
+    expect(posted).toMatch(/fatal: cannot create directory at 'scripts\/snapshots': No space left on device$/)
+    expect(briefFailure('one\ntwo')).toBe('one\ntwo')
   })
 })

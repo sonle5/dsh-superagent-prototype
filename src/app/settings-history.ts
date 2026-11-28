@@ -9,7 +9,7 @@ type SourceSettings = SettingsVersion['settings']['sources'][string]
 export type SettingsChangeCode = 'ruleAdded' | 'ruleRenamed' | 'ruleInstruction' | 'ruleEnabled' | 'ruleDisabled' | 'ruleRemoved'
   | 'sourceEnabled' | 'sourceDisabled' | 'sourceField' | 'sourceRowsAdded' | 'sourceRowsRemoved' | 'sourceRowsChanged' | 'sourceAdmission'
   | 'mode' | 'timeout' | 'evalModel' | 'executorModel' | 'maxWorkers' | 'paused' | 'resumed' | 'executionDirectory' | 'prepareCommand'
-  | 'blockedCommands'
+  | 'prepareRetries' | 'silenceMinutes' | 'blockedCommands'
 /** A single settings diff entry rendered by the panel using `change.<code>` and field labels from the Source listing. */
 export interface SettingsChange {
   code: SettingsChangeCode; items?: string[]; from?: string | number | boolean; to?: string | number | boolean; name?: string; source?: string
@@ -70,6 +70,8 @@ function settingsChanges(before: SettingsVersion['settings'], after: SettingsVer
   if (before.paused !== after.paused) changes.push({ code: after.paused ? 'paused' : 'resumed' })
   if (before.executor.directory !== after.executor.directory) changes.push({ code: 'executionDirectory', from: before.executor.directory, to: after.executor.directory })
   if (before.executor.prepare !== after.executor.prepare) changes.push({ code: 'prepareCommand' })
+  if (before.executor.prepareRetries !== after.executor.prepareRetries) changes.push({ code: 'prepareRetries', from: before.executor.prepareRetries, to: after.executor.prepareRetries })
+  if (before.executor.silenceMinutes !== after.executor.silenceMinutes) changes.push({ code: 'silenceMinutes', from: before.executor.silenceMinutes, to: after.executor.silenceMinutes })
   if (!same(before.executor.blockedCommands, after.executor.blockedCommands)) changes.push({ code: 'blockedCommands', from: before.executor.blockedCommands.join(' '), to: after.executor.blockedCommands.join(' ') })
   for (const id of new Set([...Object.keys(before.sources), ...Object.keys(after.sources)])) changes.push(...sourceChanges(id, before.sources[id], after.sources[id], sources))
   return changes
